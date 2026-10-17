@@ -170,8 +170,8 @@ Initial silent command lists now execute their output DMA and send their own
 `0xDCD10002` completion mail/IRQ. The original CPU handler responds with
 `0xCDD10003`; the task's scheduler-control dispatch returns to word `0x4A` to wait
 for another list, rather than halting or synthesizing completion. The deterministic
-disc fixture verifies 20 lists, 607 data transfers/182684 bytes, 70/70 CPU mails,
-23/23 DSP mails and 21 task IRQs (including task initialization). Production Windows
+disc fixture verifies 93 lists, 2943 data transfers/891660 bytes, 289/289 CPU mails,
+96/96 DSP mails and 94 task IRQs (including task initialization). Production Windows
 counts vary with host time. This does not implement general voice mixing, multiply/
 accumulate or ADPCM; initial output buffers remain silent.
 
@@ -214,7 +214,8 @@ The original audio effect callback now runs through raw-low-word `stfiwx` stores
 The first game-system initialization returns to main at `0x8000AA6C`, followed by
 eleven original startup objects and a real DVD resource read. The original loop
 enters at `0x8000AC34`; preparation returns through `0x8000AC64` before the
-unbound SystemTask transition at `0x8017755C`, called with LR `0x8000AC74`.
+SystemTask transition at `0x8017755C`. It now loads and links the original scene REL,
+then stops at the unbound relocated prolog `0x803A4A8C`, LR `0x80177C88`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -386,11 +387,11 @@ A measured runner execution returns from the first game-system initialization
 and, with `--max-blocks 10000000`, executes eleven post-system-init constructors
 and a real 128-byte resource read. Its original main loop enters the first iteration;
 reset dispatch, update-mask calculation and resource/audio preparation return.
-It reaches `PC=0x8017755C`, LR `0x8000AC74`, the unbound SystemTask transition;
+SystemTask now loads and links `wlp1.rel` through the original SDK `OSLink`.
+It reaches `PC=0x803A4A8C`, LR `0x80177C88`, the unbound relocated module prolog;
 DSP PC `0x4A` waits for the next list.
-The default one-million-block limit can expire earlier. One measured Windows run
-submits 3840 actual RAM frames at 32028 Hz and completes 23 DMA periods.
-These steady-clock counts depend on
+The default one-million-block limit can expire earlier.
+Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
 host elapsed time. Host timing can also expose other untranslated startup paths.
 No mixed or audible
 game audio, renderer, scanout or complete main-loop iteration is claimed.
@@ -408,15 +409,15 @@ of its stack, SDA and nonvolatile integer/floating registers. Traced and untrace
 startup produce identical RAM, CPU state, AI/DSP/ARAM state, output and sampled time; damaged
 constructor words fail integrity validation without claiming later milestones.
 The separate deterministic PCM fixture uses 8 ticks while either AI sampling or PCM
-DMA is active. 20 actual timed DMA periods execute 20 original handlers/
-callbacks and 20 complete DSP lists. It reaches the same SystemTask boundary
-with 3360 submitted silent frames, 70 CPU mail words sent/consumed, 23 DSP mails
-sent/consumed and 21 task IRQs. The task is still running/waiting, not a completed
+DMA is active. 93 actual timed DMA periods execute 93 original handlers/
+callbacks and 93 complete DSP lists. It reaches the relocated scene prolog
+with 15040 submitted silent frames, 289 CPU mail words sent/consumed, 96 DSP mails
+sent/consumed and 94 task IRQs. The task is still running/waiting, not a completed
 program; no active or suspended CPU interrupt remains. Observed and unobserved executions
 match RAM/CPU state, DSP DRAM/registers, clock samples, DMA phase/counts and
-interrupt/DSP steps. 607 DSP data DMAs transfer 182684 bytes; all 18 words of the
+interrupt/DSP steps. 2943 DSP data DMAs transfer 891660 bytes; all 18 words of the
 last command list match the actual CPU RAM source. The original CPU submission
-handshake completes 20 times, and game-system initialization returns to main.
+handshake completes 93 times, and game-system initialization returns to main.
 Eleven subsequent original object constructors return in the actual main-call order.
 Tests verify the camera's actual vtable pointers and signed projection bounds for
 the 640x448 screen. The resource read uses the original 13-status eligibility table,
@@ -433,11 +434,19 @@ Corrupt late constructor code is rejected before reporting any loop entry.
 No complete loop iteration, GX renderer, general scheduled game-thread execution,
 connected input or saves have been verified.
 
-The next connected milestone is the original SystemTask transition at
-`0x8017755C` and its dependencies toward completing the first loop iteration.
-Unrestricted traversal from this transition exceeds the existing 100000-instruction
-discovery bound; keep that bound and scope the next compilation to actual paths
-and original indirect targets rather than compiling the entire game graph.
+The original SystemTask update and transition are compiled from bounded original
+ranges, keeping the 100000-instruction recursive discovery limit. Mode 41 requests
+`wlp1.rel`; two genuine reads total 433440 bytes (128 initial resource bytes and
+433312 aligned scene bytes). Original SDK `OSLink` executes, publishes the module
+list, relocates sections and entrypoints and clears its separately allocated BSS.
+Tests inspect all 15170 relocation records: DOL/self imports resolve to the actual
+addresses, while imports from not-yet-loaded modules retain their original bytes.
+OSLink success does not mean those other modules have been loaded.
+Corrupt original OSLink code is rejected before the linked-module milestone.
+The next connected milestone is binding the statically translated `wlp1.rel`
+prolog to its runtime allocation, then executing original module initialization.
+Neither the prolog nor scene code has executed yet. No runtime PPC decoder or
+replacement linker is involved in the original startup path.
 General voice processing/
 ADPCM remains an audio dependency, not a reason to substitute a replacement mixer.
 The native loader, task startup, initial command output/completion and Windows PCM
@@ -597,7 +606,7 @@ complete original task IRAM bytes and guards, host/DSP mailbox counts, actual
 task interrupt and CPU callback, running/waiting versus completed program state,
 and corrupt-task rejection before IRAM upload or init callback,
 original PCM start/remaining/reload/handler/buffer callback, real DSP header/pointer
-consumption, exact command-list copy, 607 data DMAs, 20 original list completions,
+consumption, exact command-list copy, 2943 data DMAs, 93 original list completions,
 all-silent submitted samples, system-initialization return and next-constructor
 dependency, system-call/nested-interrupt returns and complete observed/unobserved
 PCM-path equivalence using an explicitly test-only output sink,

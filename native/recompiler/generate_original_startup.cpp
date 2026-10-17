@@ -104,7 +104,8 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
                             0x80175530u, 0x80175548u, 0x800154a0u, 0x80148f78u,
                             0x80149178u, 0x8014919cu, 0x8017617cu, 0x8017767cu,
                             0x80176754u, 0x801766c0u, 0x8000cca4u, 0x80012568u,
-                            0x8017bd04u, 0x8017d3e8u, 0x8019b560u}) {
+                            0x8017bd04u, 0x8017d3e8u, 0x8019b560u,
+                            0x800126ecu, 0x800126fcu, 0x8017a398u, 0x801b4860u}) {
         leaders.insert(target);
         pending.push_back(target);
     }

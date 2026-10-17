@@ -73,13 +73,16 @@ Bounded nested external interrupts let DSP completion interrupt the original aud
 handler and restore both contexts. The first game-system initialization now returns
 to main. Eleven subsequent original startup objects now return, and an actual
 128-byte resource read completes through original SDK/game DVD callbacks.
-With `--max-blocks 10000000`, the measured Windows runner boundary is the next
-unbound SystemTask transition at `PC=0x8017755C`, LR `0x8000AC74`; DSP PC `0x4A` waits for another list.
+Original SystemTask now loads `wlp1.rel` and original `OSLink` returns success.
+With `--max-blocks 10000000`, the measured Windows runner reaches its relocated
+unbound prolog at `PC=0x803A4A8C`, LR `0x80177C88`; DSP PC `0x4A` waits for another list.
 The original main loop enters its first iteration and its reset/update/resource/
 audio preparation returns, but no complete iteration or rendered frame is verified.
 The default one-million-block limit can expire earlier.
-A deterministic disc fixture completes 20 lists, 607 data DMAs/182684 bytes and
-20 original PCM callbacks. Real Windows timing changes these totals.
+A deterministic disc fixture verifies all 15170 relocation records, section addresses,
+BSS clearing and deferred imports; two DVD reads transfer 433440 bytes. It completes
+93 lists, 2943 DSP data DMAs/891660 bytes and 93 original PCM callbacks.
+Real Windows timing changes these totals.
 General voice mixing/ADPCM remains untranslated. The original PCM buffers contain
 zero samples; Windows buffer acceptance is not proof of audible game audio.
 Callers without a PCM backend still fail explicitly at original AIStartDMA.
@@ -715,6 +718,16 @@ queue. Full runtime scheduling and device services are still needed.
   This is first-iteration preparation, not a completed iteration, scene or game frame.
   Keep discovery bounded: compiling the entire SystemTask transition graph currently
   exceeds the existing 100000-instruction safety bound and needs a scoped approach.
+- [x] Execute original SystemTask scene loading and original SDK OSLink.
+  Use bounded SystemTask ranges instead of unbounded recursive scene discovery.
+  Verify both real DVD reads, the actual module/BSS allocations, module-list
+  registration, all 15170 relocation records and the relocated prolog address.
+  Imports from unloaded modules remain untouched as in the SDK. Corrupt OSLink
+  code must stop without reporting a linked module. Observed/unobserved execution
+  remains equivalent; all eleven regressions pass. The actual Windows PCM runner
+  reaches `wlp1.rel` prolog `0x803A4A8C`, LR `0x80177C88`, then stops explicitly
+  because no native translation is registered there. No module initialization,
+  completed loop iteration, intro or rendered frame is claimed.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -927,10 +940,10 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue the original SystemTask transition at `0x8017755C` and its connected
-   dependencies toward a completed first main-loop iteration and initial scene.
-   Eleven post-system-init objects and a real resource read now complete, and
-   first-loop preparation returns. Scope discovery to the actual transition and
+1. Bind the genuinely loaded/relocated `wlp1.rel` prolog at its runtime allocation
+   and execute its initialization toward the first scene and completed main-loop iteration.
+   Eleven post-system-init objects, first-loop preparation and original SystemTask
+   DVD load/OSLink now complete. Scope discovery to the actual transition and
    indirect targets instead of lifting the existing compiler safety bound. The first
    game-system initialization now returns to main in the Windows runner; original
    DSP lists reach their own output/completion and resume waiting for new work.

@@ -1,4 +1,5 @@
 #include "original_startup.h"
+#include "rel_image.h"
 #include "native_console.h"
 #include "native_exi_bus.h"
 #include "native_si_bus.h"
@@ -18,6 +19,73 @@ namespace {
 
 void Require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+uint32_t VerifyOriginalSceneLink(const PpcState& state, const std::vector<uint8_t>& bytes,
+                                 uint32_t module, uint32_t bss) {
+    const auto image = RelImage::Parse(bytes);
+    Require(image.id() == 2 && image.relocations().size() == 15170,
+            "SystemTask did not load the expected original wlp1 REL.");
+    const auto table = ppc_read_u32(state, module + 0x10);
+    Require(table == module + 0x4c && ppc_read_u32(state, 0x800030c8u) == module &&
+                ppc_read_u32(state, 0x800030ccu) == module,
+            "Original OSLink did not publish the relocated module table/list.");
+    std::vector<uint32_t> sections;
+    for (size_t i = 0; i < image.sections().size(); ++i) {
+        const auto& section = image.sections()[i];
+        const uint32_t address = ppc_read_u32(state, table + static_cast<uint32_t>(i) * 8) & ~1u;
+        Require(address == (section.size == 0 ? 0u :
+                    section.fileOffset == 0 ? bss : module + section.fileOffset),
+                "Original OSLink did not relocate a section to its actual allocation.");
+        sections.push_back(address);
+        if (section.size && section.fileOffset == 0) {
+            const auto offset = ppc_memory_offset(state, address, section.size);
+            Require(std::all_of(state.memory.begin() + offset,
+                               state.memory.begin() + offset + section.size,
+                               [](uint8_t value) { return value == 0; }),
+                    "Original OSLink did not clear the allocated REL BSS.");
+        }
+    }
+    for (const auto& fixup : image.relocations()) {
+        if (fixup.importId != 0 && fixup.importId != image.id()) {
+            const auto source = image.sections().at(fixup.patchSection).fileOffset + fixup.patchOffset;
+            const auto patch = sections.at(fixup.patchSection) + fixup.patchOffset;
+            const auto width = (fixup.type == 4 || fixup.type == 6) ? 2u : 4u;
+            for (unsigned i = 0; i < width; ++i) {
+                Require(ppc_read_u8(state, patch + i) == bytes.at(source + i),
+                        "Original OSLink modified an import whose module is not loaded.");
+            }
+            continue;
+        }
+        const uint32_t target = fixup.addend +
+            (fixup.importId ? sections.at(fixup.targetSection) : 0u);
+        const uint32_t patch = sections.at(fixup.patchSection) + fixup.patchOffset;
+        if (fixup.type == 1) {
+            Require(ppc_read_u32(state, patch) == target, "Original OSLink ADDR32 mismatch.");
+        } else if (fixup.type == 4 || fixup.type == 6) {
+            const uint32_t expected = fixup.type == 4 ? target & 0xffffu :
+                ((target >> 16) + ((target & 0x8000u) != 0 ? 1u : 0u)) & 0xffffu;
+            Require(ppc_read_u16(state, patch) == expected, "Original OSLink LO/HA mismatch.");
+        } else if (fixup.type == 10) {
+            const auto word = ppc_read_u32(state, patch);
+            const auto bits = word & 0x03fffffcu;
+            const int64_t displacement = bits < 0x02000000u ? int64_t{bits} :
+                int64_t{bits} - 0x04000000ll;
+            const auto source = image.sections().at(fixup.patchSection).fileOffset + fixup.patchOffset;
+            const uint32_t original = (uint32_t(bytes.at(source)) << 24) |
+                (uint32_t(bytes.at(source + 1)) << 16) |
+                (uint32_t(bytes.at(source + 2)) << 8) | bytes.at(source + 3);
+            Require(static_cast<int64_t>(patch) + displacement == target &&
+                        (word & 0xfc000003u) == (original & 0xfc000003u),
+                    "Original OSLink REL24 target or instruction flags mismatch.");
+        } else {
+            throw std::runtime_error("Unexpected original scene relocation type.");
+        }
+    }
+    const uint32_t prolog = sections.at(image.entrySections()[0]) + image.entryOffsets()[0];
+    Require(ppc_read_u32(state, module + 0x34) == prolog,
+            "Original OSLink did not relocate the module prolog.");
+    return prolog;
 }
 
 template <typename Function>
@@ -1073,6 +1141,8 @@ int main(int argc, char** argv) {
                 uint64_t resourceBytes = 0;
                 uint32_t pendingReadAddress = 0;
                 std::vector<uint8_t> pendingRead;
+                std::vector<uint8_t> sceneBytes;
+                uint32_t sceneModule = 0, sceneBss = 0, sceneProlog = 0;
                 const auto transfer = pcmState.transferDisc;
                 pcmState.transferDisc = [&](const std::array<uint32_t, 3>& command, uint32_t length) {
                     auto bytes = transfer(command, length);
@@ -1083,6 +1153,7 @@ int main(int argc, char** argv) {
                         pendingRead = bytes;
                         pendingReadAddress = pcmState.discInterface->dmaAddress;
                         ++resourceReads;
+                        if (resourceReads == 2) sceneBytes = bytes;
                         resourceBytes += length;
                     }
                     return bytes;
@@ -1102,6 +1173,16 @@ int main(int argc, char** argv) {
                 };
                 bindPcmTest(pcmState, pcmTicks, submittedFrames);
                 const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 10000000, 128, [&](uint32_t pc) {
+                    if (pc == 0x801b4860u) {
+                        sceneModule = pcmState.gpr[3];
+                        sceneBss = pcmState.gpr[4];
+                        Require(sceneModule && sceneBss && sceneBytes.size() == 433312,
+                                "Original scene link did not receive its loaded image and BSS.");
+                    }
+                    if (pc == 0x80177c6cu) {
+                        Require(pcmState.gpr[3] == 1, "Original OSLink rejected the scene module.");
+                        sceneProlog = VerifyOriginalSceneLink(pcmState, sceneBytes, sceneModule, sceneBss);
+                    }
                     if (!pendingRead.empty()) {
                         const auto offset = ppc_memory_offset(pcmState, pendingReadAddress, pendingRead.size());
                         Require(std::equal(pendingRead.begin(), pendingRead.end(), pcmState.memory.begin() + offset),
@@ -1147,33 +1228,33 @@ int main(int argc, char** argv) {
                           << " reads=" << resourceReads << "/" << resourceBytes
                           << " file callbacks=" << fileCallbacks << "/" << readNotifications << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            pcmResult.pc == 0x8017755c && pcmResult.lr == 0x8000ac74 &&
-                            pcmResult.reason == "No native translation registered at 0x8017755C." &&
+                            sceneProlog != 0 && pcmResult.pc == sceneProlog && pcmResult.lr == 0x80177c88 &&
+                            pcmResult.sceneModuleLinked &&
                             pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
                             pcmResult.gameInitializationReturned && pcmResult.gameLoopEntered &&
                             pcmResult.firstLoopPreparationReturned &&
                             pcmState.pcm->active && pcmState.pcm->starts == 1 &&
-                            pcmState.pcm->completedBuffers == 20 && pcmState.pcm->submittedFrames == submittedFrames &&
-                            submittedFrames == 3360 && pcmHandlers == 20 && pcmCallbacks == 20 &&
-                            commandAddress != 0 && commandHandshakes == 20 &&
-                            pcmState.dspHardware->task->cpuMailSent == 70 &&
-                            pcmState.dspHardware->task->cpuMailConsumed == 70 &&
+                            pcmState.pcm->completedBuffers == 93 && pcmState.pcm->submittedFrames == submittedFrames &&
+                            submittedFrames == 15040 && pcmHandlers == 93 && pcmCallbacks == 93 &&
+                            commandAddress != 0 && commandHandshakes == 93 &&
+                            pcmState.dspHardware->task->cpuMailSent == 289 &&
+                            pcmState.dspHardware->task->cpuMailConsumed == 289 &&
                             !(pcmState.dspHardware->toDspMailbox & 0x80000000u) &&
-                            pcmState.dspHardware->task->dataTransfers == 607 &&
-                            pcmState.dspHardware->task->transferredBytes == 182684 &&
+                            pcmState.dspHardware->task->dataTransfers == 2943 &&
+                            pcmState.dspHardware->task->transferredBytes == 891660 &&
                             pcmState.dspHardware->instructionPc == 0x4a &&
-                            pcmState.dspHardware->task->interrupts == 21 &&
-                            pcmState.dspHardware->sentMail == 23 && pcmState.dspHardware->consumedMail == 23 &&
+                            pcmState.dspHardware->task->interrupts == 94 &&
+                            pcmState.dspHardware->sentMail == 96 && pcmState.dspHardware->consumedMail == 96 &&
                             pcmState.dspHardware->task->mode == NativeDspTaskMode::Running &&
                             pcmState.dspHardware->completedPrograms == 1 &&
                             !pcmState.systemCallActive && !pcmState.externalInterrupt->active &&
                             pcmState.externalInterrupt->suspended.empty(),
-                        "Original startup did not reach first-loop preparation and the SystemTask boundary.");
+                        "Original startup did not link the scene and reach its genuine prolog.");
                 Require(returnedObjects.size() == objectReturns.size() &&
                             loopSteps == loopReturns.size() && arrayConstructors == 2 &&
                             pcmResult.startupObjectsReturned == objectReturns.size() &&
                             pcmResult.resourceReadNotifications == readNotifications &&
-                            resourceReads == 1 && resourceBytes == 128 &&
+                            resourceReads == 2 && resourceBytes == 433440 &&
                             fileCallbacks == resourceReads && readNotifications == resourceReads && pendingRead.empty(),
                         "Original startup resource reads did not complete through the real DVD callback chain.");
                 const auto camera = returnedObjects.front();
@@ -1245,10 +1326,24 @@ int main(int argc, char** argv) {
                             !plainPcm.externalInterrupt->active && plainPcm.externalInterrupt->suspended.empty() &&
                             plainResult.gameInitializationReturned &&
                             plainResult.gameLoopEntered && plainResult.firstLoopPreparationReturned &&
+                            plainResult.sceneModuleLinked &&
                             plainResult.startupObjectsReturned == pcmResult.startupObjectsReturned &&
                             plainResult.resourceReadNotifications == pcmResult.resourceReadNotifications &&
                             plainPcm.discInterface->completedTransfers == pcmState.discInterface->completedTransfers,
                         "PCM observation changed CPU/RAM, DMA timing, original interrupts or native DSP execution.");
+                auto damagedLink = CreateOriginalStartupState(image);
+                InstallOriginalStartupDisc(damagedLink, disc);
+                damagedLink.pcm.emplace();
+                uint64_t linkTicks = 1000000, linkFrames = 0;
+                bindPcmTest(damagedLink, linkTicks, linkFrames);
+                ppc_write_u32(damagedLink, 0x801b4860u, 0);
+                const auto rejectedLink = RunOriginalStartup(dispatcher, damagedLink, 10000000);
+                Require(rejectedLink.stop == OriginalStartupStop::Dependency &&
+                            rejectedLink.pc == 0x801b4860u &&
+                            rejectedLink.reason.find("code mismatch") != std::string::npos &&
+                            rejectedLink.firstLoopPreparationReturned && !rejectedLink.sceneModuleLinked &&
+                            rejectedLink.resourceReadNotifications == 2,
+                        "Corrupt original OSLink fabricated scene-module link completion.");
                 auto damagedCamera = CreateOriginalStartupState(image);
                 InstallOriginalStartupDisc(damagedCamera, disc);
                 damagedCamera.pcm.emplace();

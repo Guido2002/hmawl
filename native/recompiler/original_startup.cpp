@@ -164,6 +164,7 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
                 pc == 0x8000abccu || pc == 0x8000ac04u) ++result.startupObjectsReturned;
             if (pc == 0x8000ac34u) result.gameLoopEntered = true;
             if (pc == 0x8000ac64u) result.firstLoopPreparationReturned = true;
+            if (pc == 0x80177c6cu && state.gpr[3] == 1) result.sceneModuleLinked = true;
             if (pc == 0x8017ad4cu && state.gpr[3] == 0) ++result.resourceReadNotifications;
             if (pc == 0x8000ad5cu) result.memoryInitialized = true;
             if (pc == 0x8017a3e0u) result.screenInitEntered = true;
@@ -230,6 +231,7 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.resourceReadNotifications) text << result.resourceReadNotifications << " original DVD resource-read notifications completed. ";
     if (result.gameLoopEntered) text << "Original main loop entered its first iteration. ";
     if (result.firstLoopPreparationReturned) text << "Original first-loop preparation returned before SystemTask transition. ";
+    if (result.sceneModuleLinked) text << "Original SystemTask loaded a scene REL and original OSLink returned success. ";
     text << "This is NOT a playable game boot; no complete game-loop iteration or rendered frame is verified.";
     return text.str();
 }

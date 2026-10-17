@@ -132,10 +132,13 @@ now executes eleven subsequent original object constructors, including the camer
 and a real 128-byte resource read through original SDK/game DVD completion callbacks.
 **The original main loop now enters its first iteration.** Reset dispatch, original
 update-mask calculation, resource-manager preparation and audio-update calls return.
-With `--max-blocks 10000000`, it stops with **exit code 3** at the first
-SystemTask transition, `PC=0x8017755C`, `LR=0x8000AC74`, which has no native binding yet.
+The original SystemTask transition now loads `wlp1.rel` and original `OSLink`
+relocates its sections, entries and available imports and clears its allocated BSS.
+With `--max-blocks 10000000`, it stops with **exit code 3** at the relocated
+module prolog, `PC=0x803A4A8C`, `LR=0x80177C88`, which has no native binding yet.
 The default one-million-block safety limit can expire before this milestone.
-A deterministic disc test completes 20 lists and 607 DSP data DMAs/182684 bytes.
+A deterministic disc test checks all 15170 relocation records (including deferred
+imports), two real reads totaling 433440 bytes, 93 lists and 2943 DSP data DMAs/891660 bytes.
 Windows timing changes these counts. Submitted PCM is still original zero samples,
 not intro music; general voice mixing/ADPCM remains unsupported.
 Device/queue errors fail explicitly;

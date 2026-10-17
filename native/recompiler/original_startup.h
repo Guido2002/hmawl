@@ -41,6 +41,7 @@ struct OriginalStartupResult {
     bool gameInitializationReturned = false;
     bool gameLoopEntered = false;
     bool firstLoopPreparationReturned = false;
+    bool sceneModuleLinked = false;
     uint32_t constructorsReturned = 0;
     uint32_t startupObjectsReturned = 0;
     uint32_t resourceReadNotifications = 0;
