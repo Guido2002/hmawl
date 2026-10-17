@@ -265,8 +265,8 @@ sets `AreWeInitialized`, calls the original `__OSGetSystemTime`, records
 reset wrappers, then executes original `PPCDisableSpeculation` and
 `PPCSetFpNonIEEEMode` to set HID0 SPD and FPSCR NI. The original boot-info
 and arena setup then runs through `OSSetArenaLo`/`OSSetArenaHi`, followed by
-original `OSExceptionInit` and `__OSInitSystemCall`. It stops at `0x801b0f64`,
-before `OSInitAlarm`;
+original `OSExceptionInit`, `__OSInitSystemCall` and `OSInitAlarm`. It stops at
+`0x801b0f68`, before `__OSModuleInit`;
 first-time `OSInit` does not yet return. Its
 already-initialized branch and return epilogue are tested separately, not used
 to skip the unfinished first-time path.
@@ -328,6 +328,15 @@ trailing data, call order/range arguments, repeated installation, both interrupt
 states and stack/register preservation. The entry-derived OSInit test checks
 this replacement after exception installation. Copying the vector does not
 enable system-call execution: `sc` and `rfi` remain explicitly rejected.
+
+Original `OSInitAlarm` initializes the alarm queue, installs the decrementer
+handler through original exception-table accessors, and registers its original
+reset node. Tests verify exact RAM changes, an existing reset-list entry,
+both interrupt states and idempotent re-entry without losing queued alarms.
+Original `OSRegisterResetFunction` is separately tested for empty/head/middle/
+tail insertion, stable equal priorities and unsigned maximum priority.
+This installs data and handler pointers only: alarm scheduling, decrementer
+interrupt delivery and execution of reset callbacks are not yet implemented.
 
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings

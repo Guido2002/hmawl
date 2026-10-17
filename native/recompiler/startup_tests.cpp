@@ -192,6 +192,9 @@ void RunHardwareDependency(uint32_t address, PpcState& state) {
     case 0x801b20ecu: ppc_801B20EC(state); break;
     case 0x801b11b8u: ppc_801B11B8(state); break;
     case 0x801b6988u: ppc_801B6988(state); break;
+    case 0x801b1618u: ppc_801B1618(state); break;
+    case 0x801b147cu: ppc_801B147C(state); break;
+    case 0x801b5550u: ppc_801B5550(state); break;
     case 0x801b1460u: ppc_801B1460(state); break;
     case 0x801d33c8u: ppc_801D33C8(state); break;
     case 0x801b2428u: ppc_801B2428(state); break;
@@ -850,6 +853,117 @@ void TestOriginalSystemCallInstallation(const DolImage& image) {
                  "System-call vector execution remains unsupported.\n";
 }
 
+void TestOriginalResetRegistration(const DolImage& image) {
+    auto state = image.CreateGameCubeState();
+    ppc_800032B0(state);
+    state.lr = 0x80001000u;
+    constexpr uint32_t queue = 0x80349648u;
+    ppc_write_u64(state, queue, 0);
+    std::vector<std::pair<uint32_t, uint32_t>> registered;
+    unsigned index = 0;
+    for (uint32_t priority : {10u, 0u, 5u, 10u, UINT32_MAX, 1u, UINT32_MAX}) {
+        const uint32_t node = 0x80004000u + index++ * 16;
+        ppc_write_u32(state, node, 0x80001000u + index * 4);
+        ppc_write_u32(state, node + 4, priority);
+        ppc_write_u64(state, node + 8, UINT64_MAX);
+        const auto before = state;
+        auto expected = state;
+        const auto position = std::find_if(registered.begin(), registered.end(),
+            [&](const auto& entry) { return entry.second > priority; });
+        registered.insert(position, {node, priority});
+        ppc_write_u32(expected, queue, registered.front().first);
+        ppc_write_u32(expected, queue + 4, registered.back().first);
+        for (size_t i = 0; i < registered.size(); ++i) {
+            ppc_write_u32(expected, registered[i].first + 8,
+                i + 1 < registered.size() ? registered[i + 1].first : 0);
+            ppc_write_u32(expected, registered[i].first + 12,
+                i == 0 ? 0 : registered[i - 1].first);
+        }
+        state.gpr[3] = node;
+        ppc_801B5550(state);
+        Require(state.pc == state.lr && state.memory == expected.memory &&
+                    state.gpr[3] == node && state.gpr[1] == before.gpr[1],
+                "Original reset registration failed stable unsigned ordering or exact list writes.");
+    }
+    std::cout << "Original reset registration passed empty/head/middle/tail insertion, "
+                 "stable equal priorities and unsigned maximum priority; callbacks not executed.\n";
+}
+
+void TestOriginalAlarmInitialization(const DolImage& image) {
+    for (bool interrupts : {false, true}) {
+        for (bool installed : {false, true}) {
+            for (bool existingReset : {false, true}) {
+                auto state = image.CreateGameCubeState();
+                ppc_800032B0(state);
+                state.externalInterruptsEnabled = interrupts;
+                state.lr = 0x801b0f68u;
+                state.fpscr = 4;
+                state.hid0 = 0xc200u;
+                state.fpr.fill({UINT64_MAX, UINT64_MAX});
+                ppc_write_u32(state, 0x803495e4u, 0x80003000u);
+                ppc_write_u32(state, 0x80003020u, installed ? 0x801b1c84u : 0x801b152cu);
+                ppc_write_u64(state, 0x80349600u, UINT64_C(0x1111111122222222));
+                constexpr uint32_t reset = 0x802dfe80u;
+                constexpr uint32_t other = 0x80004000u;
+                ppc_write_u32(state, other, 0x80001000u);
+                ppc_write_u32(state, other + 4, 1);
+                ppc_write_u64(state, other + 8, 0);
+                ppc_write_u32(state, 0x80349648u, existingReset ? other : 0);
+                ppc_write_u32(state, 0x8034964cu, existingReset ? other : 0);
+                for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                    const auto before = state;
+                    auto expected = state;
+                    const bool initialize = !installed && repeat == 0;
+                    if (initialize) {
+                        ppc_write_u32(expected, 0x80003020u, 0x801b1c84u);
+                        ppc_write_u64(expected, 0x80349600u, 0);
+                        ppc_write_u32(expected, 0x80349648u, existingReset ? other : reset);
+                        ppc_write_u32(expected, 0x8034964cu, reset);
+                        ppc_write_u32(expected, reset + 8, 0);
+                        ppc_write_u32(expected, reset + 12, existingReset ? other : 0);
+                        if (existingReset) ppc_write_u32(expected, other + 8, reset);
+                    }
+                    std::vector<uint32_t> calls;
+                    state.callGuest = [&](uint32_t address, PpcState& guest) {
+                        Require(calls.size() < 3, "Alarm initialization exceeded dependency budget.");
+                        calls.push_back(address);
+                        if (address == 0x801b5550u) {
+                            Require(guest.gpr[3] == reset, "Alarm registered the wrong reset node.");
+                        } else {
+                            Require(guest.gpr[3] == 8, "Alarm accessed the wrong exception handler.");
+                        }
+                        RunHardwareDependency(address, guest);
+                    };
+                    ppc_801B1618(state);
+                    const std::vector<uint32_t> expectedCalls = initialize ?
+                        std::vector<uint32_t>{0x801b147cu, 0x801b1460u, 0x801b5550u} :
+                        std::vector<uint32_t>{0x801b147cu};
+                    Require(calls == expectedCalls && state.pc == before.lr && state.lr == before.lr &&
+                                state.externalInterruptsEnabled == interrupts &&
+                                state.fpr == before.fpr && state.fpscr == before.fpscr &&
+                                state.hid0 == before.hid0 && state.xer == before.xer &&
+                                state.ctr == before.ctr,
+                            "Original alarm initialization failed call order, re-entry or CPU guards.");
+                    for (unsigned reg = 0; reg < 32; ++reg) {
+                        if (reg == 0 || (reg >= 3 && reg <= 5)) continue;
+                        Require(state.gpr[reg] == before.gpr[reg],
+                                "Alarm initialization damaged preserved integer registers.");
+                    }
+                    const size_t frame = ppc_memory_offset(state, before.gpr[1] - 8, 16);
+                    for (size_t i = 0; i < state.memory.size(); ++i) {
+                        if (i >= frame && i < frame + 16) continue;
+                        Require(state.memory[i] == expected.memory[i],
+                                "Alarm initialization changed unexpected RAM or duplicated registration.");
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "Original OSInitAlarm clears the queue, installs decrementer handler and "
+                 "registers reset info; existing handler/re-entry preserve queues and list. "
+                 "No alarm scheduling or decrementer delivery implemented.\n";
+}
+
 void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     auto state = image.CreateGameCubeState();
     Require(ppc_read_u64(state, 0x803495d0u) == 0 &&
@@ -962,6 +1076,7 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     std::vector<uint32_t> setupCalls;
     const auto fpr = state.fpr;
     state.performanceMonitor.fill(UINT32_MAX);
+    calls = 0;
     state.callGuest = [&](uint32_t address, PpcState& guest) {
         Require(++calls < 150, "OSInit fixture exceeded its dependency budget.");
         if (address >= 0x801b0a6cu && address <= 0x801b0a94u) {
@@ -985,8 +1100,13 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     ExpectExceptionInitialization(expectedExceptions, false, 0,
                                    ppc_read_u32(state, 0x80000044u));
     ExpectSystemCallInstallation(expectedExceptions);
+    ppc_write_u32(expectedExceptions, 0x80003020u, 0x801b1c84u);
+    ppc_write_u64(expectedExceptions, 0x80349600u, 0);
+    ppc_write_u32(expectedExceptions, 0x80349648u, 0x802dfe80u);
+    ppc_write_u32(expectedExceptions, 0x8034964cu, 0x802dfe80u);
+    ppc_write_u64(expectedExceptions, 0x802dfe88u, 0);
     ppc_801B0DE0(state);
-    Require(state.pc == 0x801b0f64u && reads == 3 &&
+    Require(state.pc == 0x801b0f68u && reads == 3 &&
                 setupCalls == std::vector<uint32_t>{0x801b0a6cu, 0x801b0a74u,
                     0x801b0a7cu, 0x801b0a84u, 0x801b0a8cu, 0x801b0a94u,
                     0x801b0afcu, 0x801b0b24u} &&
@@ -1045,7 +1165,8 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     std::cout << "Original OSInit prefix sets initialization flag/start time, masks "
                  "interrupts, resets MMCR0/1 plus PMC1..4, sets HID0 SPD and FPSCR NI; "
                  "initializes boot info, arenas, exception and system-call vectors; "
-                 "stops at 0x801b0f64 before OSInitAlarm. "
+                 "initializes the alarm queue/handler/reset node; "
+                 "stops at 0x801b0f68 before __OSModuleInit. "
                  "Re-entry skip/epilogue tested separately; first OSInit does not return.\n";
 }
 
@@ -1356,6 +1477,8 @@ int main(int argc, char** argv) {
         TestOriginalArenaAccessors(image);
         TestOriginalExceptionInitialization(image);
         TestOriginalSystemCallInstallation(image);
+        TestOriginalResetRegistration(image);
+        TestOriginalAlarmInitialization(image);
         TestOriginalCacheRanges(image);
         TestOriginalBootInfoAndArena(image);
         TestStartupHelpers(image);
