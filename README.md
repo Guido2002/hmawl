@@ -423,8 +423,20 @@ completes: it clears the software masks/table, disables device interrupt enables
 installs `ExternalInterruptHandler` and restores interrupts, stack and callee-saved
 registers. Exact RAM/stack writes and partial opt-in boundaries are tested.
 Entry-derived execution returns to `0x801b0f70`; the existing OSInit prefix fixture
-still ends before this call and remaining OSInit code is not executed. This does
+still ends before this call; a separate continuation is described below. This does
 not implement EXI devices, memory-card transfers or hardware interrupt delivery.
+
+A separate original OSInit continuation fixture now executes `0x801b0f6c` through
+`0x801b0f80` from the saved entry-derived state with startup device support enabled.
+It completes interrupt initialization, registers the original reset-switch handler
+in slot 22 and executes original `__OSContextInit`. Context initialization installs
+the FPU exception handler, clears the FPU-owner pointer at `0x800000d8` and runs
+original `DBPrintf` (argument saves only, no host output). Standalone tests cover
+cached/uncached exception-table aliases, poisoned/zero owner state, repeats, both
+interrupt states, exact RAM/stack writes and CPU/FPR preservation. Continuation
+stops at `0x801b0f84` before `__OSCacheInit`; OSInit has not returned. The earlier
+prefix remains separate for default-unmapped and re-entry tests. No context
+switching, scheduling or FPU exception delivery is implied.
 
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings

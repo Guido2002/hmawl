@@ -314,7 +314,16 @@ queue. Full runtime scheduling and device services are still needed.
   external exception handler installation, interrupt/ABI restoration and exact
   RAM/stack guards pass independently and from entry-derived state, returning
   to `0x801b0f70`. The OSInit prefix fixture still ends at `0x801b0f6c`;
-  remaining OSInit code is not executed. No EXI transfers or interrupt delivery.
+  later code is covered separately below. No EXI transfers or interrupt delivery.
+- [x] Execute original OSInit continuation from the saved entry-derived state
+  through complete interrupt setup, reset-switch handler registration (slot 22,
+  `0x801b5974`) and original `__OSContextInit`. Install FPU exception handler
+  `0x801b3274`, clear owner pointer `0x800000d8` and execute original `DBPrintf`
+  without replacing it with host logging. Test aliases, zero/poisoned owner state,
+  repeated calls, both interrupt states, exact RAM/stack writes, raw FPR bits,
+  CR/XER and register preservation. Continuation reaches `0x801b0f84`, before
+  `__OSCacheInit`; earlier prefix/default-unmapped/re-entry tests remain intact.
+  No context switching, scheduler or FPU exception delivery; OSInit is incomplete.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

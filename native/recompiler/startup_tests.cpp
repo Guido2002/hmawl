@@ -196,6 +196,7 @@ void RunHardwareDependency(uint32_t address, PpcState& state) {
     case 0x801b147cu: ppc_801B147C(state); break;
     case 0x801b5550u: ppc_801B5550(state); break;
     case 0x801b4c90u: ppc_801B4C90(state); break;
+    case 0x801b32f8u: ppc_801B32F8(state); break;
     case 0x801b1460u: ppc_801B1460(state); break;
     case 0x801d33c8u: ppc_801D33C8(state); break;
     case 0x801b2428u: ppc_801B2428(state); break;
@@ -1022,6 +1023,79 @@ void TestOriginalModuleInitialization(const DolImage& image) {
                  "No REL link/unlink or native-binding lifecycle implied.\n";
 }
 
+void ExpectContextInitialization(PpcState& expected) {
+    const uint32_t stack = expected.gpr[1];
+    const uint32_t table = ppc_read_u32(expected, 0x803495e4u);
+    ppc_write_u32(expected, table + 0x1cu, 0x801b3274u);
+    ppc_write_u32(expected, 0x800000d8u, 0);
+    ppc_write_u32(expected, stack + 4, expected.lr);
+    ppc_write_u32(expected, stack - 8, stack);
+    ppc_write_u32(expected, stack - 0x78u, stack - 8);
+    ppc_write_u32(expected, stack - 0x70u, 0x802e068cu);
+    ppc_write_u32(expected, stack - 0x6cu, 0x80000000u);
+    ppc_write_u32(expected, stack - 0x68u, table + 0x1cu);
+    for (unsigned reg = 6; reg <= 10; ++reg) {
+        ppc_write_u32(expected, stack - 0x70u + (reg - 3) * 4u, expected.gpr[reg]);
+    }
+}
+
+void TestOriginalContextInitialization(const DolImage& image) {
+    for (bool interrupts : {false, true}) {
+        for (uint32_t table : {0x80003000u, 0xc0003000u}) {
+            for (uint32_t owner : {0u, 0x80340000u, UINT32_MAX}) {
+                auto state = image.CreateGameCubeState();
+                ppc_800032B0(state);
+                state.lr = 0x801b0f84u;
+                state.externalInterruptsEnabled = interrupts;
+                state.cr = UINT32_MAX;
+                state.xer = 0xe0000000u;
+                state.fpscr = 0xf1234567u;
+                state.fpr.fill({UINT64_C(0x7ff0000000000001), UINT64_C(0xfff8123456781234)});
+                state.gqr.fill(0x12345678u);
+                for (unsigned reg = 6; reg < 32; ++reg) {
+                    if (reg != 13) state.gpr[reg] = 0x12340000u + reg;
+                }
+                ppc_write_u32(state, 0x803495e4u, table);
+                ppc_write_u32(state, table + 0x1cu, 0xdeadbeefu);
+                ppc_write_u32(state, 0x800000d8u, owner);
+                for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                    auto expected = state;
+                    ExpectContextInitialization(expected);
+                    std::vector<uint32_t> calls;
+                    state.callGuest = [&](uint32_t address, PpcState& guest) {
+                        Require(calls.size() < 2, "Context init exceeded its dependency budget.");
+                        calls.push_back(address);
+                        RunHardwareDependency(address, guest);
+                    };
+                    ppc_801B32F8(state);
+                    Require(calls == std::vector<uint32_t>{0x801b1460u, 0x801d33e4u} &&
+                                state.memory == expected.memory &&
+                                state.pc == expected.lr && state.lr == expected.lr &&
+                                state.gpr[1] == expected.gpr[1] &&
+                                state.gpr[0] == expected.lr && state.gpr[2] == expected.gpr[2] &&
+                                state.gpr[3] == 0x802e068cu && state.gpr[4] == 0x80000000u &&
+                                state.gpr[5] == table + 0x1cu &&
+                                state.externalInterruptsEnabled == interrupts &&
+                                state.cr == (expected.cr & ~0x02000000u) &&
+                                state.xer == expected.xer && state.fpr == expected.fpr &&
+                                state.fpscr == expected.fpscr && state.gqr == expected.gqr &&
+                                state.msr == expected.msr && state.hid0 == expected.hid0 &&
+                                state.hid2 == expected.hid2 && state.l2cr == expected.l2cr,
+                            "Original context init changed unexpected RAM, CPU state or return ABI.");
+                    for (unsigned reg = 6; reg < 32; ++reg) {
+                        Require(state.gpr[reg] == expected.gpr[reg],
+                                "Original context init changed a preserved register.");
+                    }
+                    state.callGuest = {};
+                }
+            }
+        }
+    }
+    std::cout << "Original __OSContextInit installs the FPU exception handler, clears FPU "
+                 "ownership and returns; aliases, poisoned state, repeats, exact RAM/stack "
+                 "and CPU guards passed. Context switching/FPU exception delivery not implemented.\n";
+}
+
 void ExpectInterruptTableInitialization(PpcState& expected, uint32_t stack, uint32_t lr) {
     ppc_write_u32(expected, stack + 4, lr);
     ppc_write_u32(expected, stack - 0x10u, stack);
@@ -1553,7 +1627,57 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     state.exiStatus = {0x1c7fu, 0x1c7fu, 0x7fu};
     RunInterruptPiSetupToDevice(state);
     std::cout << "Entry-derived original interrupt initialization returns to 0x801b0f70 "
-                 "with opt-in device state. Remaining OSInit code is not executed.\n";
+                 "with opt-in device state; continuation is tested below.\n";
+    state = firstTime;
+    state.piInterruptMask = 0;
+    state.miInterruptMask = 0x1fu;
+    state.dspControl = 0x7fcu;
+    state.aiControl = 0x5eu;
+    state.exiStatus = {0x1c7fu, 0x1c7fu, 0x7fu};
+    std::vector<uint32_t> continuationCalls;
+    state.callGuest = [&](uint32_t address, PpcState& guest) {
+        Require(continuationCalls.size() < 20, "OSInit continuation exceeded its dependency budget.");
+        continuationCalls.push_back(address);
+        switch (address) {
+        case 0x801b3ac0u: ppc_801B3AC0(guest); break;
+        case 0x800054e4u: ppc_800054E4(guest); break;
+        case 0x80005514u: ppc_80005514(guest); break;
+        case 0x801b3e0cu: ppc_801B3E0C(guest); break;
+        case 0x801b3b34u: ppc_801B3B34(guest); break;
+        case 0x801b3a90u:
+            Require(guest.gpr[3] == 22 && guest.gpr[4] == 0x801b5974u,
+                    "OSInit reset-switch handler arguments differ.");
+            ppc_801B3A90(guest);
+            break;
+        case 0x801b32f8u: {
+            auto expected = guest;
+            ExpectContextInitialization(expected);
+            ppc_801B32F8(guest);
+            Require(guest.memory == expected.memory, "Entry-derived context init RAM/stack differs.");
+            break;
+        }
+        default: RunHardwareDependency(address, guest); break;
+        }
+        Require(guest.pc == guest.lr, "OSInit continuation dependency did not return.");
+    };
+    ppc_801B0F6C(state);
+    Require(continuationCalls.size() == 18 &&
+                continuationCalls.front() == 0x801b3ac0u &&
+                continuationCalls[14] == 0x801b3a90u &&
+                continuationCalls[15] == 0x801b32f8u &&
+                continuationCalls[16] == 0x801b1460u &&
+                continuationCalls[17] == 0x801d33e4u &&
+                state.pc == 0x801b0f84u && state.gpr[1] == firstTime.gpr[1] &&
+                !state.externalInterruptsEnabled &&
+                ppc_read_u32(state, 0x80003098u) == 0x801b5974u &&
+                ppc_read_u32(state, 0x80003010u) == 0x801b4260u &&
+                ppc_read_u32(state, 0x8000301cu) == 0x801b3274u &&
+                ppc_read_u32(state, 0x800000d8u) == 0,
+            "Original OSInit continuation did not reach cache initialization with expected handlers.");
+    state.callGuest = {};
+    std::cout << "Entry-derived OSInit continues through complete interrupt init, reset-switch "
+                 "handler registration and original context init, stopping at 0x801b0f84 "
+                 "before __OSCacheInit. OSInit has not returned.\n";
 }
 
 void TestOriginalArenaAccessors(const DolImage& image) {
@@ -1869,6 +1993,7 @@ int main(int argc, char** argv) {
         TestOriginalInterruptTableInitialization(image);
         TestOriginalInterruptHandlerAccessors(image);
         TestOriginalInterruptPiSetup(image);
+        TestOriginalContextInitialization(image);
         TestOriginalCacheRanges(image);
         TestOriginalBootInfoAndArena(image);
         TestStartupHelpers(image);
