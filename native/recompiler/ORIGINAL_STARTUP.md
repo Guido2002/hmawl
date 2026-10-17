@@ -63,6 +63,13 @@ remain pending while EE is disabled; enabling EE or dispatching with an unmasked
 pending SI completion fails explicitly until guest interrupt delivery exists.
 This deliberately limited platform profile is not complete GameCube hardware.
 
+DSP hardware is explicitly mapped with 16 MiB ARAM, halted reset/mailbox
+clearing and checked bidirectional RAM/ARAM DMA. DMA completion follows actual
+byte copies; W1C status/masks are retained. Native DSP execution is not supplied.
+Unhalting, sending or consuming mail that requires DSP execution fails explicitly,
+without writing an invented acknowledgement. Unmasked pending DSP interrupts,
+like SI interrupts, cannot silently pass an enabled EE.
+
 ### Native console SRAM
 
 The CLI loads `native-console.sram` beside the input DOL, or the path supplied
@@ -86,7 +93,15 @@ compiled block. Every loop therefore crosses a dispatcher budget boundary;
 the instruction count is bounded above by 32 times the block budget.
 Calls also have a separate depth bound. This is static compiled dispatch, not
 an instruction decoder/interpreter at runtime. The dispatcher checks original
-instruction words at registration and every block entry. The recompiler's
+instruction words at registration and every block entry. Copied exception-vector
+bindings validate their DOL installation source at registration and the installed
+physical destination on execution, so an absent or altered vector cannot run.
+The original system-call vector executes compiled instructions, including HID0
+DCFA, synchronization and rfi; sc saves SRR0/SRR1 and masks exception MSR state
+without changing LR. Exception execution shares block/call-depth budgets.
+Only this bounded system-call exception path is implemented, not general interrupt
+delivery, arbitrary exception modes or context-switching rfi.
+The recompiler's
 `yieldAtBranches` option routes control transfers back through dispatch, including
 self-loops; `precisePc` records the exact PC before every original instruction.
 
@@ -115,8 +130,12 @@ Original **__OSThreadInit also returns**: default thread/context, active-thread
 list, stack guard/fill, 32 empty run queues and MSR RI/FP state are initialized.
 This does not implement scheduling, context switching or guest interrupt delivery.
 
-The next untranslated dependency is **__OSInitAudioSystem at PC `0x801B20F4`,
-LR `0x801B0F9C`**. `OSInit` has **not** returned.
+Original **__OSInitAudioSystem now executes** its RAM backup/DSP-payload copy,
+DCFlushRange and installed system-call exception vector, halted DSP reset,
+ARAM configuration, both real 32-byte RAM-to-ARAM transfers and original tick wait.
+It then stops at **DSP unhalt, PC `0x801B223C`, LR `0x801B21E0`**, with an explicit
+missing DSP execution backend error. DSP remains halted; no mailbox reply is
+invented. Audio initialization and `OSInit` have **not** returned.
 The game main loop, GX renderer,
 DVD startup, scheduled game threads, audio, input and saves have not run.
 
@@ -124,13 +143,15 @@ DVD startup, scheduled game threads, audio, input and saves have not run.
 
 With testing enabled, build `hmawl_original_startup_tests` and run CTest's
 `hmawl_original_startup_tests`. It uses the production library and real verified
-DOL, checking the exact audio initialization call, two original external EXI transaction
+DOL, checking the exact DSP-unhalt stop, two original external EXI transaction
 requests, cleared channel lock, both empty-slot probe results, exact console
 messages, the original SI command and three queued probes, sampling/handler state,
 pending no-response completion, missing SI backend/VI profile,
 exact original SRAM command/DMA bytes, SRAM locks/sync, default thread/context,
 active/run queues, stack guard and MSR state, missing DMA backend and preserved
 malformed profiles plus fresh-profile persistence/reload,
+original sc/rfi return state and original DSP payload, both ARAM DMA transfers,
+complete ARAM guards, halted reset/mailboxes and missing DSP hardware,
 missing EXI peripheral backend/console failures, initialization
 evidence, missing clock and unbound dispatcher dependencies, on-disk DOL
 truncation/mutation rejection, loaded-code integrity, block/call-depth bounds,

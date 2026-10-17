@@ -1549,6 +1549,172 @@ void TestNativeSramAndDma() {
             "Compiled dcbi changed coherent RAM or CPU flags.");
 }
 
+void TestCompiledSystemCall() {
+    for (uint32_t mode : {0u, 0x30u, 0x32u, 0x2032u, 0xa032u}) {
+        PpcState state;
+        state.memoryMap = PpcMemoryMap::GameCubeRam;
+        state.memory.resize(0x10000);
+        state.msr = mode & ~0x8000u;
+        state.externalInterruptsEnabled = (mode & 0x8000u) != 0;
+        state.lr = 0xf000u;
+        state.cr = 0x12345678u;
+        state.xer = 0xe0000000u;
+        ppc_write_u32(state, 0xb5b0u, 0x44000002u);
+        ppc_write_u32(state, 0xb5b4u, 0x4e800020u);
+        ppc_write_u32(state, 0x2000u, 0x4c000064u);
+        NativeDispatcher dispatcher;
+        dispatcher.Register(0, state, {
+            {0xb5b0u, ppc_0000B5B0, {0x44000002u}},
+            {0xb5b4u, [](PpcState& guest) { guest.pc = guest.lr; }, {0x4e800020u}},
+            {0xc00u, [](PpcState& guest) {
+                 Require(guest.systemCallActive && ppc_read_msr(guest) == 0 &&
+                             guest.lr == 0xf000u && guest.srr0 == 0xb5b4u,
+                         "System-call entry changed LR or failed exception MSR/SRR capture.");
+                 ppc_0000B5C0(guest);
+             }, {0x4c000064u}, 0x2000u}});
+        Reject([&] { dispatcher.Execute(state, 0xb5b0u); }, "code mismatch");
+        Require(state.systemCallActive && state.srr1 == mode &&
+                    !state.callGuest && !state.callException && state.pc == 0xc00u,
+                "Uninstalled exception vector bypassed integrity checks or leaked callbacks.");
+        state.systemCallActive = false;
+        state.msr = mode & ~0x8000u;
+        state.externalInterruptsEnabled = (mode & 0x8000u) != 0;
+        ppc_write_u32(state, 0xc00u, 0x4c000064u);
+        dispatcher.Execute(state, 0xb5b0u);
+        Require(!state.systemCallActive && ppc_read_msr(state) == mode && state.srr1 == mode &&
+                    state.pc == 0xf000u && state.lr == 0xf000u &&
+                    state.cr == 0x12345678u && state.xer == 0xe0000000u &&
+                    !state.callGuest && !state.callException,
+                "Compiled sc/rfi did not restore MSR, EE, continuation, LR or callback ownership.");
+        Reject([&] { dispatcher.Execute(state, 0xb5b0u, 2); }, "budget exceeded");
+        Require(!state.callException && !state.callGuest && !state.systemCallActive,
+                "Exception dispatch did not share the block budget or restore its callbacks.");
+        Reject([&] { dispatcher.Execute(state, 0xb5b0u, 100, 1); }, "call-depth limit exceeded");
+        Require(state.systemCallActive && !state.callException && !state.callGuest,
+                "Exception dispatch bypassed the depth bound or leaked callbacks.");
+        state.systemCallActive = false;
+        state.msr = mode & ~0x8000u;
+        state.externalInterruptsEnabled = (mode & 0x8000u) != 0;
+        state.callException = [&](uint32_t target, uint32_t resume, PpcState& guest) {
+            Require(target == 0xc00u && resume == 0xb5d4u && guest.lr == 0xf000u,
+                    "Default compiled sc changed its exception target/continuation or LR.");
+            ppc_0000B5C0(guest);
+        };
+        state.gpr[3] = 7;
+        ppc_0000B5D0(state);
+        Require(state.gpr[3] == 8 && state.pc == 0xb5d8u && ppc_read_msr(state) == mode,
+                "Default function translation did not continue after a system call.");
+    }
+    PpcState state;
+    Reject([&] { ppc_0000B5B0(state); }, "system-call context");
+    Reject([&] { ppc_0000B5C0(state); }, "active system-call");
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.callException = [](uint32_t, uint32_t, PpcState&) {};
+    state.systemCallActive = true;
+    Reject([&] { ppc_0000B5B0(state); }, "nested");
+    state.systemCallActive = false;
+    Reject([&] { ppc_0000B5B0(state); }, "without rfi");
+    state.srr0 = 1;
+    Reject([&] { ppc_0000B5C0(state); }, "supported active");
+    state.srr0 = 0;
+    state.srr1 = 0x40;
+    Reject([&] { ppc_0000B5C0(state); }, "supported active");
+    state.hid0 = 0xc200u;
+    ppc_write_hid0(state, 0xc208u);
+    Require(state.hid0 == 0xc208u, "HID0 data-cache flush assist did not retain its bit.");
+    ppc_write_hid0(state, 0xc200u);
+    Require(state.hid0 == 0xc200u, "HID0 data-cache flush assist did not restore its bit.");
+    state.memory.resize(0x4000);
+    ppc_write_u32(state, 0x2000u, 0x4c000064u);
+    NativeDispatcher dispatcher;
+    Reject([&] { dispatcher.Register(0, state,
+        {{0xc00u, ppc_0000B5C0, {0x4c000064u}, 0x2002u}}); }, "installation source");
+    Reject([&] { dispatcher.Register(0, state,
+        {{0xc00u, ppc_0000B5C0, {0x4c000064u}, 0x2004u}}); }, "code mismatch");
+    Require(!dispatcher.Contains(0xc00u), "Invalid vector source partially registered a binding.");
+}
+
+void TestDspResetAndAramDma() {
+    for (bool read : {false, true}) {
+        for (unsigned length : {32u, 64u, 128u}) {
+            PpcState state;
+            state.memoryMap = PpcMemoryMap::GameCubeRam;
+            state.memory.resize(256, 0xa5);
+            state.dspControl = 4;
+            state.dspHardware.emplace();
+            auto& dsp = *state.dspHardware;
+            dsp.aram.resize(256, 0x3c);
+            ppc_write_u32(state, 0xcc005020u, 64);
+            ppc_write_u32(state, 0xcc005024u, 32);
+            ppc_write_u32(state, 0xcc005028u, (read ? 0x80000000u : 0u) | length);
+            Require(state.dspControl == 0x24u && dsp.dmaTransfers == 1 &&
+                        ppc_read_u32(state, 0xcc005020u) == 64 &&
+                        ppc_read_u32(state, 0xcc005024u) == 32 &&
+                        ppc_read_u32(state, 0xcc005028u) == ((read ? 0x80000000u : 0u) | length),
+                    "ARAM DMA completion, direction, counter or register readback differs.");
+            for (unsigned index = 0; index < state.memory.size(); ++index) {
+                Require(state.memory[index] == (read && index >= 64 && index < 64 + length ? 0x3cu : 0xa5u) &&
+                            dsp.aram[index] == (!read && index >= 32 && index < 32 + length ? 0xa5u : 0x3cu),
+                        "ARAM DMA copied the wrong bytes or changed RAM/ARAM guards.");
+            }
+            ppc_write_u16(state, 0xcc00500au, 0x24);
+            Require(state.dspControl == 4, "ARAM interrupt W1C did not acknowledge DMA.");
+        }
+    }
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(256, 0xa5);
+    state.dspHardware.emplace();
+    auto& dsp = *state.dspHardware;
+    dsp.aram.resize(256, 0x3c);
+    state.dspControl = 0xac;
+    dsp.toDspMailbox = 0xffffffffu;
+    dsp.fromDspMailbox = 0xffffffffu;
+    Reject([&] { ppc_read_u16(state, 0xcc005006u); }, "mailbox consumption");
+    ppc_write_u16(state, 0xcc005012u, 0x43);
+    Require(ppc_read_u16(state, 0xcc005012u) == 0x43, "ARAM configuration readback differs.");
+    ppc_write_u16(state, 0xcc00500au, 0x8ac);
+    ppc_write_u16(state, 0xcc00500au, 0x805);
+    Require(state.dspControl == 0x804 && dsp.resetCount == 1 &&
+                dsp.toDspMailbox == 0 && dsp.fromDspMailbox == 0 &&
+                ppc_read_u16(state, 0xcc005004u) == 0 && ppc_read_u16(state, 0xcc005006u) == 0 &&
+                ppc_read_u16(state, 0xcc005000u) == 0 && ppc_read_u16(state, 0xcc005002u) == 0 &&
+                dsp.aram.front() == 0x3c,
+            "DSP halted reset did not clear mailboxes/status or changed ARAM.");
+    ppc_write_u16(state, 0xcc00500au, 4);
+    Reject([&] { ppc_write_u16(state, 0xcc00500au, 0); }, "DSP unhalt");
+    Require(state.dspControl == 4 && dsp.resetCount == 1 && dsp.fromDspMailbox == 0,
+            "Unsupported DSP execution fabricated mailbox completion or cleared halt.");
+    for (auto value : {0u, 1u, 31u, 33u, 0x04000020u, UINT32_MAX}) {
+        const auto before = state.memory;
+        const auto aram = dsp.aram;
+        Reject([&] { ppc_write_u32(state, 0xcc005028u, value); }, "transfer length");
+        Require(state.memory == before && dsp.aram == aram && state.dspControl == 4,
+                "Invalid ARAM DMA partially committed memory or completion.");
+    }
+    ppc_write_u32(state, 0xcc005020u, 256);
+    Reject([&] { ppc_write_u32(state, 0xcc005028u, 32); }, "outside guest memory");
+    ppc_write_u32(state, 0xcc005020u, 0);
+    ppc_write_u32(state, 0xcc005024u, 256);
+    Reject([&] { ppc_write_u32(state, 0xcc005028u, 32); }, "configured native ARAM");
+    for (auto address : {0xcc005020u, 0xcc005024u}) {
+        Reject([&] { ppc_write_u32(state, address, 1); }, "aligned");
+    }
+    Reject([&] { ppc_write_u16(state, 0xcc005012u, 0); }, "configuration");
+    Reject([&] { ppc_write_u16(state, 0xcc005002u, 1); }, "execution backend");
+    Reject([&] { ppc_write_u16(state, 0xcc005000u, 1); }, "execution backend");
+    Reject([&] { ppc_write_u16(state, 0xcc00500au, 0xffff); }, "control write");
+    state.piInterruptMask = 0xf0u;
+    state.externalInterruptsEnabled = false;
+    state.dspControl = 0x64;
+    Reject([&] { ppc_write_msr(state, 0x8000u); }, "DSP interrupt");
+    Require(!state.externalInterruptsEnabled, "Pending DSP interrupt was silently discarded when enabling EE.");
+    ppc_write_u16(state, 0xcc00500au, 0x64);
+    ppc_write_msr(state, 0x8000u);
+    Require(state.externalInterruptsEnabled && state.dspControl == 0x44,
+            "DSP interrupt acknowledgement failed to retain HALT/mask.");
+}
+
 void TestMultiplyHighUnsigned() {
     for (uint32_t left : {0u, 1u, 0x7fffffffu, 0x80000000u, UINT32_MAX}) {
         for (uint32_t right : {0u, 1u, 2u, 0x80000000u, UINT32_MAX}) {
@@ -2186,7 +2352,7 @@ void TestCacheControlRegisters() {
     }
     for (unsigned bit = 0; bit < 32; ++bit) {
         const uint32_t flag = 1u << bit;
-        if ((flag & 0xca00u) != 0) continue;
+        if ((flag & 0xca08u) != 0) continue;
         for (bool clearing : {false, true}) {
             state.hid0 = 0xc000u | (clearing ? flag : 0u);
             const uint32_t before = state.hid0;
@@ -2852,6 +3018,8 @@ int main() {
         TestSiStartupHardwareAndArithmetic();
         TestSiTransactionsAndPendingInterrupt();
         TestNativeSramAndDma();
+        TestCompiledSystemCall();
+        TestDspResetAndAramDma();
         TestNativeConsoleAndEmptyExi();
         TestAndComplement();
         TestCacheBlockInstructions();

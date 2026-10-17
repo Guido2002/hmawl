@@ -12,6 +12,8 @@ struct NativeTranslation {
     uint32_t address;
     NativeGuestFunction function;
     std::vector<uint32_t> expectedWords;
+    // Copied vectors verify their original source at registration and destination on every entry.
+    uint32_t installationSource = 0;
 };
 
 struct NativeRelTranslation {

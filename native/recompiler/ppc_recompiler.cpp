@@ -537,11 +537,30 @@ std::string RecompileFunction(uint32_t address,
             }
             break;
         }
+        case 17:
+            if (instruction != 0x44000002u) {
+                throw std::runtime_error("Unsupported sc encoding at " + Hex(pc) + ".");
+            }
+            output << "    ppc_system_call(state, " << Hex(next) << "u);\n"
+                   << "    state.pc = " << Hex(next) << "u;\n";
+            if (!options.yieldAtBranches && static_cast<uint64_t>(next) < end) {
+                output << "    goto " << Label(next) << ";\n";
+            } else {
+                output << "    return;\n";
+            }
+            break;
         case 19: {
             const uint32_t extendedOpcode = Bits(instruction, 1, 10);
             const uint32_t bo = Bits(instruction, 21, 5);
             const uint32_t bi = Bits(instruction, 16, 5);
             const uint32_t link = instruction & 1u;
+            if (extendedOpcode == 50) {
+                if (instruction != 0x4c000064u) {
+                    throw std::runtime_error("Invalid rfi instruction at " + Hex(pc) + ".");
+                }
+                output << "    ppc_return_from_system_call(state);\n    return;\n";
+                break;
+            }
             if (extendedOpcode == 150) {
                 if (instruction != 0x4c00012cu) {
                     throw std::runtime_error("Invalid isync instruction at " + Hex(pc) + ".");

@@ -38,6 +38,8 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.piInterruptMask = 0;
     state.miInterruptMask = 0;
     state.dspControl = 0;
+    state.dspHardware.emplace();
+    state.dspHardware->aram.resize(16u * 1024u * 1024u);
     state.aiControl = 0;
     state.diConfiguration = 1;
     state.viDtvStatus = 0;
@@ -65,7 +67,8 @@ void RegisterOriginalStartup(NativeDispatcher& dispatcher, const PpcState& state
 
 OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState& state,
                                         size_t blockBudget, size_t maxCallDepth) {
-    if (state.pc != 0x80003154u || state.callGuest || blockBudget == 0 || maxCallDepth == 0) {
+    if (state.pc != 0x80003154u || state.callGuest || state.callException ||
+        blockBudget == 0 || maxCallDepth == 0) {
         throw std::runtime_error("Original startup requires a fresh entry state and nonzero execution limits.");
     }
     try {

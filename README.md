@@ -59,8 +59,11 @@ reports a hardware no-response error, not invented input. Its completion interru
 remains pending while EE is disabled; interrupt delivery is not yet implemented.
 Original SRAM initialization also returns after a real 64-byte EXI DMA read from
 a local native console profile. Original default-thread/context and scheduler
-queue initialization then returns. The runner reaches `__OSInitAudioSystem` at
-`PC=0x801B20F4`, `LR=0x801B0F9C`.
+queue initialization then returns. Original audio initialization now installs its
+real DSP payload, executes the installed cache-flush exception vector via `sc`/`rfi`,
+resets the halted DSP and performs both real RAM-to-ARAM transfers.
+It stops at DSP unhalt, `PC=0x801B223C`, `LR=0x801B21E0`: DSP program execution
+and mailbox delivery are not implemented, so no acknowledgement is fabricated.
 This is an **explicit dependency stop (exit code 3)**, not successful OSInit,
 game initialization or rendering. RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.

@@ -245,7 +245,7 @@ void TestInvalidSignExtendHalfword() {
 
 void TestInvalidTimeBaseAndConditionXor() {
     for (const uint32_t instruction : {0x7c6c42e7u, 0x7c6e42e6u, 0x4cc63183u,
-                                       0x44000002u, 0x4c000064u}) {
+                                       0x44000003u, 0x4c000065u}) {
         bool rejected = false;
         try {
             RecompileFunction(0x80003100u, {instruction});

@@ -30,7 +30,9 @@ and native console reporting. Original SIInit also returns after sampling and
 interrupt setup, a real no-response transaction under an explicit disconnected-
 controller profile and queuing the other probes. Original SRAM and default-thread
 initialization now return as well, using a persisted native console profile and
-actual EXI DMA. It reaches __OSInitAudioSystem at `0x801B20F4`; full OSInit,
+actual EXI DMA. Original audio initialization now executes its cache-flush
+system-call vector, halted DSP reset and two real ARAM DMA transfers. It stops at
+DSP unhalt (`0x801B223C`), before DSP execution/mailbox delivery; full OSInit,
 game initialization, the main loop and a rendered game frame remain unachieved.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
@@ -422,6 +424,22 @@ queue. Full runtime scheduling and device services are still needed.
   original thread/context/queue state and the real __OSInitAudioSystem call at
   `0x801B20F4`, LR `0x801B0F9C`. No working scheduler, audio, complete OSInit or game frame.
   Device format: [YAGCD RTC and SRAM](https://gc-forever.com/yagcd/chap10.html).
+- [x] Connect original audio startup through the installed cache-flush exception
+  vector and real ARAM transfers. Compile sc/rfi with saved SRR0/SRR1, masked
+  exception MSR, unchanged LR, shared dispatcher budgets and checked return.
+  Register copied vectors against their original source, then verify the actual
+  installed destination on every execution. Keep original HID0 DCFA/isync/sync
+  instructions, rather than replacing the system call with a success callback.
+  Map an explicit 16 MiB ARAM profile, halted DSP reset and mailbox clearing,
+  configuration and bounded bidirectional RAM/ARAM DMA with real byte copies,
+  W1C completion and interrupt masks. Reject DSP unhalt, mailbox consumption and
+  unsupported operations without inventing microcode execution or acknowledgements.
+  The production runner executes both original 32-byte ARAM transfers and stops
+  at `0x801B223C`, LR `0x801B21E0`, with DSP halted, pending SI completion retained
+  and the original DSP program payload installed in RAM. Test SRR/MSR/LR state,
+  missing/modified vectors, exception budgets, DMA bounds/direction and RAM guards.
+  Audio initialization and full OSInit remain incomplete.
+  Hardware reference: [YAGCD DSP and ARAM](https://gc-forever.com/yagcd/chap5.html#sec5.6).
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

@@ -51,6 +51,8 @@ void NativeDvdQueue::Invoke(uint32_t callback, uint32_t result, uint32_t info) {
     const auto performanceMonitor = state_.performanceMonitor;
     const auto cr = state_.cr, xer = state_.xer, lr = state_.lr;
     const auto ctr = state_.ctr, pc = state_.pc;
+    const auto srr0 = state_.srr0, srr1 = state_.srr1;
+    const auto systemCallActive = state_.systemCallActive;
     const bool interrupts = state_.externalInterruptsEnabled;
     const auto restore = [&] {
         std::copy(gpr.begin(), gpr.end(), std::begin(state_.gpr));
@@ -67,6 +69,9 @@ void NativeDvdQueue::Invoke(uint32_t callback, uint32_t result, uint32_t info) {
         state_.lr = lr;
         state_.ctr = ctr;
         state_.pc = pc;
+        state_.srr0 = srr0;
+        state_.srr1 = srr1;
+        state_.systemCallActive = systemCallActive;
         state_.externalInterruptsEnabled = interrupts;
     };
     state_.gpr[3] = result;

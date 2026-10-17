@@ -57,6 +57,7 @@ int RunCli(int argc, Character** argv) {
                      "PI/MI/DSP/AI/EXI/SI, analog VI cable status, "
                      "empty memory-card slots/SP1 and disconnected controllers, native console "
                      "(bounded %s/%%), persisted SRAM reads (writes/RTC/ROM unimplemented); "
+                     "16 MiB ARAM, halted DSP reset/DMA (DSP execution unimplemented); "
                      "162 MHz bus/486 MHz CPU metadata, steady-clock 40.5 MHz time base.\n";
         std::cout << "Native SRAM profile: " << sramPath.u8string() << '\n';
         const auto result = RunOriginalStartup(dispatcher, state, blocks, depth);

@@ -50,8 +50,21 @@ void NativeDispatcher::Register(
                  static_cast<uint64_t>(translation.address) + 1u) / 4u) {
             throw std::runtime_error("Invalid native translation descriptor.");
         }
+        if (translation.installationSource != 0 &&
+            ((translation.installationSource & 3u) != 0 ||
+             translation.expectedWords.size() >
+                (std::numeric_limits<uint32_t>::max() -
+                 static_cast<uint64_t>(translation.installationSource) + 1u) / 4u)) {
+            throw std::runtime_error("Invalid native translation installation source.");
+        }
         ppc_memory_offset(state, translation.address, translation.expectedWords.size() * 4u);
-        CheckCode(state, translation);
+        if (translation.installationSource != 0) {
+            auto source = translation;
+            source.address = translation.installationSource;
+            CheckCode(state, source);
+        } else {
+            CheckCode(state, translation);
+        }
         if (!staged.emplace(translation.address, Entry{moduleId, translation}).second) {
             throw std::runtime_error("Native function address is already registered: " +
                                      Address(translation.address) + ".");
@@ -114,7 +127,7 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
     }
     state.pc = address;
     do {
-        ppc_check_pending_si_interrupt(state, state.externalInterruptsEnabled);
+        ppc_check_pending_interrupts(state, state.externalInterruptsEnabled);
         if (remaining == 0) {
             throw std::runtime_error("Native function-entry budget exceeded at " + Address(state.pc) + ".");
         }
@@ -135,10 +148,25 @@ void NativeDispatcher::Execute(PpcState& state, uint32_t address,
         throw std::runtime_error("Invalid or reentrant native execution request.");
     }
     auto previous = std::move(state.callGuest);
+    auto previousException = std::move(state.callException);
     executing_ = true;
     size_t depth = 1;
     size_t remaining = maxFunctionEntries;
     try {
+        state.callException = [this, &state, &remaining, &depth, maxCallDepth](
+                                  uint32_t target, uint32_t resume, PpcState& guest) {
+            if (&guest != &state || (target & 3u) != 0 || (resume & 3u) != 0) {
+                throw std::runtime_error("Invalid native guest exception context or address.");
+            }
+            ++depth;
+            try {
+                Run(guest, target, resume, remaining, depth, maxCallDepth);
+            } catch (...) {
+                --depth;
+                throw;
+            }
+            --depth;
+        };
         state.callGuest = [this, &state, &remaining, &depth, maxCallDepth](
                               uint32_t target, PpcState& guest) {
             if (&guest != &state || (target & 3u) != 0 || (guest.lr & 3u) != 0) {
@@ -156,9 +184,11 @@ void NativeDispatcher::Execute(PpcState& state, uint32_t address,
         Run(state, address, state.lr, remaining, depth, maxCallDepth);
     } catch (...) {
         state.callGuest = std::move(previous);
+        state.callException = std::move(previousException);
         executing_ = false;
         throw;
     }
     state.callGuest = std::move(previous);
+    state.callException = std::move(previousException);
     executing_ = false;
 }

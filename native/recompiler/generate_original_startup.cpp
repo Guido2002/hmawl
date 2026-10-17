@@ -23,8 +23,8 @@ std::string Hex(uint32_t value) {
 bool IsBranch(uint32_t word) {
     const auto opcode = word >> 26;
     const auto extended = (word >> 1) & 1023u;
-    return opcode == 16 || opcode == 18 ||
-           (opcode == 19 && (extended == 16 || extended == 528));
+    return opcode == 16 || opcode == 17 || opcode == 18 ||
+           (opcode == 19 && (extended == 16 || extended == 50 || extended == 528));
 }
 
 uint32_t BranchTarget(uint32_t address, uint32_t word) {
@@ -54,6 +54,11 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < words.size(); ++i) {
                 instructions.emplace(range.address + static_cast<uint32_t>(i * 4), words[i]);
             }
+            const auto systemCallWords = image.ReadWords(0x801b6968u, 0x1cu);
+            for (size_t i = 0; i < systemCallWords.size(); ++i) {
+                instructions.emplace(0xc00u + static_cast<uint32_t>(i * 4), systemCallWords[i]);
+            }
+            leaders.insert(0xc00u);
         }
         for (const auto& instruction : instructions) {
             if (IsBranch(instruction.second)) {
@@ -81,7 +86,11 @@ int main(int argc, char** argv) {
             functions << RecompileFunction(address, words, {true, true}) << '\n';
             bindings << "        {0x" << Hex(address) << "u, ppc_" << Hex(address) << ", {";
             for (auto word : words) bindings << "0x" << Hex(word) << "u,";
-            bindings << "}},\n";
+            bindings << "}";
+            if (address >= 0xc00u && address < 0xc1cu) {
+                bindings << ",0x" << Hex(0x801b6968u + address - 0xc00u) << "u";
+            }
+            bindings << "},\n";
         }
         bindings << "        {0x802383C0u, NativeGuestVprintf, {";
         for (auto word : image.ReadWords(0x802383c0u, 0x7cu)) {

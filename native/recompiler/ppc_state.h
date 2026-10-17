@@ -49,6 +49,18 @@ struct PpcSerialInterface {
     std::array<uint32_t, 32> buffer = {};
 };
 
+struct PpcDspHardware {
+    uint16_t aramConfiguration = 0;
+    uint32_t dmaMainAddress = 0;
+    uint32_t dmaAramAddress = 0;
+    uint32_t dmaCount = 0;
+    uint32_t toDspMailbox = 0;
+    uint32_t fromDspMailbox = 0;
+    uint32_t resetCount = 0;
+    uint32_t dmaTransfers = 0;
+    std::vector<uint8_t> aram;
+};
+
 struct PpcFpr {
     uint64_t ps0 = 0;
     uint64_t ps1 = 0;
@@ -74,9 +86,13 @@ struct PpcState {
     uint32_t lr = 0;
     uint32_t ctr = 0;
     uint32_t pc = 0;
+    uint32_t srr0 = 0;
+    uint32_t srr1 = 0;
+    bool systemCallActive = false;
     std::vector<uint8_t> memory;
     PpcMemoryMap memoryMap = PpcMemoryMap::Flat;
     std::function<void(uint32_t, PpcState&)> callGuest;
+    std::function<void(uint32_t, uint32_t, PpcState&)> callException;
     std::function<uint64_t()> readTimeBase;
     std::function<void(PpcState&)> submitDvdRead;
     std::function<void(PpcState&)> cancelDvdRead;
@@ -84,6 +100,7 @@ struct PpcState {
     std::optional<uint32_t> piInterruptMask;
     std::optional<uint16_t> miInterruptMask;
     std::optional<uint16_t> dspControl;
+    std::optional<PpcDspHardware> dspHardware;
     std::optional<uint32_t> aiControl;
     std::optional<uint32_t> diConfiguration;
     std::optional<uint16_t> viDtvStatus;
@@ -126,11 +143,19 @@ inline void ppc_reset_performance_monitor(PpcState& state, unsigned index, uint3
     state.performanceMonitor[index] = 0;
 }
 
-inline void ppc_check_pending_si_interrupt(const PpcState& state, bool enabled) {
+inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
     if (enabled && state.piInterruptMask.has_value() && (*state.piInterruptMask & 8u) != 0 &&
         state.serialInterface.has_value() &&
         (state.serialInterface->communication & 0xc0000000u) == 0xc0000000u) {
         throw std::runtime_error("Native SI completion interrupt requires guest interrupt delivery.");
+    }
+    if (enabled && state.piInterruptMask.has_value() && (*state.piInterruptMask & 0x80u) != 0 &&
+        state.dspHardware.has_value() && state.dspControl.has_value()) {
+        const auto control = *state.dspControl;
+        if ((control & 0x180u) == 0x180u || (control & 0x60u) == 0x60u ||
+            (control & 0x18u) == 0x18u) {
+            throw std::runtime_error("Native DSP interrupt requires guest interrupt delivery.");
+        }
     }
 }
 
@@ -138,7 +163,7 @@ inline void ppc_write_msr(PpcState& state, uint32_t value) {
     if (((ppc_read_msr(state) ^ value) & ~0xa002u) != 0) {
         throw std::runtime_error("Unsupported PowerPC MSR mode change (only FP/EE/RI supported).");
     }
-    ppc_check_pending_si_interrupt(state, (value & 0x8000u) != 0);
+    ppc_check_pending_interrupts(state, (value & 0x8000u) != 0);
     state.msr = value & ~0x8000u;
     state.externalInterruptsEnabled = (value & 0x8000u) != 0;
 }
@@ -155,8 +180,8 @@ inline void ppc_sync() {
 }
 
 inline void ppc_write_hid0(PpcState& state, uint32_t value) {
-    if (((state.hid0 ^ value) & ~0xca00u) != 0) {
-        throw std::runtime_error("Unsupported PowerPC HID0 change (only ICE/DCE/ICFI/SPD supported).");
+    if (((state.hid0 ^ value) & ~0xca08u) != 0) {
+        throw std::runtime_error("Unsupported PowerPC HID0 change (only ICE/DCE/ICFI/SPD/DCFA supported).");
     }
     // RAM is coherent and translations are static, with code checks at dispatch.
     if ((value & 0x800u) != 0) {
@@ -207,6 +232,12 @@ inline void ppc_flush_cache_block(const PpcState& state, uint32_t address) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
+        const auto& dsp = *state.dspHardware;
+        if (address == 0xcc005020u) return dsp.dmaMainAddress;
+        if (address == 0xcc005024u) return dsp.dmaAramAddress;
+        if (address == 0xcc005028u) return dsp.dmaCount;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.exiDmaEnabled) {
         for (unsigned channel = 0; channel < 3; ++channel) {
             if (address == 0xcc006804u + channel * 0x14u) return state.exiDmaAddress[channel];
@@ -302,6 +333,19 @@ inline void ppc_write_u64(PpcState& state, uint32_t address, uint64_t value) {
 }
 
 inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
+        const auto& dsp = *state.dspHardware;
+        if (address == 0xcc005000u) return static_cast<uint16_t>(dsp.toDspMailbox >> 16);
+        if (address == 0xcc005002u) return static_cast<uint16_t>(dsp.toDspMailbox);
+        if (address == 0xcc005004u) return static_cast<uint16_t>(dsp.fromDspMailbox >> 16);
+        if (address == 0xcc005006u) {
+            if ((dsp.fromDspMailbox & 0x80000000u) != 0) {
+                throw std::runtime_error("DSP mailbox consumption requires a native DSP execution backend.");
+            }
+            return static_cast<uint16_t>(dsp.fromDspMailbox);
+        }
+        if (address == 0xcc005012u) return dsp.aramConfiguration;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00206cu &&
         state.viDtvStatus.has_value()) {
         return *state.viDtvStatus;
@@ -321,6 +365,37 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
+        auto& dsp = *state.dspHardware;
+        if (address == 0xcc005020u || address == 0xcc005024u) {
+            if ((value & ~0x03ffffe0u) != 0) {
+                throw std::runtime_error("ARAM DMA address must be 32-byte aligned and fit its register.");
+            }
+            (address == 0xcc005020u ? dsp.dmaMainAddress : dsp.dmaAramAddress) = value;
+            return;
+        }
+        if (address == 0xcc005028u) {
+            if (!state.dspControl.has_value() || (*state.dspControl & 4u) == 0 ||
+                (value & ~0x83ffffe0u) != 0 || (value & 0x03ffffe0u) == 0) {
+                throw std::runtime_error("ARAM DMA requires halted DSP and a nonzero aligned transfer length.");
+            }
+            const auto length = value & 0x03ffffe0u;
+            const auto offset = ppc_memory_offset(state, dsp.dmaMainAddress, length);
+            if (dsp.dmaAramAddress > dsp.aram.size() ||
+                length > dsp.aram.size() - dsp.dmaAramAddress) {
+                throw std::runtime_error("ARAM DMA range exceeds configured native ARAM.");
+            }
+            const bool read = (value & 0x80000000u) != 0;
+            for (size_t index = 0; index < length; ++index) {
+                if (read) state.memory[offset + index] = dsp.aram[dsp.dmaAramAddress + index];
+                else dsp.aram[dsp.dmaAramAddress + index] = state.memory[offset + index];
+            }
+            dsp.dmaCount = value;
+            ++dsp.dmaTransfers;
+            *state.dspControl |= 0x20u;
+            return;
+        }
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.exiDmaEnabled) {
         for (unsigned channel = 0; channel < 3; ++channel) {
             const auto base = 0xcc006800u + channel * 0x14u;
@@ -537,6 +612,44 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
 }
 
 inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
+        auto& dsp = *state.dspHardware;
+        if (address == 0xcc005012u) {
+            if (value != 0x43u) throw std::runtime_error("Unsupported native ARAM configuration.");
+            dsp.aramConfiguration = value;
+            return;
+        }
+        if (address == 0xcc005000u) {
+            if (value != 0 || (dsp.toDspMailbox & 0x80000000u) != 0) {
+                throw std::runtime_error("DSP outgoing mailbox requires a native DSP execution backend.");
+            }
+            dsp.toDspMailbox &= 0xffffu;
+            return;
+        }
+        if (address == 0xcc005002u) {
+            throw std::runtime_error("DSP outgoing mailbox requires a native DSP execution backend.");
+        }
+        if (address == 0xcc00500au) {
+            if (!state.dspControl.has_value() || (value & ~0x0fffu) != 0 || (value & 2u) != 0) {
+                throw std::runtime_error("Unsupported native DSP control write.");
+            }
+            const auto previous = *state.dspControl;
+            if ((value & 4u) == 0 && ((previous & 4u) != 0 || (value & 1u) != 0)) {
+                throw std::runtime_error("DSP unhalt requires a native DSP execution backend; no mailbox acknowledgement was fabricated.");
+            }
+            if ((value & 1u) != 0 && (value & 0x804u) != 0x804u) {
+                throw std::runtime_error("DSP reset requires the DSP halted with bootstrap reset asserted.");
+            }
+            if ((value & 1u) != 0) {
+                dsp.toDspMailbox = 0;
+                dsp.fromDspMailbox = 0;
+                ++dsp.resetCount;
+            }
+            *state.dspControl = static_cast<uint16_t>(
+                (previous & 0x02a8u & ~value) | (value & 0x0954u));
+            return;
+        }
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00500au &&
         state.dspControl.has_value()) {
         const uint16_t previous = *state.dspControl;
@@ -721,6 +834,34 @@ inline void ppc_call_guest(PpcState& state, uint32_t address) {
         throw std::runtime_error("No native translation registered for guest call");
     }
     state.callGuest(address, state);
+}
+
+inline void ppc_system_call(PpcState& state, uint32_t next) {
+    if (state.memoryMap != PpcMemoryMap::GameCubeRam || state.systemCallActive ||
+        !state.callException || (ppc_read_msr(state) & ~0xa032u) != 0) {
+        throw std::runtime_error("Unsupported or nested native PowerPC system-call context.");
+    }
+    state.srr0 = next;
+    state.srr1 = ppc_read_msr(state);
+    state.systemCallActive = true;
+    state.msr = 0;
+    state.externalInterruptsEnabled = false;
+    state.callException(0xc00u, next, state);
+    if (state.systemCallActive) {
+        throw std::runtime_error("Native PowerPC system-call handler returned without rfi.");
+    }
+}
+
+inline void ppc_return_from_system_call(PpcState& state) {
+    if (!state.systemCallActive || (state.srr0 & 3u) != 0 ||
+        (state.srr1 & ~0xa032u) != 0) {
+        throw std::runtime_error("Native rfi requires a supported active system-call context.");
+    }
+    ppc_check_pending_interrupts(state, (state.srr1 & 0x8000u) != 0);
+    state.msr = state.srr1 & ~0x8000u;
+    state.externalInterruptsEnabled = (state.srr1 & 0x8000u) != 0;
+    state.pc = state.srr0;
+    state.systemCallActive = false;
 }
 
 inline uint64_t ppc_read_time_base(const PpcState& state) {
