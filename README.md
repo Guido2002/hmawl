@@ -160,11 +160,119 @@ A modified test record exercises copying and verifies an explicit failure at
 the still-unimplemented cache synchronization service; it is not a no-op stub.
 The memory initializer is tested **independently** of the hardware setup.
 
+The runtime now stores all 32 floating-point registers as raw 64-bit primary
+and paired lanes, plus FPSCR state. Compiled `lfd`/`stfd` instructions support
+immediate, indexed and base-update forms, with big-endian bytes, word alignment
+and checked RAM ranges. Register moves and sign operations
+(`fmr`, `fneg`, `fabs`, `fnabs`, including record forms) preserve NaN payloads,
+signed zero and the independent paired lane; record forms copy FPSCR's summary
+field into CR1, not the integer comparison flags. No host floating-point
+conversion or arithmetic is used.
+
+Independent original-code tests execute the scalar register-clear block from
+`__OSFPRInit` (`0x801b0bcc`) and the SDK's f14..f31 save/restore helpers.
+They check exact bits, untouched paired lanes, flags and whole-RAM guards.
+The scalar block now executes its original `mtfsf` at `0x801b0c4c`, clears
+FPSCR and returns. Compiled `mtfsf`, `mtfsfi` and `mffs` support masked status
+writes, immediate fields, derived invalid/enabled-exception summaries, boxed
+FPSCR reads and optional CR1 updates. Tests execute every field mask, every
+immediate field/value and both record forms, including zero masks, exception
+cause/enable combinations, sticky FX preservation and all rounding-mode bits.
+The original `PPCMffpscr`/`PPCMtfpscr` SDK wrappers run with checked stack
+boundaries and preserved f31/paired lanes.
+
+This is status-register support only: no host rounding environment is changed,
+and floating-point arithmetic or MSR-dependent program-exception delivery is
+not implemented. Privileged setup and paired-single initialization are not
+skipped in a claimed full startup. DVD callback context restoration includes
+both FPR lanes and FPSCR, including cancellation and throwing callbacks.
+
+Paired-single register moves/sign operations and all four lane merges now
+compile too, including record forms and overlapping source/destination registers.
+Immediate `psq_l`/`psq_lu` and indexed `psq_lx`/`psq_lux` support unquantized
+single-precision data and unsigned/signed 8-bit and 16-bit integer data, W=0 two-value loads and W=1
+loads with a 1.0 second lane. Single values
+are widened using integer bit operations, preserving signed zero, subnormals,
+infinities and signaling/quiet NaN payloads without host arithmetic. All eight
+GQRs have compiled SPR read/write support. Integer loads apply the signed
+six-bit GQR scale exactly using integer bit operations. Tests exhaust every
+8/16-bit input for all 64 scales and all four integer types (8,421,376
+input/type/scale combinations), then exercise generated loads through all
+GQR selectors, W/update modes, RAM aliases and byte/halfword boundary cases.
+Both addressing forms share the same checked load/conversion path. Indexed
+tests additionally cover RA=0, RB=0, overlapping base/index registers,
+32-bit address wrapping, preserved index registers and no partial base/FPR
+updates after failed reads. W and GQR selector bits are decoded separately
+from the indexed subopcode; invalid record/update forms are rejected.
+Reserved load types 1..3, paired stores and paired arithmetic remain
+explicitly unsupported.
+
+The original GQR-reset block (`0x801b15a4`) and FPR initialization body
+(`0x801b0b44`) now run independently in the startup tests: the original paired
+load, 31 paired register copies, scalar clear and FPSCR reset leave all 64
+lanes and FPSCR zero, with no RAM writes. DVD callbacks also restore GQR state.
+The full original `__OSFPRInit` (`0x801b0b2c`) also runs independently, including
+its MSR FP-enable prefix and HID2 branch: scalar-only mode preserves secondary
+lanes, while paired mode clears both lanes. Compiled `mfmsr`/`mtmsr` share the
+existing native interrupt mask as the sole EE source; FP is retained as guest
+status. HID2 SPR transfers support PSE/LSQE changes. All other MSR/HID2 bit
+changes fail before mutation, rather than silently claiming support for MMU,
+privilege, exception or DMA modes. Floating-point availability exceptions and
+HID2 instruction gating are not modeled; translated instructions remain usable
+in isolated fixtures.
+
+The complete original `__OSPSInit` now runs, including the HID2 SDK wrappers,
+`ICFlashInvalidate`, `sync`, all eight GQR resets and the original stack/return
+epilogue. HID0 SPR transfers support cache enable bits ICE/DCE and synchronous,
+self-clearing instruction-cache invalidation ICFI. Other changed HID0 bits
+(including cache locking and data-cache flash invalidation) fail before
+mutation. `sync` and `isync` issue host memory fences; guest RAM aliases already
+share coherent storage, and static translations still undergo code-word checks
+at dispatch. This is not emulation of cache timing, speculative execution or
+self-modifying code. Tests confirm invalidation retains valid bindings and
+does not hide modified-code failures. Original HID0 wrappers, `ICEnable` and
+`DCEnable` also run with RAM/stack/flag guards.
+
+The complete original `__init_hardware` (`0x80003400`) now returns, including
+`__OSCacheInit`, original L2 invalidation loops, original `DBPrintf` (which only
+saves arguments in this build), and original DMA error-handler registration.
+Tests cover all 16 initial L1/L2/interrupt combinations, the already-enabled L2
+path, masked invalidation, restored MSR/ABI, original diagnostic call ordering
+and RAM guards. L2CR supports L2E/L2I changes with synchronous invalidation over
+coherent RAM and L2IP clear; other configuration changes and invalidation while
+enabled fail explicitly. This does not emulate cache timing or deliver DMA
+exceptions. The installed DMA handler is not executed, and the floating-point
+exception-handler path of `OSSetErrorHandler` is not certified by these tests.
+DVD callbacks restore L2CR/HID0/MSR/HID2 along with floating-point state after
+success, cancellation and exceptions.
+
 These tests **do not boot
-the game**: entry-point execution stops at `0x80003158`, before the call to
-`__init_hardware`. Hardware initialization, OS services, FPU/paired singles,
+the game**: integrated original entry-point execution now runs register,
+hardware, ROM/BSS and argument initialization followed by original `DBInit`,
+then stops at `0x80003264` before `OSInit`. The fixture assumes loader-enabled
+MSR IR/DR bits and zero-initialized RAM; it does not implement an MMU. BSS
+poisoning excludes the two zero constants that hardware reads before BSS clear.
+Tests check BSS, stack linkage, DB interface/verbose globals and the physical
+exception destination installed by `DBInit`. OS services, floating-point
+arithmetic/rounding conversions, MSR-dependent exception handling and full paired-single support,
 GX, audio and dynamic REL runtime integration are still missing. Unmapped addresses, including
 MMIO, throw rather than being silently treated as RAM.
+
+Continuing that verified state, an independent original `OSInit` prefix now
+sets `AreWeInitialized`, calls the original `__OSGetSystemTime`, records
+`__OSStartTime`, and masks interrupts. It stops at `0x801b0e2c` before the
+performance-monitor setup; first-time `OSInit` does not yet return. Its
+already-initialized branch and return epilogue are tested separately, not used
+to skip the unfinished first-time path.
+
+Original `OSGetTime` uses the existing native time-base callback and retries a
+torn upper/lower sample; `__OSGetSystemTime` adds the low-memory 64-bit offset
+under the original interrupt mask. Tests cover rollover retry, carry/full-width
+wrap, offset combinations, both prior interrupt states and stack/ABI guards.
+New compiled `addc`/`adde` reuse checked carry-state logic, including record
+forms, overlapping registers and preservation of other XER bits; overflow-enable
+forms remain unsupported. No performance counters, OS scheduler or RTC backend
+are implied by these time tests.
 
 ### REL module parsing and linking
 
@@ -413,10 +521,53 @@ exceptions. This models safe-point delivery only, not privileged MSR state,
 hardware interrupts, preemption or a Windows thread scheduler. The fixture
 starts with delivery enabled; it has not run the original OS startup.
 
+The original game `DvdFile::Close`, SDK `DVDClose`, synchronous cancellation
+wrapper, cancel-completion callback and `OSWakeupThread` are compiled too.
+Real raw/compressed resources exercise pending-read cancellation through close,
+repeated close, reopen, reopen while a read is queued, and close after completion.
+Tests check observer delivery, untouched canceled-read destinations, interrupt
+mask restoration, terminal SDK states and explicit missing-service/unowned-command
+failures. Original behavior is retained: `Close` does not clear the game's open
+flag; `Open(nullptr)` clears that flag and the rounded size. No host handle
+state is substituted for these original object fields.
+Wakeup tests cover empty queues and suspended waiters; the DVD close fixture has
+no sleeping threads. Runnable-thread selection remains an explicit untranslated
+boundary, not a successful scheduler stub.
+
+The original decode queue reset/enqueue/observer setup and worker entry
+(`0x8019a6bc`) are now compiled. A synthetic fixture and a real
+`roomcommon.arc.clz` test exercise both normal-heap and alternate-pool allocation: original
+game DVD read into an original allocation, original worker allocation and CLZ
+decode, original source-release routing, completion notification, and U8
+initialization. Every decoded byte is compared with the checked decoder.
+The tests verify ABI/RAM guards, completion flags, no callback replay and
+complete heap coalescing after releasing the output. The optional completion
+observer is test-only; the worker and resource lifetime logic are original.
+The alternate pool uses its original allocator, membership lookup and release
+functions with separate fixture RAM and descriptors. Four-entry synthetic
+batches mix input/output pools, verify FIFO completion and first/last/no
+observer behavior, and free results in a different order. Both arenas must
+coalesce completely; RAM guards allow only actual output bytes and metadata
+writes. Exhausting the alternate pool still reaches the original `OSPanic`
+boundary without losing the input or reporting successful decoding. The
+original allocation-counter change on this fatal path is preserved.
+
+The worker's `DCFlushRange` call has an explicit original-code-checked native
+binding. Guest RAM aliases already share coherent host memory; this service
+validates the cache-line-rounded RAM range and issues a host memory fence.
+It does not emulate the GameCube cache, syscall handler or GPU cache behavior.
+Tests cover aliases, zero lengths, boundaries, overflow and MMIO rejection.
+
+The decode fixture calls the worker only after its input is ready. It does
+not start the original OS thread: starting a nonempty queue still fails
+explicitly at the unimplemented thread launcher (`0x8019a668`). The original
+worker busy-waits for unready entries, so it is not a cooperative scheduler.
+Thread waits and overlapping DVD/decode execution are not integrated.
+
 This remains controlled integration, not a full DVD/OS service. Pumping is
 explicit and single-threaded, not interrupt or thread scheduling; cancellation
-of an in-flight hardware transfer, synchronous SDK reads/close, the game's
-decode queue and resource lifetime/allocator integration are still missing.
+of an in-flight hardware transfer, synchronous SDK reads and full decode
+queue scheduling/resource-manager integration are still missing.
 These are controlled fixtures with explicitly supplied system/context globals,
 not a full initialization of those game systems. Scene assignment to `g_system`
 has not completed. Floating-point continuations remain unregistered;
@@ -430,7 +581,8 @@ when it reaches an unsupported instruction instead of silently generating
 incorrect game code. Initial coverage includes common integer immediates and
 logical operations, count-leading-zeros, rotates/masks, multiple and indexed word/halfword/byte
 loads and stores, basic arithmetic, condition-register comparisons,
-direct/conditional branches, and link-register calls/returns. Generated output
+direct/conditional branches, link-register calls/returns, double-precision
+loads/stores and floating-point register moves/sign operations. Generated output
 is an experimental building block; it does not yet provide the complete game
 runtime or a playable executable.
 

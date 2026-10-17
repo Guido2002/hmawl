@@ -93,6 +93,114 @@ queue. Full runtime scheduling and device services are still needed.
   This initializer runs independently in tests; it does not bypass hardware
   initialization in a claimed game boot. ROM relocation still fails explicitly
   at the cache-flush dependency, which has no native implementation yet.
+- [x] Add raw primary/paired FPR lanes and FPSCR state. Compile double-precision
+  load/store immediate/indexed/update forms and scalar register move/sign
+  operations, including CR1 record semantics. Test signed zero, infinities,
+  normal/subnormal values, NaN payloads, separate FPR/GPR register indices,
+  RAM aliases, alignment, address wrapping and transactional access failures.
+  Execute the original scalar `__OSFPRInit` block independently and the
+  original f14..f31 save/restore helpers with whole-RAM guards.
+  Preserve both FPR lanes/FPSCR across DVD success, cancel and throwing callbacks.
+  Arithmetic, rounding conversions, full paired-single execution and privileged
+  hardware initialization remain unsupported; the entry-point boot boundary
+  has not moved.
+- [x] Compile FPSCR masked/immediate writes and boxed reads
+  (`mtfsf`, `mtfsfi`, `mffs`, including record forms). Recompute VX/FEX from
+  cause/enable flags while preserving explicitly written FX and unselected
+  fields; verify all 256 masks, 8 fields, 16 immediate values and both record
+  forms with independent reference tests. Reject reserved instruction bits.
+  The original scalar FPR initialization now clears FPSCR and returns; original
+  `PPCMffpscr`/`PPCMtfpscr` wrappers preserve stack boundaries, f31 and paired
+  lanes. Rounding-mode bits are guest state only, not host-global settings.
+  MSR-dependent program exceptions and arithmetic rounding remain unsupported;
+  this does not bypass the full startup's hardware/paired-single requirements.
+- [x] Compile paired register moves/sign operations and all four lane merges,
+  preserving raw lane bits, overlapping sources/destinations and CR1 record
+  behavior. Add all eight GQR SPR transfers and unquantized immediate
+  `psq_l`/`psq_lu` with both W modes, sign-extended displacement and transactional
+  whole-pair RAM validation. Widen IEEE single bits without host arithmetic;
+  test normalization boundaries, NaN payloads, 65,536 deterministic finite
+  conversion candidates, all GQR selectors, aliases, RAM boundaries and explicit
+  rejection of every unsupported load type. Save GQRs across DVD callbacks.
+  Execute original GQR reset and the original paired/scalar FPR initialization
+  body; all 64 lanes and FPSCR clear, return ABI and whole RAM preserved.
+  Privileged MSR/HID2/cache setup is not executed; paired stores and paired
+  arithmetic remain unsupported. Integer load quantization and indexed loads
+  are covered below.
+- [x] Add unsigned/signed 8-bit and 16-bit integer dequantization for immediate
+  `psq_l`/`psq_lu`, with exact signed six-bit GQR scaling, big-endian reads,
+  type-dependent byte counts and W=1's fixed second lane.
+  Use integer-only IEEE bit construction; every representable integer/scale
+  combination fits exactly, without host rounding or arithmetic.
+  Check all 8,421,376 input/type/scale combinations against an independent
+  numeric reference. Exercise compiled loads across every GQR selector,
+  scale, W/update mode and RAM alias, signed/unsigned extremes, unaligned
+  source data, final legal RAM access and transactional boundary failures.
+  Reserved load types still fail explicitly. This extends data loading,
+  not paired arithmetic, GPU submission or the hardware startup boundary.
+- [x] Compile indexed `psq_lx`/`psq_lux` through the shared immediate-load
+  implementation. Run the same floating/integer payload, GQR-selector, W/update,
+  scale, RAM-alias and boundary-failure checks for both addressing forms.
+  Verify RA=0, RB=0, RA=RB update ordering, index preservation and 32-bit address
+  wrapping with whole-RAM guards. Reject invalid record forms, update RA=0
+  and still-unsupported paired-store encodings. This is instruction support,
+  not proof of an original indexed game routine or a full game startup.
+- [x] Compile `mfmsr`/`mtmsr` with FP status and the existing cooperative
+  interrupt mask as the sole EE source. Compile HID2 SPR read/write with
+  PSE/LSQE changes; reject every other changed bit before mutation, including
+  unsupported MMU, exception, privilege and DMA mode changes. Test all allowed
+  mode combinations, preserved non-changing MSR bits, reserved instruction
+  fields and every unsupported changed bit in both directions.
+  Execute the complete original `__OSFPRInit`, including its FP-enable prefix
+  and both HID2 branch outcomes. Initially execute the original `__OSPSInit`
+  prefix and HID2 wrappers up to `ICFlashInvalidate` at `0x801b159c` (the
+  complete routine is covered below). Preserve MSR/HID2 across DVD callbacks,
+  including cancellation and exceptions. This does not implement privileged
+  execution, FP-unavailable exceptions or HID2 instruction gating, and does
+  not move the entry-point boot boundary.
+- [x] Compile HID0 SPR transfers for ICE/DCE and self-clearing ICFI, plus
+  `sync`/`isync` as host memory fences over coherent guest RAM. Reject reserved
+  instruction fields and all other changed HID0 bits atomically. Verify all
+  enable/invalidation combinations, repeated invalidation, preserved unrelated
+  bits, all unsupported-bit transitions and unchanged RAM/register guards.
+  Retain static translation bindings and dispatch code checks after invalidation;
+  cache timing, locking and self-modifying code are not implemented.
+  Execute original HID0 wrappers, `ICFlashInvalidate`, `ICEnable`, `DCEnable`
+  and complete `__OSPSInit`. Run the original `__init_hardware` prefix through
+  paired and FPR initialization in order, checking stack writes and all
+  GQR/FPR/FPSCR resets; stop before `__OSCacheInit` at `0x80003418`, not past
+  its L2/error-handler dependencies. Restore HID0 across DVD callbacks.
+  Fix normal PC advancement for non-branch opcode-19 instructions, with
+  terminal `isync`/`crxor`/`crclr` regression tests. Entry-point boot is still
+  incomplete; this is an independent hardware-prefix fixture.
+- [x] Compile L2CR transfers for L2E/L2I, synchronously completing invalidation
+  over coherent RAM with L2IP clear. Reject other changed bits and invalidation
+  while enabled before mutation. Test allowed writes, repeated invalidation,
+  preserved configuration and every unsupported changed bit in both directions.
+  Execute complete original `__init_hardware`/`__OSCacheInit`, L2 invalidation
+  loops, original `DBPrintf` and DMA error-handler registration, including the
+  original interrupt disable/restore routines. Check all 16 L1/L2/interrupt
+  initial-state combinations, diagnostic call order, old-handler return,
+  stack/ABI, masked invalidation and whole-RAM guards. Preserve L2CR across
+  DVD callbacks. DMA exception delivery, cache timing and the special FPU
+  error-handler path are not verified.
+- [x] Execute the original entry continuously through register initialization,
+  complete hardware initialization, ROM/BSS clear, empty argument setup and
+  original `DBInit`. Verify its globals/physical exception destination and stop
+  before `OSInit` at `0x80003264`. Loader IR/DR state and initially zero RAM
+  are fixture preconditions, not implemented MMU behavior. Preserve the two
+  hardware zero constants while poisoning the remaining BSS; check original
+  linkage writes, BSS clearing and whole-RAM guards. This is not a game boot.
+- [x] Compile `addc`/`adde` (including record forms) using shared carry logic.
+  Test carry-in/out, signed boundaries, source/destination overlap, CR0/SO and
+  preservation of unrelated XER bits; overflow-enable forms remain rejected.
+  Execute original `OSGetTime`/`__OSGetSystemTime` through the native time-base
+  callback and original interrupt wrappers. Test torn-read retry, 64-bit offset
+  carry/wrap, both interrupt states and RAM/ABI guards.
+  Continue the verified entry state with the original `OSInit` prefix: set the
+  initialization flag, record system start time and mask interrupts. Stop at
+  `0x801b0e2c` before performance-monitor setup. Test the already-initialized
+  skip and epilogue separately; never claim they complete first-time startup.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic
@@ -201,8 +309,8 @@ queue. Full runtime scheduling and device services are still needed.
   buffers, metadata changes, missing callbacks/services, requeueing, zero-size
   reads, non-reentrancy, callback exceptions and truncated RVZ I/O.
   Pumping is explicitly host-driven/single-threaded. In-flight transfer
-  cancellation, synchronous SDK read/close, OS scheduling and the original game
-  decode queue remain unimplemented.
+  cancellation, synchronous SDK reads, OS scheduling and decode-queue scheduling
+  remain unimplemented. Close integration is covered below.
 - [x] Compile the original game async `DvdFile` read entry, DMA alignment,
   SDK command status, game read callback, virtual completion handler and
   original completion-flag observer. Verify raw/compressed real-disc reads
@@ -216,6 +324,40 @@ queue. Full runtime scheduling and device services are still needed.
   callbacks restore the caller's mask on success/failure. Test nested saved
   masks and original status normalization. These bindings do not emulate MSR,
   hardware interrupts, OS startup, preemptive threads or a complete scheduler.
+- [x] Compile original game/SDK close, synchronous cancellation, its completion
+  callback and `OSWakeupThread`, reusing the existing native queued-cancel service.
+  Verify real raw/compressed-resource close/reopen, pending cancellation,
+  repeated close, reopen with a pending read, completed/terminal states and
+  original null-path open semantics. Check callback flags, unchanged canceled-read
+  payloads, interrupt-mask restoration, RAM/ABI guards, missing services and
+  unowned active-command rejection. Preserve the original open flag on close.
+  Exercise original empty-queue wakeup and removal of suspended waiters.
+  No OS wakeup stub is installed: runnable-thread selection still fails
+  explicitly at its untranslated scheduler dependency. This supports close at
+  cooperative safe points, not general synchronous I/O or OS-thread scheduling.
+- [x] Compile original decode queue reset/enqueue/observer setup and its
+  worker entry (`0x8019a6bc`). Verify synthetic CLZ and real
+  `roomcommon.arc.clz` via original game DVD reads into original allocations,
+  worker allocation/decompression, original source release and U8 opening.
+  Compare every decoded byte and verify completion/no-replay, ABI/RAM guards
+  and full heap coalescing after freeing the result. The completion observer
+  is test-only; allocation, decoding and release execute original code.
+  Bind `DCFlushRange` explicitly to checked coherent host RAM plus a memory
+  fence, not a translated cache/syscall implementation. Test rounded ranges,
+  aliases, zero length, boundary/overflow and MMIO errors.
+  The ready-input worker is invoked directly; the nonempty queue's original
+  OS thread launcher remains an explicit missing binding. Unready entries
+  busy-wait in original code. Thread scheduling, waits/wakeups and concurrent
+  read/decode execution remain unimplemented.
+- [x] Compile the original alternate allocation-pool path, including allocation,
+  membership checks and source/output release. Verify real and synthetic
+  decode inputs through both allocation branches. Four-entry mixed-pool
+  batches verify FIFO completion, first/last/null observers, payload guards
+  and complete reclamation of both arenas after out-of-order result release.
+  An exhausted alternate pool reaches the original `OSPanic` boundary without
+  freeing its source or setting completion; original fatal-path allocation
+  counter behavior is preserved. These remain ready-input worker fixtures,
+  not OS-thread or concurrent DVD/decode scheduling.
 - Decode the GameCube's PowerPC/Gekko instruction set and translate every
   reachable function into generated C++ or native code; do not execute the
   original instructions through an emulator or an instruction-at-a-time
@@ -262,11 +404,15 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue beyond the verified first startup call: entry reaches
-   `0x80003158`, whose next call is `__init_hardware` at `0x80003400`.
-   Plan explicit native replacements for its hardware/OS initialization
-   dependencies rather than treating unsupported hardware instructions as
-   successful no-ops. Current startup tests do not execute this call.
+1. Continue beyond the verified startup chain: entry reaches `0x80003264`,
+   whose next call is `OSInit` at `0x801b0de0`. Register, hardware, ROM/BSS,
+   empty-argument and `DBInit` initialization run together in the startup test.
+   Implement remaining OS/platform dependencies explicitly rather than treating
+   unsupported hardware instructions as successful no-ops.
+   The initial `OSInit` prefix is independently verified through start-time
+   capture/interrupt masking (`0x801b0e2c`); performance-monitor setup,
+   speculation/FPSCR setup and the remaining OS subsystem initialization
+   still follow.
 2. Expand the recompiler's opcode coverage, extend the tested REL/native-function
    bridge with function discovery and module lifetime management, implement
    the remaining scene dependencies (`0x8001BD04`, `0x8100DCD8`, `0x8002283C`)
