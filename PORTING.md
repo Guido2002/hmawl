@@ -303,6 +303,15 @@ queue. Full runtime scheduling and device services are still needed.
   now reaches the unsupported AI control read (`0x801b3c4c`, `0xcc006c00`);
   verify independently and from entry-derived state. No DSP/audio/DMA execution
   or interrupt delivery; OSInit remains incomplete.
+- [x] Add opt-in idle AI control readback and startup-only interrupt-disable
+  writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
+  interrupt validity and frequency bits. Reject playback, counter-reset commands,
+  acknowledgements, reserved state, enable writes and unsupported access forms
+  without mutation. Verify all 32 supported initial combinations, repeat writes,
+  RAM/status guards and DVD callback persistence. Original interrupt setup reaches
+  the unsupported EXI channel 0 control read (`0x801b3c7c`, `0xcc006800`), also
+  from entry-derived state with exact RAM/stack guards. No audio, sample timing
+  or interrupt delivery; OSInit remains incomplete.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic

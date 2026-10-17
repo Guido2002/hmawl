@@ -49,6 +49,7 @@ struct PpcState {
     std::optional<uint32_t> piInterruptMask;
     std::optional<uint16_t> miInterruptMask;
     std::optional<uint16_t> dspControl;
+    std::optional<uint32_t> aiControl;
     bool externalInterruptsEnabled = true;
 };
 
@@ -135,6 +136,10 @@ inline void ppc_flush_cache_block(const PpcState& state, uint32_t address) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc006c00u &&
+        state.aiControl.has_value()) {
+        return *state.aiControl;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003004u &&
         state.piInterruptMask.has_value()) {
         return *state.piInterruptMask;
@@ -198,6 +203,16 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc006c00u &&
+        state.aiControl.has_value()) {
+        const uint32_t previous = *state.aiControl;
+        if ((previous & ~0x5eu) != 0 || value != (previous & ~0x2cu)) {
+            throw std::runtime_error("Unsupported AI control write (only idle startup interrupt masking supported).");
+        }
+        // Writing zero to AIINT leaves pending status set; SCRESET is not issued.
+        *state.aiControl = previous & ~0x4u;
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003004u &&
         state.piInterruptMask.has_value()) {
         if (value != 0xf0u) {

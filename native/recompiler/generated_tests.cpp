@@ -892,6 +892,103 @@ void TestAndComplement() {
     }
 }
 
+void TestAiControl() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    state.gpr[4] = 0xcc006c00u;
+    const auto ram = state.memory;
+    const auto rejectAccess = [&](auto operation) {
+        const auto previous = state.aiControl;
+        bool rejected = false;
+        try {
+            operation();
+        } catch (const std::out_of_range&) {
+            rejected = true;
+        }
+        Require(rejected && state.aiControl == previous && state.memory == ram,
+                "Unsupported AI access mutated device state or RAM.");
+    };
+    rejectAccess([&] { ppc_0000B200(state); });
+    rejectAccess([&] { ppc_0000B210(state); });
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    state.fpscr = 4;
+    unsigned combinations = 0;
+    for (uint32_t initial = 0; initial <= 0x5e; ++initial) {
+        if ((initial & ~0x5eu) != 0) continue;
+        ++combinations;
+        state.aiControl = initial;
+        ppc_0000B200(state);
+        Require(state.gpr[3] == initial && state.pc == 0xb204u,
+                "Compiled AI readback differs.");
+        for (unsigned repeat = 0; repeat < 2; ++repeat) {
+            state.gpr[3] = initial & 0x52u;
+            ppc_0000B210(state);
+            Require(state.aiControl == (initial & 0x5au) && state.pc == 0xb214u,
+                    "AI masking changed pending status, validity or sample-rate bits.");
+            ppc_0000B200(state);
+            Require(state.gpr[3] == (initial & 0x5au) && state.memory == ram &&
+                        state.cr == 0x12345678u && state.xer == 0xe0000000u && state.fpscr == 4,
+                    "AI readback changed RAM or CPU status.");
+        }
+    }
+    Require(combinations == 32, "AI initial-state coverage is incomplete.");
+    const auto rejectWrite = [&](uint32_t previous, uint32_t value) {
+        state.aiControl = previous;
+        state.gpr[3] = value;
+        state.pc = 0xb210u;
+        bool rejected = false;
+        try {
+            ppc_0000B210(state);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("only idle startup interrupt masking") != std::string::npos;
+        }
+        Require(rejected && state.aiControl == previous && state.pc == 0xb210u &&
+                    state.gpr[3] == value && state.memory == ram,
+                "Unsupported AI command, acknowledgement or control change was accepted.");
+    };
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        rejectWrite(0x5e, 0x52u ^ (1u << bit));
+        if ((~0x5eu & (1u << bit)) != 0) {
+            const uint32_t initial = 0x5eu | (1u << bit);
+            rejectWrite(initial, initial & ~0x2cu);
+        }
+    }
+    state.aiControl = 0x5e;
+    for (uint32_t address : {0xcc006bfcu, 0xcc006bffu, 0xcc006c01u, 0xcc006c02u,
+                             0xcc006c03u, 0xcc006c04u, 0x0c006c00u, 0xcc006800u}) {
+        state.gpr[4] = address;
+        rejectAccess([&] { ppc_0000B200(state); });
+        rejectAccess([&] { ppc_0000B210(state); });
+    }
+    for (unsigned width : {1u, 2u, 8u}) {
+        rejectAccess([&] {
+            if (width == 1) (void)ppc_read_u8(state, 0xcc006c00u);
+            else if (width == 2) (void)ppc_read_u16(state, 0xcc006c00u);
+            else (void)ppc_read_u64(state, 0xcc006c00u);
+        });
+        rejectAccess([&] {
+            if (width == 1) ppc_write_u8(state, 0xcc006c00u, 0);
+            else if (width == 2) ppc_write_u16(state, 0xcc006c00u, 0);
+            else ppc_write_u64(state, 0xcc006c00u, 0);
+        });
+    }
+    state.aiControl.reset();
+    rejectAccess([&] { (void)ppc_read_u32(state, 0xcc006c00u); });
+    state.aiControl = 0x5e;
+    state.gpr[4] = 0xc0001000u;
+    state.gpr[3] = 0x12345678u;
+    ppc_0000B210(state);
+    ppc_0000B200(state);
+    Require(state.gpr[3] == 0x12345678u && state.aiControl == 0x5e,
+            "AI support changed ordinary RAM access.");
+    state.memoryMap = PpcMemoryMap::Flat;
+    ppc_write_u32(state, 4, 0x12345678u);
+    Require(ppc_read_u32(state, 4) == 0x12345678u && state.aiControl == 0x5e,
+            "AI option changed flat-memory semantics.");
+}
+
 void TestDspControl() {
     PpcState state;
     state.memoryMap = PpcMemoryMap::GameCubeRam;
@@ -1894,6 +1991,7 @@ int main() {
         TestPiInterruptMask();
         TestMiInterruptMask();
         TestDspControl();
+        TestAiControl();
         TestAndComplement();
         TestCacheBlockInstructions();
         TestL2ControlRegisters();

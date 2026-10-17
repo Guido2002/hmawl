@@ -1143,12 +1143,16 @@ void RunInterruptPiSetupToDevice(PpcState& state) {
     }
     const bool miEnabled = state.miInterruptMask.has_value();
     const bool dspEnabled = state.dspControl.has_value();
-    Require(rejected && calls == (dspEnabled ? 7u : miEnabled ? 6u : 5u) &&
+    const bool aiEnabled = state.aiControl.has_value();
+    Require(rejected && calls == (aiEnabled ? 8u : dspEnabled ? 7u : miEnabled ? 6u : 5u) &&
                 state.piInterruptMask == 0xf0u &&
                 ppc_read_u32(state, 0x800000c4u) == 0xffffffe0u &&
                 ppc_read_u32(state, 0x800000c8u) == 0 &&
                 (!dspEnabled || state.dspControl == (*expected.dspControl & ~0x0150u)) &&
-                (dspEnabled ? state.miInterruptMask == 0 &&
+                (!aiEnabled || state.aiControl == (*expected.aiControl & ~0x4u)) &&
+                (aiEnabled ? state.miInterruptMask == 0 &&
+                    state.gpr[5] == 0xcc000000u && state.gpr[0] == 0x00400000u :
+                 dspEnabled ? state.miInterruptMask == 0 &&
                     state.gpr[4] == 0xcc000000u && state.gpr[0] == 0x00800000u :
                  miEnabled ? state.miInterruptMask == 0 &&
                     state.gpr[5] == 0xcc00500au && state.gpr[0] == 0x04000000u :
@@ -1185,6 +1189,13 @@ void TestOriginalInterruptPiSetup(const DolImage& image) {
             state.dspControl = control;
             RunInterruptPiSetupToDevice(state);
         }
+        for (uint32_t control : {0u, 4u, 0x1cu, 0x5eu}) {
+            state = before;
+            state.miInterruptMask = 0x1fu;
+            state.dspControl = 0x7fcu;
+            state.aiControl = control;
+            RunInterruptPiSetupToDevice(state);
+        }
     }
     std::cout << "Opt-in PI mask register accepts original 0xf0 startup write; original "
                  "__OSMaskInterrupts/SetInterruptMask then reject MI write at 0x801b3be0 "
@@ -1195,6 +1206,9 @@ void TestOriginalInterruptPiSetup(const DolImage& image) {
     std::cout << "With opt-in DSP control, original interrupt masking disables DSP enables "
                  "without clearing pending status; next unsupported access is AI control "
                  "at 0x801b3c4c (0xcc006c00).\n";
+    std::cout << "With opt-in idle AI control, original masking disables the AI interrupt "
+                 "without acknowledging pending status; next unsupported access is EXI "
+                 "channel 0 control at 0x801b3c7c (0xcc006800).\n";
 }
 
 void TestOriginalInterruptHandlerAccessors(const DolImage& image) {
@@ -1484,6 +1498,15 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     RunInterruptPiSetupToDevice(state);
     std::cout << "With opt-in PI/MI/DSP state, entry-derived setup reaches unsupported AI "
                  "control read at 0x801b3c4c; OSInit remains incomplete.\n";
+    state = firstTime;
+    state.lr = 0x801b0f70u;
+    state.piInterruptMask = 0;
+    state.miInterruptMask = 0x1fu;
+    state.dspControl = 0x7fcu;
+    state.aiControl = 0x5eu;
+    RunInterruptPiSetupToDevice(state);
+    std::cout << "With opt-in PI/MI/DSP/AI state, entry-derived setup reaches unsupported "
+                 "EXI channel 0 control read at 0x801b3c7c; OSInit remains incomplete.\n";
 }
 
 void TestOriginalArenaAccessors(const DolImage& image) {

@@ -397,6 +397,19 @@ AI control read at `0x801b3c4c` (`0xcc006c00`), independently and from entry-der
 state with exact RAM/stack guards. This is not DSP execution, DMA, audio output
 or interrupt delivery; interrupt initialization and OSInit still do not return.
 
+Optional AI control state supports 32-bit readback at `0xcc006c00` and the
+original idle-startup interrupt-disable write. It clears the enable bit (`0x4`)
+while preserving pending write-one-to-clear status (`0x8`), interrupt validity
+and frequency selections. Active playback, sample-counter reset, acknowledgements,
+reserved state and other control changes remain explicitly unsupported.
+It is disabled by default; other widths, neighboring/unaligned addresses and
+physical aliases remain errors. All 32 supported initial combinations, repeated
+writes, rejected changes and DVD callback device-state persistence are tested.
+Original interrupt setup now reaches the unsupported EXI channel 0 control read
+at `0x801b3c7c` (`0xcc006800`), independently and from entry-derived state with
+exact RAM/stack guards. No audio playback, sample-counter progression or interrupt
+delivery is implemented; the completed OSInit prefix remains unchanged.
+
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings
 and do not suppress dispatch code-word checks. Original `DCFlushRangeNoSync`
