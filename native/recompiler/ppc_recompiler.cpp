@@ -898,6 +898,16 @@ std::string RecompileFunction(uint32_t address,
             }
             case 467: {
                 const uint32_t spr = ra | (rb << 5);
+                if ((spr >= 528 && spr <= 543) || spr == 26 || spr == 27) {
+                    if (record) throw std::runtime_error("Invalid BAT/SRR transfer at " + Hex(pc) + ".");
+                    if (spr == 26 || spr == 27) {
+                        output << "    state.srr" << (spr - 26) << " = state.gpr[" << rt << "];\n";
+                    } else {
+                        output << "    ppc_write_ram_bat(state, " << spr << "u, state.gpr[" << rt << "]);\n";
+                    }
+                    emitted = true;
+                    break;
+                }
                 if (spr == 952 || spr == 956 || spr == 953 || spr == 954 ||
                     spr == 957 || spr == 958) {
                     if (record) {

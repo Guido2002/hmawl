@@ -622,6 +622,11 @@ int main(int argc, char** argv) {
             dsp[8] = 4;
             dsp[6] = 0xfffe;
             output << RecompileDspInitialization(dsp, "WrappedDspInitialization");
+            Emit(output, 0xb5e0u, {
+                (31u << 26) | (3u << 21) | (26u << 16) | (467u << 1),
+                (31u << 26) | (4u << 21) | (27u << 16) | (467u << 1)});
+            Emit(output, 0xb5f0u, {
+                (31u << 26) | (3u << 21) | (16u << 16) | (16u << 11) | (467u << 1)});
             generated += output.str();
         }
         std::ofstream output(argv[argc - 1], std::ios::binary);

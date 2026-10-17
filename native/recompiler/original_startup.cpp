@@ -36,7 +36,10 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.msr = 0x30u;
     state.externalInterruptsEnabled = false;
     state.piInterruptMask = 0;
+    state.piResetCode = 0;
     state.miInterruptMask = 0;
+    state.memoryProtection.emplace();
+    state.ramBats.emplace();
     state.dspControl = 0;
     state.dspHardware.emplace();
     state.dspHardware->aram.resize(16u * 1024u * 1024u);
@@ -48,6 +51,8 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.transferSi = TransferDisconnectedSi;
     ppc_write_u32(state, 0x800000f8u, 162000000u);
     ppc_write_u32(state, 0x800000fcu, 486000000u);
+    ppc_write_u32(state, 0x80000028u, kGameCubeRamSize);
+    ppc_write_u32(state, 0x800000f0u, kGameCubeRamSize);
     state.exiStatus = {0u, 0u, 0u};
     state.exiTransferControl = {0u, 0u, 0u};
     state.exiInitializationEnabled = true;

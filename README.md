@@ -68,8 +68,13 @@ consumes that message, resets the DSP and restores its RAM backup before returni
 A BIOS-free native bootstrap validates the installed payload; it does not execute
 a console DSP boot ROM. Only ROM loads proven dead before an unconditional
 overwrite are eliminated, never replaced by fabricated ROM data.
-The runner reaches `__OSInitMemoryProtection`, `PC=0x801B506C`,
-`LR=0x801B0FB8`. General DSP tasks, audio playback and full OSInit remain unfinished.
+Original memory-protection initialization now returns too, executing both real-mode
+`rfi` transitions and the original 24 MiB RAM BAT configuration. Original kernel
+reports print `Memory 24 MB` and the real arena bounds; original `ClearArena`
+clears that arena before startup reaches `OSEnableInterrupts`.
+The runner stops at `PC=0x801B3A60`, `LR=0x801B114C`: pending SI completion
+requires real guest interrupt delivery, which is not yet implemented.
+General DSP tasks, audio playback and full OSInit remain unfinished.
 This is an **explicit dependency stop (exit code 3)**, not successful OSInit,
 game initialization or rendering. RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.

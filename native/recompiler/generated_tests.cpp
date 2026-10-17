@@ -1814,6 +1814,137 @@ void TestMultiplyHighUnsigned() {
     }
 }
 
+void TestNativeConsoleIntegers() {
+    PpcState state;
+    state.memory.resize(0x8000);
+    const auto put = [&](uint32_t address, const std::string& text) {
+        for (size_t index = 0; index <= text.size(); ++index) {
+            ppc_write_u8(state, address + static_cast<uint32_t>(index),
+                         index == text.size() ? 0 : static_cast<uint8_t>(text[index]));
+        }
+    };
+    ppc_write_u8(state, 0x400, 7);
+    ppc_write_u32(state, 0x404, 0x600);
+    ppc_write_u32(state, 0x408, 0x500);
+    state.gpr[4] = 0x400;
+    state.lr = 0x888;
+    std::string output;
+    state.writeConsole = [&](const std::string& text) { output += text; };
+    struct Case { const char* format; uint32_t value; const char* expected; };
+    for (const auto& test : std::vector<Case>{
+            {"%d", 0, "0"}, {"%d", 0x7fffffffu, "2147483647"},
+            {"%i", 0x80000000u, "-2147483648"}, {"%d", UINT32_MAX, "-1"},
+            {"%u", UINT32_MAX, "4294967295"}, {"%08x", 0xabu, "000000ab"},
+            {"%X", UINT32_MAX, "FFFFFFFF"}, {"%12d", 0x80000000u, " -2147483648"},
+            {"%012d", 0x80000000u, "-02147483648"}, {"%2u", UINT32_MAX, "4294967295"}}) {
+        put(0x100, test.format);
+        ppc_write_u32(state, 0x51c, test.value);
+        state.gpr[3] = 0x100;
+        output.clear();
+        const auto memory = state.memory;
+        NativeGuestVprintf(state);
+        Require(output == test.expected && state.gpr[3] == output.size() &&
+                    state.pc == state.lr && state.memory == memory,
+                "Native 32-bit integer formatting, sign, padding, ABI or RAM preservation differs.");
+    }
+    put(0x100, "%d/%08X");
+    ppc_write_u32(state, 0x51c, UINT32_MAX);
+    ppc_write_u32(state, 0x600, 0x1234u);
+    state.gpr[3] = 0x100;
+    output.clear();
+    NativeGuestVprintf(state);
+    Require(output == "-1/00001234", "Integer arguments failed at the GPR-to-stack boundary.");
+    for (const std::string format : {"prefix%d%f", "%n", "%4097u", "%999999999999999u",
+                                     "%08", "%#x", "%lu", "%0s"}) {
+        put(0x100, format);
+        state.gpr[3] = 0x100;
+        output.clear();
+        Reject([&] { NativeGuestVprintf(state); }, "vprintf");
+        Require(output.empty() && state.gpr[3] == 0x100,
+                "Rejected console format emitted partial text or a success-shaped return.");
+    }
+    put(0x2000, std::string(4095, 'x'));
+    ppc_write_u8(state, 0x400, 8);
+    for (unsigned index = 0; index < 16; ++index) ppc_write_u32(state, 0x600 + 4 * index, 0x2000);
+    std::string format;
+    for (unsigned index = 0; index < 16; ++index) format += "%s";
+    format += "abcdefghijklmnop";
+    put(0x100, format);
+    state.gpr[3] = 0x100;
+    output.clear();
+    NativeGuestVprintf(state);
+    Require(output.size() == 65536 && state.gpr[3] == 65536,
+            "Native console rejected the exact 64 KiB output limit.");
+    put(0x100, format + "%%");
+    state.gpr[3] = 0x100;
+    output.clear();
+    Reject([&] { NativeGuestVprintf(state); }, "64 KiB");
+    Require(output.empty() && state.gpr[3] == 0x100,
+            "Trailing percent bypassed the exact 64 KiB output bound.");
+}
+
+void TestRealModeRamConfiguration() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize);
+    state.externalInterruptsEnabled = false;
+    state.msr = 0x32u;
+    state.ramBats.emplace();
+    state.gpr[3] = 0x1000u;
+    state.gpr[4] = 2;
+    ppc_0000B5E0(state);
+    Require(state.srr0 == 0x1000u && state.srr1 == 2, "Compiled SRR transfers lost their source.");
+    ppc_0000B5C0(state);
+    Require(state.pc == 0x1000u && state.msr == 2 && state.ramBats->realModeActive &&
+                state.ramBats->transitions == 1,
+            "Compiled real-mode rfi did not disable IR/DR or retain its physical PC.");
+    const PpcRamBatState profile;
+    for (unsigned index : {0u, 4u, 8u, 12u}) {
+        ppc_write_ram_bat(state, 528 + index, 0);
+        ppc_write_ram_bat(state, 529 + index, profile.values[index + 1]);
+        state.srr0 = 0x80002000u;
+        state.srr1 = 0x32u;
+        Reject([&] { ppc_0000B5C0(state); }, "exact 24 MiB");
+        ppc_write_ram_bat(state, 528 + index, profile.values[index]);
+    }
+    state.gpr[3] = profile.values[0];
+    ppc_0000B5F0(state);
+    Require(state.ramBats->values == profile.values && state.ramBats->writes == 13,
+            "Native BAT configuration ignored lower/upper words or a compiled transfer.");
+    ppc_0000B5C0(state);
+    Require(state.pc == 0x80002000u && state.msr == 0x32u &&
+                !state.ramBats->realModeActive && state.ramBats->transitions == 2,
+            "Compiled configured rfi did not restore IR/DR at the saved native PC.");
+    Reject([&] { ppc_write_ram_bat(state, 528, 0); }, "real-mode context");
+    state.ramBats->realModeActive = true;
+    state.msr = 2;
+    for (auto pair : {std::make_pair(527u, 0u), std::make_pair(530u, 0u),
+                      std::make_pair(544u, 0u), std::make_pair(528u, 0x800003ffu),
+                      std::make_pair(529u, 3u)}) {
+        Reject([&] { ppc_write_ram_bat(state, pair.first, pair.second); }, "BAT write");
+    }
+    state.srr0 = 0xc0002000u;
+    Reject([&] { ppc_0000B5C0(state); }, "exact 24 MiB");
+    state.srr0 = 0x80002000u;
+    state.srr1 = 0x8032u;
+    Reject([&] { ppc_0000B5C0(state); }, "real-mode rfi context");
+    state.memoryProtection.emplace();
+    state.miInterruptMask = 0;
+    ppc_write_u16(state, 0xcc004010u, 0xff);
+    ppc_write_u16(state, 0xcc004020u, 0);
+    ppc_write_u16(state, 0xcc00401cu, 0x10);
+    Require(state.memoryProtection->permissions == 0xff &&
+                state.memoryProtection->acknowledgements == 1 && state.miInterruptMask == 0x10,
+            "Native all-readable/writable memory-protection initialization differs.");
+    Reject([&] { ppc_write_u16(state, 0xcc004010u, 0xfe); }, "read/write");
+    Reject([&] { ppc_write_u16(state, 0xcc004020u, 1); }, "acknowledgement");
+    Reject([&] { ppc_write_u16(state, 0xcc00401cu, 1); }, "MI interrupt mask");
+    state.piResetCode = 0;
+    Require(ppc_read_u32(state, 0xcc003024u) == 0, "Explicit cold-reset code differs.");
+    state.piResetCode.reset();
+    Reject([&] { ppc_read_u32(state, 0xcc003024u); }, "not mapped");
+}
+
 void TestNativeConsoleAndEmptyExi() {
     PpcState state;
     state.memory.resize(0x3000);
@@ -1856,7 +1987,7 @@ void TestNativeConsoleAndEmptyExi() {
         Require(failed && state.gpr[3] == result && state.pc == pc && calls == 1,
                 "Failed console output reported success or emitted partial text.");
     };
-    put(0x100, "prefix%s%d");
+    put(0x100, "prefix%s%f");
     state.gpr[3] = 0x100;
     reject();
     put(0x100, "trailing%");
@@ -3097,6 +3228,8 @@ int main() {
         TestDspResetAndAramDma();
         TestCompiledDspInitialization();
         TestNativeConsoleAndEmptyExi();
+        TestRealModeRamConfiguration();
+        TestNativeConsoleIntegers();
         TestAndComplement();
         TestCacheBlockInstructions();
         TestL2ControlRegisters();

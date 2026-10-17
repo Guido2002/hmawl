@@ -53,6 +53,7 @@ void NativeDvdQueue::Invoke(uint32_t callback, uint32_t result, uint32_t info) {
     const auto ctr = state_.ctr, pc = state_.pc;
     const auto srr0 = state_.srr0, srr1 = state_.srr1;
     const auto systemCallActive = state_.systemCallActive;
+    const auto ramBats = state_.ramBats;
     const bool interrupts = state_.externalInterruptsEnabled;
     const auto restore = [&] {
         std::copy(gpr.begin(), gpr.end(), std::begin(state_.gpr));
@@ -72,6 +73,7 @@ void NativeDvdQueue::Invoke(uint32_t callback, uint32_t result, uint32_t info) {
         state_.srr0 = srr0;
         state_.srr1 = srr1;
         state_.systemCallActive = systemCallActive;
+        state_.ramBats = ramBats;
         state_.externalInterruptsEnabled = interrupts;
     };
     state_.gpr[3] = result;

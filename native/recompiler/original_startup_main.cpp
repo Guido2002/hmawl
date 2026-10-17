@@ -54,9 +54,9 @@ int RunCli(int argc, Character** argv) {
         std::cout << "Executing hash-verified original USA DOL entry 0x80003154 "
                      "using compiled native blocks only.\n"
                      "Profile: loader IR/DR, EE disabled, coherent RAM, idle opt-in "
-                     "PI/MI/DSP/AI/EXI/SI, analog VI cable status, "
+                     "PI/MI/DSP/AI/EXI/SI, cold PI reset, 24 MiB RAM BAT profile, analog VI cable status, "
                      "empty memory-card slots/SP1 and disconnected controllers, native console "
-                     "(bounded %s/%%), persisted SRAM reads (writes/RTC/ROM unimplemented); "
+                     "(bounded strings/32-bit integers), persisted SRAM reads (writes/RTC/ROM unimplemented); "
                      "16 MiB ARAM, compiled DSP init/native bootstrap (general DSP tasks/audio unimplemented); "
                      "162 MHz bus/486 MHz CPU metadata, steady-clock 40.5 MHz time base.\n";
         std::cout << "Native SRAM profile: " << sramPath.u8string() << '\n';

@@ -61,6 +61,11 @@ int main(int argc, char** argv) {
             instructions.emplace(0xc00u + static_cast<uint32_t>(i * 4), systemCallWords[i]);
         }
         leaders.insert(0xc00u);
+        const auto ramConfiguration = image.ReadWords(0x801b4f54u, 0x80u);
+        for (size_t i = 0; i < ramConfiguration.size(); ++i) {
+            instructions.emplace(0x001b4f54u + static_cast<uint32_t>(i * 4), ramConfiguration[i]);
+        }
+        leaders.insert(0x001b4f54u);
         for (const auto& instruction : instructions) {
             if (IsBranch(instruction.second)) {
                 leaders.insert(instruction.first + 4);

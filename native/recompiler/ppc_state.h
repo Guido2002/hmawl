@@ -77,6 +77,21 @@ struct PpcFpr {
     }
 };
 
+struct PpcRamBatState {
+    std::array<uint32_t, 16> values = {
+        0x800001ffu, 2, 0, 0, 0x810000ffu, 0x01000002u, 0, 0,
+        0x800001ffu, 2, 0, 0, 0x810000ffu, 0x01000002u, 0, 0
+    };
+    bool realModeActive = false;
+    uint32_t writes = 0;
+    uint32_t transitions = 0;
+};
+
+struct PpcMemoryProtection {
+    uint16_t permissions = 0xffu;
+    uint32_t acknowledgements = 0;
+};
+
 struct PpcState {
     uint32_t gpr[32] = {};
     // Raw IEEE-754 bits keep NaN payloads and the independent paired lane intact.
@@ -96,6 +111,8 @@ struct PpcState {
     uint32_t srr0 = 0;
     uint32_t srr1 = 0;
     bool systemCallActive = false;
+    std::optional<PpcRamBatState> ramBats;
+    std::optional<PpcMemoryProtection> memoryProtection;
     std::vector<uint8_t> memory;
     PpcMemoryMap memoryMap = PpcMemoryMap::Flat;
     std::function<void(uint32_t, PpcState&)> callGuest;
@@ -105,6 +122,7 @@ struct PpcState {
     std::function<void(PpcState&)> cancelDvdRead;
     // Device state is opt-in and is not restored with DVD callback CPU context.
     std::optional<uint32_t> piInterruptMask;
+    std::optional<uint32_t> piResetCode;
     std::optional<uint16_t> miInterruptMask;
     std::optional<uint16_t> dspControl;
     std::optional<PpcDspHardware> dspHardware;
@@ -239,7 +257,23 @@ inline void ppc_flush_cache_block(const PpcState& state, uint32_t address) {
     ppc_sync();
 }
 
+inline void ppc_write_ram_bat(PpcState& state, unsigned spr, uint32_t value) {
+    const unsigned index = spr - 528u;
+    const PpcRamBatState supported;
+    if (state.memoryMap != PpcMemoryMap::GameCubeRam ||
+        !state.ramBats || !state.ramBats->realModeActive ||
+        (ppc_read_msr(state) & 0x8030u) != 0 || index >= 16 ||
+        (index & 2u) != 0 ||
+        (value != supported.values[index] && !((index & 1u) == 0 && value == 0))) {
+        throw std::runtime_error("Unsupported native RAM BAT write or real-mode context.");
+    }
+    state.ramBats->values[index] = value;
+    ++state.ramBats->writes;
+}
+
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003024u &&
+        state.piResetCode) return *state.piResetCode;
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
         const auto& dsp = *state.dspHardware;
         if (address == 0xcc005020u) return dsp.dmaMainAddress;
@@ -635,6 +669,20 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
 }
 
 inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.memoryProtection) {
+        if (address == 0xcc004010u) {
+            if (value != 0xffu) {
+                throw std::runtime_error("Native memory-protection regions must remain read/write enabled.");
+            }
+            state.memoryProtection->permissions = value;
+            return;
+        }
+        if (address == 0xcc004020u) {
+            if (value != 0) throw std::runtime_error("Unsupported native memory interrupt acknowledgement.");
+            ++state.memoryProtection->acknowledgements;
+            return;
+        }
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
         auto& dsp = *state.dspHardware;
         if (address == 0xcc005012u) {
@@ -695,8 +743,8 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
     }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00401cu &&
         state.miInterruptMask.has_value()) {
-        if (value != 0) {
-            throw std::runtime_error("Unsupported MI interrupt mask write (only zero reset supported).");
+        if (value != 0 && !(value == 0x10u && state.memoryProtection.has_value())) {
+            throw std::runtime_error("Unsupported MI interrupt mask write (only zero reset or mapped address-error mask supported).");
         }
         *state.miInterruptMask = value;
         return;
@@ -871,6 +919,7 @@ inline void ppc_call_guest(PpcState& state, uint32_t address) {
 
 inline void ppc_system_call(PpcState& state, uint32_t next) {
     if (state.memoryMap != PpcMemoryMap::GameCubeRam || state.systemCallActive ||
+        (state.ramBats && state.ramBats->realModeActive) ||
         !state.callException || (ppc_read_msr(state) & ~0xa032u) != 0) {
         throw std::runtime_error("Unsupported or nested native PowerPC system-call context.");
     }
@@ -886,9 +935,32 @@ inline void ppc_system_call(PpcState& state, uint32_t next) {
 }
 
 inline void ppc_return_from_system_call(PpcState& state) {
-    if (!state.systemCallActive || (state.srr0 & 3u) != 0 ||
+    if ((!state.systemCallActive && !state.ramBats) || (state.srr0 & 3u) != 0 ||
         (state.srr1 & ~0xa032u) != 0) {
         throw std::runtime_error("Native rfi requires a supported active system-call context.");
+    }
+    if (!state.systemCallActive) {
+        const auto current = ppc_read_msr(state);
+        if (state.memoryMap != PpcMemoryMap::GameCubeRam ||
+            ((current ^ state.srr1) & ~0x30u) != 0 || (current & 0x8000u) != 0) {
+            throw std::runtime_error("Unsupported native real-mode rfi context.");
+        }
+        ppc_memory_offset(state, state.srr0, 4);
+        if (!state.ramBats->realModeActive) {
+            if ((current & 0x30u) != 0x30u || (state.srr1 & 0x30u) != 0 ||
+                state.srr0 >= kGameCubeRamSize) {
+                throw std::runtime_error("Native real-mode entry requires a physical RAM target and IR/DR disable.");
+            }
+        } else {
+            const PpcRamBatState supported;
+            if ((current & 0x30u) != 0 || (state.srr1 & 0x30u) != 0x30u ||
+                state.ramBats->values != supported.values ||
+                state.srr0 < 0x80000000u || state.srr0 >= 0x80000000u + kGameCubeRamSize) {
+                throw std::runtime_error("Native real-mode return requires the exact 24 MiB RAM BAT profile.");
+            }
+        }
+        state.ramBats->realModeActive = !state.ramBats->realModeActive;
+        ++state.ramBats->transitions;
     }
     ppc_check_pending_interrupts(state, (state.srr1 & 0x8000u) != 0);
     state.msr = state.srr1 & ~0x8000u;

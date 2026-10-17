@@ -433,6 +433,7 @@ void TestNativeDvdQueue() {
         guest.srr0 = 0;
         guest.srr1 = 0;
         guest.systemCallActive = true;
+        guest.ramBats.reset();
         ppc_write_u32(guest, 0xcc003004u, 0xf0u);
         ppc_write_u16(guest, 0xcc00401cu, 0);
         ppc_write_u16(guest, 0xcc00500au, 0x604u);
@@ -464,6 +465,8 @@ void TestNativeDvdQueue() {
     state.performanceMonitor.fill(0x12345678u);
     state.srr0 = 0x80001234u;
     state.srr1 = 0x32u;
+    state.ramBats.emplace();
+    state.ramBats->writes = 11;
     state.piInterruptMask = 0;
     state.miInterruptMask = 0x1fu;
     state.dspControl = 0x7fcu;
@@ -515,7 +518,9 @@ void TestNativeDvdQueue() {
                     state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
                     state.hid0 == 0xc200u && state.l2cr == 0x80000000u &&
                     state.performanceMonitor == monitor && state.srr0 == 0x80001234u &&
-                    state.srr1 == 0x32u && !state.systemCallActive && state.piInterruptMask == 0xf0u &&
+                    state.srr1 == 0x32u && !state.systemCallActive && state.ramBats &&
+                    state.ramBats->writes == 11 && !state.ramBats->realModeActive &&
+                    state.piInterruptMask == 0xf0u &&
                     state.miInterruptMask == 0 && state.dspControl == 0x6acu &&
                     state.aiControl == 0x5au &&
                     state.exiStatus[0] == 0x187au && state.exiStatus[1] == 0x187au &&
@@ -612,6 +617,7 @@ void TestNativeDvdQueue() {
         guest.srr0 = UINT32_MAX;
         guest.srr1 = UINT32_MAX;
         guest.systemCallActive = true;
+        guest.ramBats.reset();
         ppc_write_u32(guest, 0xcc003004u, 0xf0u);
         ppc_write_u16(guest, 0xcc00401cu, 0);
         ppc_write_u16(guest, 0xcc00500au, 0x604u);
@@ -639,7 +645,9 @@ void TestNativeDvdQueue() {
                 state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
                 state.hid0 == 0xc200u && state.l2cr == 0x80000000u &&
                 state.performanceMonitor == monitor && state.srr0 == 0x80001234u &&
-                state.srr1 == 0x32u && !state.systemCallActive && state.piInterruptMask == 0xf0u &&
+                state.srr1 == 0x32u && !state.systemCallActive && state.ramBats &&
+                state.ramBats->writes == 11 && !state.ramBats->realModeActive &&
+                state.piInterruptMask == 0xf0u &&
                 state.miInterruptMask == 0 && state.dspControl == 0x6acu &&
                 state.aiControl == 0x5au && state.exiStatus[0] == 0x187au &&
                 state.exiStatus[1] == 0x187au && state.exiStatus[2] == 0x7au,

@@ -35,7 +35,9 @@ system-call vector, halted DSP reset and two real ARAM DMA transfers. The bounde
 original DSP-init program now executes as compiled C++ through an explicit
 BIOS-free native bootstrap, clears DSP RAM and sends its actual compiled stores.
 Original audio initialization consumes its message, resets and returns. The
-runner reaches `__OSInitMemoryProtection` (`0x801B506C`); full OSInit,
+runner completes original memory protection, kernel reports and arena clearing,
+then stops at `OSEnableInterrupts` (`0x801B3A60`) because pending SI completion
+requires guest interrupt delivery; full OSInit,
 game initialization, the main loop and a rendered game frame remain unachieved.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
@@ -462,6 +464,24 @@ queue. Full runtime scheduling and device services are still needed.
   message and returns through original audio reset/backup restoration, then
   reaches memory protection at `0x801B506C`, LR `0x801B0FB8`.
   General DSP execution, scheduling and audio playback remain unsupported.
+- [x] Execute original memory-protection and arena initialization end-to-end.
+  Supply explicit 24 MiB physical/simulated memory metadata and a cold PI reset
+  code, with no fallback for missing profiles. Compile SRR transfers and the
+  physical Config24MB alias, and execute original real-mode rfi entry/return.
+  Restrict RAM BAT writes to the supported 24 MiB mapping while IR/DR and EE are
+  disabled; reject other mappings, modes or incomplete return configurations.
+  Map only MI all-readable/writable permission setup, interrupt acknowledgement
+  and the address-error interrupt enable; actual protection regions, faults and
+  arbitrary MMU mappings remain unsupported. Preserve BAT CPU state in DVD
+  callbacks. Extend the console bridge with bounded 32-bit signed/unsigned and
+  hex output plus width/zero padding, rejecting unsupported formats without
+  partial output. Original kernel reports now show real RAM/arena sizes.
+  Original ClearArena clears its entire poisoned arena and preserves the upper
+  guard. Tests verify 12 actual BAT writes, both rfi transitions, all five MI
+  handlers, exact 64 KiB console thresholds, missing profiles and CPU restoration.
+  The runner reaches OSEnableInterrupts at `0x801B3A60`, LR `0x801B114C`, with
+  pending SI completion still intact. Enabling EE fails explicitly until real
+  guest interrupt delivery is implemented; DVDInit and full OSInit have not run.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

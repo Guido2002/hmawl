@@ -47,11 +47,14 @@ existing checked coherent-RAM implementation. Time-base reads use the real
 monotonic native clock at the GameCube's 40.5 MHz rate. Original `OSReport`
 and `OSRegisterVersion` run as compiled game code. The C-library `vprintf`
 boundary is an original-word-verified native console service with bounded
-guest strings and PowerPC GPR/overflow argument decoding. Currently only plain
-text, `%s` and `%%` are supported; other conversions, missing sinks and output
-errors fail explicitly before a success return. It emits the actual SDK
+guest strings and PowerPC GPR/overflow argument decoding. Plain text, `%s`, `%%`,
+32-bit `%d`/`%i`/`%u`/`%x`/`%X` and integer width/zero padding are supported.
+Widths are bounded at 4096 and total output at 64 KiB. Other conversions,
+flags, missing sinks and output errors fail explicitly before a success return.
+It emits the actual SDK
 version string; it does not discard logging.
-The loader supplies 162 MHz bus and 486 MHz CPU clock metadata in low memory,
+The loader supplies 24 MiB physical/simulated memory size, a cold PI reset code,
+162 MHz bus and 486 MHz CPU clock metadata in low memory,
 consistent with the 40.5 MHz time base. VI cable status is explicitly analog
 (DTV bit zero); this does not implement a display or renderer.
 SI has disabled-polling timing, communication RAM, error W1C and checked transfer
@@ -112,8 +115,15 @@ physical destination on execution, so an absent or altered vector cannot run.
 The original system-call vector executes compiled instructions, including HID0
 DCFA, synchronization and rfi; sc saves SRR0/SRR1 and masks exception MSR state
 without changing LR. Exception execution shares block/call-depth budgets.
-Only this bounded system-call exception path is implemented, not general interrupt
-delivery, arbitrary exception modes or context-switching rfi.
+The other supported rfi path is original real-mode RAM configuration: entry
+disables IR/DR with EE clear and a physical RAM target; return requires the exact
+24 MiB RAM BAT profile and a cached RAM target. BAT writes are accepted only in
+that real-mode window, for the supported RAM entries/values. Original Config24MB
+executes from its physical alias with normal instruction-integrity checks.
+This is not an arbitrary MMU: other BAT mappings, protection regions, general
+interrupt delivery and context-switching rfi remain unsupported. Native MI setup
+supports only all-readable/writable permissions, interrupt acknowledgement and
+the address-error interrupt mask; missing devices and other settings fail.
 The recompiler's
 `yieldAtBranches` option routes control transfers back through dispatch, including
 self-loops; `precisePc` records the exact PC before every original instruction.
@@ -151,8 +161,15 @@ compiled DSP instructions: 16404 original instruction steps, including eliminate
 dead-ROM reads, all 4096 DSP RAM word clears, one real program-derived mailbox
 message and HALT. The original PPC initializer consumes that message, resets the
 DSP a second time, restores its complete 128-byte RAM backup and **returns**.
-Startup then disables HID2 LSQE and reaches **__OSInitMemoryProtection,
-PC `0x801B506C`, LR `0x801B0FB8`**. `OSInit` has **not** returned.
+Startup applies the original HID2 mask and executes **__OSInitMemoryProtection**:
+MI setup, five handler registrations, reset registration, real-mode RAM BAT
+configuration (12 writes/two rfi transitions), interrupt mask and return.
+Original kernel reporting prints actual memory and arena bounds. With the
+explicit cold reset code, original ClearArena clears the complete arena.
+It stops inside **OSEnableInterrupts, PC `0x801B3A60`, LR `0x801B114C`**: the
+disconnected-controller completion remains pending and EE cannot be enabled
+without real guest interrupt delivery. EE stays disabled; no completion is
+discarded. DVDInit has not run and `OSInit` has **not** returned.
 The game main loop, GX renderer,
 DVD startup, scheduled game threads, audio, input and saves have not run.
 
@@ -160,7 +177,7 @@ DVD startup, scheduled game threads, audio, input and saves have not run.
 
 With testing enabled, build `hmawl_original_startup_tests` and run CTest's
 `hmawl_original_startup_tests`. It uses the production library and real verified
-DOL, checking the exact memory-protection entry, two original external EXI transaction
+DOL, checking the exact interrupt-enable boundary, two original external EXI transaction
 requests, cleared channel lock, both empty-slot probe results, exact console
 messages, the original SI command and three queued probes, sampling/handler state,
 pending no-response completion, missing SI backend/VI profile,
@@ -171,6 +188,9 @@ original sc/rfi return state and original DSP payload, both ARAM DMA transfers,
 complete ARAM guards, compiled DSP instruction/mail counts, poisoned DSP RAM
 clearing, RAM backup restoration, halted reset/mailboxes, missing DSP hardware
 and execution backend plus modified DSP program rejection,
+original real-mode BAT/SRR state, five MI handler slots, exact native RAM metadata,
+complete poisoned arena clearing and its exclusive upper guard, integer kernel
+reports and absent memory/BAT/reset-profile failures,
 missing EXI peripheral backend/console failures, initialization
 evidence, missing clock and unbound dispatcher dependencies, on-disk DOL
 truncation/mutation rejection, loaded-code integrity, block/call-depth bounds,

@@ -5,6 +5,7 @@
 #include "native_sram.h"
 
 #include <chrono>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -158,6 +159,8 @@ int main(int argc, char** argv) {
             return TransferDisconnectedSi(request);
         };
         state.writeConsole = [&](const std::string& text) { console += text; };
+        std::fill(state.memory.begin() + 0x35efa0u, state.memory.begin() + 0x1700000u, 0x5a);
+        ppc_write_u8(state, 0x81700000u, 0x6b);
         state.dspHardware->dataRam.fill(0xfeedu);
         for (unsigned index = 0; index < 128; ++index) {
             ppc_write_u8(state, 0x81000000u + index, static_cast<uint8_t>(index ^ 0xa5u));
@@ -166,24 +169,44 @@ int main(int argc, char** argv) {
             ReadGuestConsoleString(state, ppc_read_u32(state, 0x80348cd8u)) + '\n';
         const auto result = RunOriginalStartup(dispatcher, state);
         std::cout << DescribeOriginalStartupStop(result) << '\n';
-        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801b506cu &&
-                    result.lr == 0x801b0fb8u && transfers == 2 && siTransfers == 1 &&
+        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801b3a60u &&
+                    result.lr == 0x801b114cu && transfers == 2 && siTransfers == 1 &&
                     sramCommands == 1 && sramDmas == 1 &&
-                    console == expectedVersion && state.exiStatus[0] == 0x2008u &&
+                    console.find(expectedVersion) == 0 &&
+                    console.find("Memory 24 MB\n") != std::string::npos &&
+                    console.find("Arena : 0x8035efa0 - 0x81700000\n") != std::string::npos &&
+                    state.exiStatus[0] == 0x2008u &&
                     state.exiTransferControl[0] == 2u &&
                     ppc_read_u32(state, 0x80340c6cu) == 0 &&
                     ppc_read_u32(state, 0x800030c0u) == 0 &&
                     ppc_read_u32(state, 0x800030c4u) == 0 &&
-                    result.reason.find("No native translation registered") != std::string::npos &&
+                    result.reason.find("SI completion interrupt requires guest interrupt delivery") != std::string::npos &&
                     ppc_read_u32(state, 0x80349ad0u) == 0,
                 "Production startup stopped at an unexpected boundary.");
-        Require(state.srr0 == 0x801b23f4u && state.srr1 == 0x32u &&
+        Require(state.srr0 == 0x801b5144u && state.srr1 == 0x32u &&
                     !state.systemCallActive && !state.callException && state.hid0 == 0xc200u,
-                "Original cache-flush exception vector did not execute and return through rfi.");
+                "Original real-mode configuration did not return through its saved SRR state.");
+        const PpcRamBatState expectedBats;
+        Require(state.ramBats->values == expectedBats.values &&
+                    state.ramBats->writes == 12 && state.ramBats->transitions == 2 &&
+                    !state.ramBats->realModeActive && state.memoryProtection->permissions == 0xffu &&
+                    state.memoryProtection->acknowledgements == 1 &&
+                    ppc_read_u32(state, 0x80000028u) == kGameCubeRamSize &&
+                    ppc_read_u32(state, 0x800000f0u) == kGameCubeRamSize &&
+                    state.miInterruptMask == 0x10,
+                "Original memory-protection initialization did not configure real RAM/MI state.");
+        for (unsigned index = 0; index < 5; ++index) {
+            Require(ppc_read_u32(state, 0x80003040u + index * 4) == 0x801b4ee8u,
+                    "Original memory interrupt handler was not registered in every MI slot.");
+        }
+        for (uint32_t address = 0x8035efa0u; address < 0x81700000u; ++address) {
+            Require(ppc_read_u8(state, address) == 0, "Original ClearArena left nonzero arena bytes.");
+        }
+        Require(ppc_read_u8(state, 0x81700000u) == 0x6b,
+                "Original ClearArena overran its exclusive upper bound.");
         for (unsigned index = 0; index < 128; ++index) {
-            Require(ppc_read_u8(state, 0x81000000u + index) ==
-                        static_cast<uint8_t>(index ^ 0xa5u),
-                    "Original audio startup did not restore its exact RAM backup.");
+            Require(ppc_read_u8(state, 0x81000000u + index) == 0,
+                    "Original arena clearing did not include the former DSP bootstrap region.");
         }
         Require(state.dspControl == 0x804u && state.dspHardware->aramConfiguration == 0x43u &&
                     state.dspHardware->resetCount == 2 && state.dspHardware->dmaTransfers == 2 &&
@@ -197,6 +220,18 @@ int main(int argc, char** argv) {
                 "Original audio initialization did not execute and consume its compiled DSP program.");
         for (auto word : state.dspHardware->dataRam) {
             Require(word == 0, "Original compiled DSP program did not clear poisoned DSP RAM.");
+        }
+        auto audioReturn = state;
+        audioReturn.lr = 0xfffffffcu;
+        for (unsigned index = 0; index < 128; ++index) {
+            ppc_write_u8(audioReturn, 0x81000000u + index, static_cast<uint8_t>(index ^ 0xa5u));
+        }
+        dispatcher.Execute(audioReturn, 0x801b20f4u);
+        Require(audioReturn.pc == 0xfffffffcu && audioReturn.dspHardware->completedPrograms == 2,
+                "Original audio initializer did not return through its caller after a real DSP program.");
+        for (unsigned index = 0; index < 128; ++index) {
+            Require(ppc_read_u8(audioReturn, 0x81000000u + index) == static_cast<uint8_t>(index ^ 0xa5u),
+                    "Original audio initializer failed to restore its exact poisoned RAM backup.");
         }
         for (unsigned index = 0; index < state.dspHardware->aram.size(); ++index) {
             Require(state.dspHardware->aram[index] ==
@@ -224,6 +259,21 @@ int main(int argc, char** argv) {
                     damagedDspCode.dspHardware->executedInstructions == 0 &&
                     damagedDspCode.dspHardware->sentMail == 0,
                 "Modified DSP payload ran a stale compiled program or fabricated mail.");
+        auto noMemoryProtection = CreateOriginalStartupState(image);
+        noMemoryProtection.memoryProtection.reset();
+        const auto noMemoryResult = RunOriginalStartup(dispatcher, noMemoryProtection);
+        Require(noMemoryResult.pc == 0x801b5094u && noMemoryResult.reason.find("not mapped") != std::string::npos,
+                "Missing memory-protection profile was silently substituted.");
+        auto noRamBats = CreateOriginalStartupState(image);
+        noRamBats.ramBats.reset();
+        const auto noBatsResult = RunOriginalStartup(dispatcher, noRamBats);
+        Require(noBatsResult.pc == 0x801b5068u && noBatsResult.reason.find("active system-call") != std::string::npos,
+                "Missing RAM BAT profile silently skipped original real-mode configuration.");
+        auto noColdReset = CreateOriginalStartupState(image);
+        noColdReset.piResetCode.reset();
+        const auto noResetResult = RunOriginalStartup(dispatcher, noColdReset);
+        Require(noResetResult.pc == 0x801b5964u && noResetResult.reason.find("not mapped") != std::string::npos,
+                "Missing PI reset code was silently replaced with a cold reset.");
         const auto sram = NewNativeSram();
         for (unsigned index = 0; index < sram.size(); ++index) {
             Require(ppc_read_u8(state, 0x80317b00u + index) == sram[index],
