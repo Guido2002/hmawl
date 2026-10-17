@@ -87,6 +87,11 @@ void NativeDspStartTaskLoader(PpcState& state) {
     dsp.task->source = 0;
     dsp.task->destination = dsp.task->bytes = dsp.task->dataBytes = dsp.task->entry = 0;
     dsp.task->registers.fill(0);
+    std::fill(dsp.task->registers.begin() + 8, dsp.task->registers.begin() + 12, 0xffff);
+    dsp.task->dmaControl = dsp.task->dmaAddress = 0;
+    dsp.task->dmaMainAddress = 0;
+    dsp.task->returnAddresses.clear();
+    dsp.task->loops.clear();
     ++dsp.task->loaderStarts;
 }
 
@@ -120,6 +125,11 @@ uint16_t NativeDspTaskRead(PpcState& state, uint16_t address) {
     auto& dsp = *state.dspHardware;
     if (address < dsp.dataRam.size()) return dsp.dataRam[address];
     switch (address) {
+    case 0xffc9: return dsp.task->dmaControl;
+    case 0xffcb: return 0;
+    case 0xffcd: return dsp.task->dmaAddress;
+    case 0xffce: return static_cast<uint16_t>(dsp.task->dmaMainAddress >> 16);
+    case 0xffcf: return static_cast<uint16_t>(dsp.task->dmaMainAddress);
     case 0xfffc: return static_cast<uint16_t>(dsp.fromDspMailbox >> 16);
     case 0xfffd: return static_cast<uint16_t>(dsp.fromDspMailbox);
     case 0xfffe: return static_cast<uint16_t>(dsp.toDspMailbox >> 16);
@@ -144,9 +154,148 @@ void NativeDspTaskWrite(PpcState& state, uint16_t address, uint16_t value) {
     } else if (address == 0xfffb && value == 1) {
         *state.dspControl |= 0x80u;
         ++dsp.task->interrupts;
+    } else if (address == 0xffc9) {
+        if (value > 1) throw std::runtime_error("Native DSP supports only synchronous data RAM DMA.");
+        dsp.task->dmaControl = value;
+    } else if (address == 0xffcd) {
+        dsp.task->dmaAddress = value;
+    } else if (address == 0xffce) {
+        dsp.task->dmaMainAddress = (dsp.task->dmaMainAddress & 0xffffu) | (uint32_t(value) << 16);
+    } else if (address == 0xffcf) {
+        dsp.task->dmaMainAddress = (dsp.task->dmaMainAddress & 0xffff0000u) | value;
+    } else if (address == 0xffcb) {
+        auto& task = *dsp.task;
+        if (!value || (value & 1u) || (task.dmaMainAddress & 1u) ||
+            task.dmaAddress >= dsp.dataRam.size() ||
+            value / 2u > dsp.dataRam.size() - task.dmaAddress) {
+            throw std::runtime_error("Invalid native DSP data DMA alignment or range.");
+        }
+        const auto offset = ppc_memory_offset(state, task.dmaMainAddress, value);
+        if (task.dataTransfers == UINT32_MAX || task.transferredBytes > UINT64_MAX - value) {
+            throw std::runtime_error("Native DSP data DMA accounting overflow.");
+        }
+        for (unsigned i = 0; i < value / 2u; ++i) {
+            auto& word = dsp.dataRam[task.dmaAddress + i];
+            if (task.dmaControl == 0) {
+                word = uint16_t((uint16_t(state.memory[offset + 2 * i]) << 8) |
+                                state.memory[offset + 2 * i + 1]);
+            } else {
+                state.memory[offset + 2 * i] = static_cast<uint8_t>(word >> 8);
+                state.memory[offset + 2 * i + 1] = static_cast<uint8_t>(word);
+            }
+        }
+        ++task.dataTransfers;
+        task.transferredBytes += value;
     } else {
         throw std::runtime_error("Unsupported native DSP task memory write at " + std::to_string(address) + ".");
     }
+}
+
+namespace {
+
+int64_t Signed40(uint64_t bits) {
+    bits &= UINT64_C(0xffffffffff);
+    return bits & UINT64_C(0x8000000000) ? int64_t(bits) - INT64_C(0x10000000000) : int64_t(bits);
+}
+
+} // namespace
+
+int64_t NativeDspAccumulator(const PpcState& state, unsigned acc) {
+    if (acc > 1) throw std::runtime_error("Invalid native DSP accumulator.");
+    const auto& r = state.dspHardware->task->registers;
+    return Signed40((uint64_t(r[16 + acc] & 0xffu) << 32) |
+                    (uint64_t(r[30 + acc]) << 16) | r[28 + acc]);
+}
+
+void NativeDspSetAccumulator(PpcState& state, unsigned acc, int64_t value) {
+    if (acc > 1) throw std::runtime_error("Invalid native DSP accumulator.");
+    auto& r = state.dspHardware->task->registers;
+    const auto bits = uint64_t(value);
+    r[16 + acc] = static_cast<uint16_t>(static_cast<int16_t>(static_cast<int8_t>(bits >> 32)));
+    r[30 + acc] = static_cast<uint16_t>(bits >> 16);
+    r[28 + acc] = static_cast<uint16_t>(bits);
+}
+
+void NativeDspArithmeticFlags(PpcState& state, int64_t left, int64_t right, bool subtract) {
+    const auto result = Signed40(uint64_t(subtract ? left - right : left + right));
+    const bool carry = subtract ? uint64_t(left) >= uint64_t(result) : uint64_t(left) > uint64_t(result);
+    const auto operand = subtract ? -right : right;
+    const bool overflow = ((left ^ result) & (operand ^ result)) < 0;
+    uint16_t flags = carry ? 1 : 0;
+    if (overflow) flags |= 0x82;
+    if (!result) flags |= 4;
+    if (result < 0) flags |= 8;
+    if (result < INT32_MIN || result > INT32_MAX) flags |= 0x10;
+    const auto top = uint64_t(result) & 0xc0000000u;
+    if (top == 0 || top == 0xc0000000u) flags |= 0x20;
+    auto& sr = state.dspHardware->task->registers[19];
+    sr = (sr & ~0x3fu) | flags;
+}
+
+bool NativeDspCondition(const PpcState& state, unsigned condition) {
+    const auto sr = state.dspHardware->task->registers[19];
+    const bool less = bool(sr & 2) != bool(sr & 8), zero = (sr & 4) != 0;
+    switch (condition) {
+    case 0: return !less;
+    case 1: return less;
+    case 2: return !less && !zero;
+    case 3: return less || zero;
+    case 4: return !zero;
+    case 5: return zero;
+    case 6: return !(sr & 1);
+    case 7: return (sr & 1) != 0;
+    case 8: return !(sr & 0x10);
+    case 9: return (sr & 0x10) != 0;
+    case 10: return (sr & 0x30) && !zero;
+    case 11: return !(sr & 0x30) || zero;
+    case 12: return !(sr & 0x40);
+    case 13: return (sr & 0x40) != 0;
+    case 14: return (sr & 2) != 0;
+    case 15: return true;
+    default: throw std::runtime_error("Invalid native DSP branch condition.");
+    }
+}
+
+void NativeDspLogicFlags(PpcState& state, unsigned acc) {
+    NativeDspArithmeticFlags(state, NativeDspAccumulator(state, acc), 0, false);
+    auto& r = state.dspHardware->task->registers;
+    r[19] &= ~0xcu;
+    if (!r[30 + acc]) r[19] |= 4;
+    if (r[30 + acc] & 0x8000u) r[19] |= 8;
+}
+
+void NativeDspCall(PpcState& state, uint16_t resume) {
+    auto& task = *state.dspHardware->task;
+    auto& stack = task.returnAddresses;
+    if (stack.size() + task.loops.size() >= 4) throw std::runtime_error("Native DSP call stack exceeds the bounded profile.");
+    stack.push_back(resume);
+}
+
+uint16_t NativeDspReturn(PpcState& state) {
+    auto& stack = state.dspHardware->task->returnAddresses;
+    if (stack.empty()) throw std::runtime_error("Native DSP return stack is empty.");
+    const auto resume = stack.back();
+    stack.pop_back();
+    return resume;
+}
+
+void NativeDspStartLoop(PpcState& state, uint16_t start, uint16_t end, uint16_t count, uint16_t after) {
+    auto& task = *state.dspHardware->task;
+    if (start > end || after <= end) throw std::runtime_error("Invalid native DSP loop range.");
+    if (count && task.loops.size() + task.returnAddresses.size() >= 4) {
+        throw std::runtime_error("Native DSP loop stack exceeds the bounded profile.");
+    }
+    if (count) task.loops.push_back({start, end, count});
+    state.dspHardware->instructionPc = count ? start : after;
+}
+
+uint16_t NativeDspNext(PpcState& state, uint16_t pc, uint16_t next) {
+    auto& loops = state.dspHardware->task->loops;
+    if (!loops.empty() && loops.back().end == pc) {
+        if (--loops.back().remaining) return loops.back().start;
+        loops.pop_back();
+    }
+    return next;
 }
 
 void NativeDspTaskWriteRegister(PpcState& state, unsigned reg, uint16_t value) {

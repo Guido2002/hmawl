@@ -221,8 +221,80 @@ void TestDspTaskLoader() {
     Require(dsp.task->mode == NativeDspTaskMode::LoaderCommand && dsp.task->parameters == 0 &&
                 dsp.task->loaderStarts == 2 && dsp.task->instructionUploads == 1 &&
                 dsp.fromDspMailbox == 0x8071feed && !dsp.programHalted &&
-                dsp.task->registers == std::array<uint16_t, 32>{},
+                dsp.task->registers[0] == 0 && dsp.task->registers[19] == 0 &&
+                std::all_of(dsp.task->registers.begin() + 8, dsp.task->registers.begin() + 12,
+                            [](uint16_t value) { return value == 0xffff; }),
             "Restarted native loader retained parameters/registers or erased historical DMA evidence.");
+}
+
+void TestDspDataDmaAndControl() {
+    uint64_t ticks = 0;
+    auto state = AudioState(ticks);
+    auto& dsp = *state.dspHardware;
+    dsp.task.emplace();
+    auto& task = *dsp.task;
+    ppc_write_u32(state, 32, 0x8001fffe);
+    NativeDspTaskWrite(state, 0xffce, 0);
+    NativeDspTaskWrite(state, 0xffcf, 32);
+    NativeDspTaskWrite(state, 0xffcd, 4094);
+    NativeDspTaskWrite(state, 0xffc9, 0);
+    NativeDspTaskWrite(state, 0xffcb, 4);
+    Require(dsp.dataRam[4094] == 0x8001 && dsp.dataRam[4095] == 0xfffe &&
+                dsp.dataRam[4093] == 0 && task.dataTransfers == 1 && task.transferredBytes == 4 &&
+                NativeDspTaskRead(state, 0xffc9) == 0 && NativeDspTaskRead(state, 0xffcb) == 0 &&
+                NativeDspTaskRead(state, 0xffcd) == 4094 && NativeDspTaskRead(state, 0xffcf) == 32,
+            "DSP DMA did not copy big-endian RAM words at the exact DRAM boundary.");
+    NativeDspTaskWrite(state, 0xffc9, 1);
+    NativeDspTaskWrite(state, 0xffcf, 40);
+    NativeDspTaskWrite(state, 0xffcb, 4);
+    Require(ppc_read_u32(state, 40) == 0x8001fffe && state.memory[39] == 0xa5 &&
+                state.memory[44] == 0xa5 && task.dataTransfers == 2 && task.transferredBytes == 8,
+            "DSP output DMA did not preserve sample byte order or surrounding RAM.");
+    const auto memory = state.memory;
+    const auto dram = dsp.dataRam;
+    for (uint16_t bytes : {uint16_t(0), uint16_t(3), uint16_t(6)}) {
+        Reject([&] { NativeDspTaskWrite(state, 0xffcb, bytes); });
+    }
+    Reject([&] { NativeDspTaskWrite(state, 0xffc9, 2); });
+    Require(task.dmaControl == 1, "Rejected instruction DMA changed the data DMA mode.");
+    NativeDspTaskWrite(state, 0xffcf, 255);
+    Reject([&] { NativeDspTaskWrite(state, 0xffcb, 4); });
+    NativeDspTaskWrite(state, 0xffcf, 256);
+    Reject([&] { NativeDspTaskWrite(state, 0xffcb, 4); });
+    Require(state.memory == memory && dsp.dataRam == dram && task.dataTransfers == 2 &&
+                task.transferredBytes == 8, "Invalid DSP DMA partially changed RAM or accounting.");
+
+    for (unsigned i = 0; i < 4; ++i) NativeDspCall(state, static_cast<uint16_t>(10 + i));
+    Reject([&] { NativeDspCall(state, 99); });
+    for (unsigned i = 4; i; --i) Require(NativeDspReturn(state) == 9 + i, "DSP return stack order changed.");
+    Reject([&] { NativeDspReturn(state); });
+    NativeDspStartLoop(state, 10, 12, 0, 13);
+    Require(dsp.instructionPc == 13 && task.loops.empty(), "Zero DSP loop count executed a body.");
+    for (unsigned i = 0; i < 4; ++i) NativeDspStartLoop(state, 10, 12, 2, 13);
+    Reject([&] { NativeDspStartLoop(state, 10, 12, 2, 13); });
+    for (unsigned i = 0; i < 4; ++i) {
+        Require(NativeDspNext(state, 12, 13) == 10 && NativeDspNext(state, 12, 13) == 13,
+                "DSP loop count or nested loop state changed.");
+    }
+    Require(task.loops.empty(), "DSP loops leaked their bounded stack entries.");
+    for (int64_t value : {INT64_C(-549755813888), INT64_C(-2147483649), INT64_C(-1),
+                          INT64_C(0), INT64_C(2147483648), INT64_C(549755813887)}) {
+        NativeDspSetAccumulator(state, 0, value);
+        Require(NativeDspAccumulator(state, 0) == value, "DSP signed-40 accumulator lost its value.");
+        NativeDspArithmeticFlags(state, value, value, true);
+        Require((task.registers[19] & 0x3f) == 0x25 &&
+                    NativeDspCondition(state, 5) && !NativeDspCondition(state, 4),
+                "DSP equal comparison flags are incorrect.");
+    }
+    NativeDspArithmeticFlags(state, INT64_C(549755813887), 1, false);
+    Require((task.registers[19] & 0x9a) == 0x9a && NativeDspCondition(state, 0),
+            "DSP signed overflow/sticky flags or overflow-aware comparison are incorrect.");
+    NativeDspSetAccumulator(state, 0, 1);
+    NativeDspLogicFlags(state, 0);
+    Require((task.registers[19] & 0x8c) == 0x84, "DSP logic zero ignored mid-word semantics or sticky overflow.");
+    NativeDspSetAccumulator(state, 0, INT64_C(0x80000000));
+    NativeDspLogicFlags(state, 0);
+    Require((task.registers[19] & 0x1c) == 0x18, "DSP logic sign or full-accumulator overflow flag is incorrect.");
 }
 
 void TestPcmDma() {
@@ -400,6 +472,7 @@ int main() {
         TestAiRegistersAndDmaGuards();
         TestAramRegistersAndTransfers();
         TestDspTaskLoader();
+        TestDspDataDmaAndControl();
         TestPcmDma();
         std::cout << "Native AI/ARAM/task-loader/PCM DMA tests passed with explicit test output sinks; "
                      "no audible game audio claimed.\n";

@@ -1716,6 +1716,100 @@ void TestCompiledDspTask() {
     Require(NativeDspTaskReadRegister(signedState, 30) == 0x8000, "DSP negative S40 overflow did not saturate.");
     Reject([&] { NativeDspTaskReadRegister(signedState, 12); }, "stack");
     Reject([&] { NativeDspTaskWriteRegister(signedState, 12, 1); }, "stack");
+    auto commandState = stateFor(SyntheticCommandWords);
+    commandState.memory.assign(128, 0xa5);
+    commandState.executeDspTask = SyntheticDspCommand;
+    ppc_write_u32(commandState, 0x20, 0x00021234);
+    NativeDspAdvanceTask(commandState);
+    Require(commandState.dspHardware->instructionPc == 14 &&
+                commandState.dspHardware->task->cpuMailConsumed == 0,
+            "Compiled command header wait fabricated a command.");
+    const auto send = [&](uint32_t mail) {
+        ppc_write_u16(commandState, 0xcc005000, static_cast<uint16_t>(mail >> 16));
+        ppc_write_u16(commandState, 0xcc005002, static_cast<uint16_t>(mail));
+    };
+    send(0x92340004);
+    NativeDspAdvanceTask(commandState);
+    Require(commandState.dspHardware->instructionPc == 24 &&
+                commandState.dspHardware->task->cpuMailConsumed == 1 &&
+                commandState.dspHardware->task->dataTransfers == 0,
+            "Compiled command did not wait for its separately supplied pointer.");
+    send(0x80000020);
+    for (unsigned i = 0; i < 8 && !commandState.dspHardware->programHalted; ++i) {
+        NativeDspAdvanceTask(commandState);
+    }
+    const auto& commandDsp = *commandState.dspHardware;
+    Require(commandDsp.programHalted && commandDsp.fromDspMailbox == 0xc56789ab &&
+                commandDsp.task->cpuMailConsumed == 2 && commandDsp.task->dataTransfers == 2 &&
+                commandDsp.task->transferredBytes == 10 && commandDsp.task->returnAddresses.empty() &&
+                commandDsp.task->loops.empty() && commandDsp.completedPrograms == 1 &&
+                commandDsp.dataRam[0x100] == 2 && commandDsp.dataRam[0x101] == 0x1234 &&
+                commandDsp.dataRam[0xff] == 0xa55a && commandDsp.dataRam[0x102] == 0xa55a &&
+                commandDsp.dataRam[0x110] == 7 && commandDsp.dataRam[0x112] == 7 &&
+                commandDsp.dataRam[0x113] == 0xa55a && commandDsp.dataRam[0x120] == 0 &&
+                commandDsp.dataRam[0x121] == 0xfff8 &&
+                ppc_read_u32(commandState, 0x40) == 0x00070007 &&
+                ppc_read_u16(commandState, 0x44) == 7 &&
+                commandState.memory[0x3f] == 0xa5 && commandState.memory[0x46] == 0xa5,
+            "Compiled mail/DMA/call/parallel/loop/table-dispatch chain produced wrong original-data effects.");
+    auto badHeader = stateFor(SyntheticCommandWords);
+    badHeader.executeDspTask = SyntheticDspCommand;
+    badHeader.dspHardware->toDspMailbox = 0xabcd0004;
+    NativeDspAdvanceTask(badHeader);
+    Require(badHeader.dspHardware->instructionPc == 14 &&
+                badHeader.dspHardware->task->cpuMailConsumed == 0 &&
+                badHeader.dspHardware->task->dataTransfers == 0,
+            "Compiled comparison accepted a wrong command header.");
+    for (uint16_t count : {uint16_t(0), uint16_t(1), uint16_t(600)}) {
+        auto loop = stateFor(SyntheticLoopWords);
+        loop.executeDspTask = SyntheticDspLoop;
+        loop.dspHardware->task->registers[2] = count;
+        NativeDspAdvanceTask(loop);
+        if (count == 600) {
+            Require(!loop.dspHardware->programHalted && loop.dspHardware->task->loops.size() == 1 &&
+                        loop.dspHardware->task->loops.back().remaining > 0 &&
+                        loop.dspHardware->task->loops.back().remaining < count,
+                    "DSP loop did not retain its remaining iterations across a cooperative quantum.");
+            for (unsigned i = 0; i < 4 && !loop.dspHardware->programHalted; ++i) NativeDspAdvanceTask(loop);
+        }
+        Require(loop.dspHardware->programHalted && loop.dspHardware->task->loops.empty() &&
+                    loop.dspHardware->task->registers[0] == 0x40 + count &&
+                    loop.dspHardware->dataRam[0x3f] == 0xa55a &&
+                    loop.dspHardware->dataRam[0x40 + count] == 0xa55a &&
+                    std::all_of(loop.dspHardware->dataRam.begin() + 0x40,
+                                loop.dspHardware->dataRam.begin() + 0x40 + count,
+                                [](uint16_t word) { return word == 0x55; }),
+                "Compiled zero/single/quantum-spanning DSP loop wrote an incorrect range.");
+    }
+    auto arithmetic = stateFor({0x9900, 0xc100, 0x0021});
+    arithmetic.executeDspTask = SyntheticDspArithmetic;
+    NativeDspSetAccumulator(arithmetic, 0, -65536);
+    NativeDspSetAccumulator(arithmetic, 1, -98305);
+    arithmetic.dspHardware->task->registers[26] = 0xffff;
+    NativeDspAdvanceTask(arithmetic);
+    Require(NativeDspAccumulator(arithmetic, 1) == -2 &&
+                (arithmetic.dspHardware->task->registers[19] & 0x3f) == 0x25,
+            "Compiled arithmetic right shift or signed AX-high comparison is incorrect.");
+    auto damagedTable = stateFor(SyntheticCommandWords);
+    damagedTable.executeDspTask = SyntheticDspCommand;
+    const auto tableRead = static_cast<uint16_t>(std::find(SyntheticCommandWords.begin(),
+        SyntheticCommandWords.end(), 0x0213) - SyntheticCommandWords.begin());
+    damagedTable.dspHardware->instructionPc = tableRead;
+    damagedTable.dspHardware->task->registers[3] = SyntheticCommandWords[tableRead - 1];
+    damagedTable.dspHardware->task->instructionRam[SyntheticCommandWords[tableRead - 1]] ^= 1;
+    const auto tableRegisters = damagedTable.dspHardware->task->registers;
+    Reject([&] { NativeDspAdvanceTask(damagedTable); }, "instruction-data");
+    Require(damagedTable.dspHardware->task->registers == tableRegisters &&
+                damagedTable.dspHardware->completedPrograms == 0,
+            "Damaged instruction-data table changed register or completion state.");
+    auto nonlinear = stateFor(SyntheticCommandWords);
+    nonlinear.executeDspTask = SyntheticDspCommand;
+    nonlinear.dspHardware->instructionPc = static_cast<uint16_t>(std::find(SyntheticCommandWords.begin(),
+        SyntheticCommandWords.end(), 0x8970) - SyntheticCommandWords.begin());
+    const auto nonlinearRegisters = nonlinear.dspHardware->task->registers;
+    Reject([&] { NativeDspAdvanceTask(nonlinear); }, "linear addressing");
+    Require(nonlinear.dspHardware->task->registers == nonlinearRegisters,
+            "Unsupported parallel addressing changed the accumulator before failing.");
     auto unknown = stateFor({0xffff});
     unknown.executeDspTask = UnsupportedDspTask;
     Reject([&] { NativeDspAdvanceTask(unknown); }, "translation at word 0");
@@ -1726,6 +1820,8 @@ void TestCompiledDspTask() {
     Reject([&] { RecompileDspTask({0x029f, 1}, 0, "Task"); }, "branch target");
     Reject([&] { RecompileDspTask({0x009e}, 0, "Task"); }, "Truncated");
     Reject([&] { RecompileDspTask({0x0021}, 0, "Task();"); }, "Invalid");
+    Reject([&] { RecompileDspTask({0x0080, 0, 0x0021}, 0, "Task", {1}); }, "overlapping");
+    Reject([&] { RecompileDspTask({0x0060, 0, 0x0021}, 0, "Task"); }, "loop range");
 }
 
 void TestCompiledDspInitialization() {

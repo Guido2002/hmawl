@@ -119,10 +119,15 @@ The Windows runner now binds a real `waveOut` PCM backend. Original AIStartDMA
 returns after actual RAM samples are accepted by Windows; timed DMA reloads assert
 their IRQ and execute the original CPU audio handler and buffer callback. Checked
 ARAM/ARQ transfers also continue with the live compiled DSP task. The original audio
-callback sends its first real DSP command, `0xBABE0024`.
+callback sends its first real DSP command, `0xBABE0024`. The task now validates
+that header, consumes the separate pointer, copies the actual command list into
+DRAM and dispatches through its original instruction-memory table. Original
+parameter transfers, buffer-initialization loops and subsequent preparation run;
+both CPU mail words are consumed and the original CPU submission routine returns.
 With an available output device, a verified runner execution stops with **exit code 3**
-at `PC=LR=0x801F2E50`, DSP word `0x4F`: the task's command-processing `CMP` still
-needs translation, followed by command-list DMA and mixing. Initial PCM buffers
+at `PC=0x801EC098`, `LR=0x801F0E2C`, DSP word `0x497`: its next `ADDAX`
+and the following processing/mixing still need translation. Six actual DSP data
+DMAs transfer 2852 bytes before this boundary. Initial PCM buffers
 contain original zero samples, not intro music. Device/queue errors fail explicitly;
 hosts or library callers without a PCM backend retain the AIStartDMA dependency error.
 No ROM bytes, task-ready mail, mixed samples or task completion are fabricated.

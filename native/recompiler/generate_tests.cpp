@@ -781,6 +781,45 @@ int main(int argc, char** argv) {
             output << "};\n";
             output << RecompileDspTask({0x8f00, 0x009e, 0x8001, 0x0021}, 0, "SignedDspTask");
             output << RecompileDspTask({0xffff}, 0, "UnsupportedDspTask");
+            std::vector<uint16_t> command = {
+                0x0092, 0xff, 0x0088, 0xffff, 0x0089, 0xffff, 0x008a, 0xffff, 0x008b, 0xffff,
+                0x8100, 0x8900, 0x009f, 0x9234
+            };
+            const auto headerWait = static_cast<uint16_t>(command.size());
+            command.insert(command.end(), {0x26fe, 0x02c0, 0x8000, 0x029c, headerWait,
+                                           0x8200, 0x0294, headerWait, 0x23ff, 0x8100});
+            const auto pointerWait = static_cast<uint16_t>(command.size());
+            command.insert(command.end(), {0x26fe, 0x02c0, 0x8000, 0x029c, pointerWait, 0x27ff,
+                0x0240, 0x7fff, 0x2ece, 0x2fcf, 0x16cd, 0x100, 0x16c9, 0,
+                0x1ffb, 0x2fcb, 0x02bf, 0});
+            const auto callOperand = command.size() - 1;
+            command.insert(command.end(), {0x0080, 0x100, 0x8970, 0x8f00, 0x009f, 7,
+                0x0081, 0x110, 0x0082, 3, 0x0042, 0x1b3f, 0x0e05, 0x1103, 0});
+            command.back() = static_cast<uint16_t>(command.size());
+            command.insert(command.end(), {0x0401, 0x0082, 0x120, 0x7c22,
+                0x00fe, 0x121, 0x16ce, 0, 0x16cf, 0x40, 0x16cd, 0x110, 0x16c9, 1, 0x16cb, 6,
+                0x0083, 0, 0x0213, 0x1c7e, 0x176f});
+            const auto table = static_cast<uint16_t>(command.size());
+            const auto tableAddressOperand = table - 4;
+            command[tableAddressOperand] = table;
+            command.push_back(static_cast<uint16_t>(table + 1));
+            const auto finish = static_cast<uint16_t>(command.size());
+            command.insert(command.end(), {0x16fc, 0x4567, 0x16fd, 0x89ab, 0x0021});
+            command[callOperand] = static_cast<uint16_t>(command.size());
+            command.insert(command.end(), {0x26c9, 0x02a0, 4, 0x029c,
+                                           static_cast<uint16_t>(command.size()), 0x02df});
+            output << RecompileDspTask(command, 0, "SyntheticDspCommand", {finish});
+            output << "static const std::vector<uint16_t> SyntheticCommandWords = {";
+            for (auto word : command) output << word << "u,";
+            output << "};\n";
+            const std::vector<uint16_t> loop = {
+                0x0088, 0xffff, 0x0080, 0x40, 0x009a, 0x55, 0x0042, 0x1b1a, 0x0021
+            };
+            output << RecompileDspTask(loop, 0, "SyntheticDspLoop");
+            output << "static const std::vector<uint16_t> SyntheticLoopWords = {";
+            for (auto word : loop) output << word << "u,";
+            output << "};\n";
+            output << RecompileDspTask({0x9900, 0xc100, 0x0021}, 0, "SyntheticDspArithmetic");
             Emit(output, 0xb5e0u, {
                 (31u << 26) | (3u << 21) | (26u << 16) | (467u << 1),
                 (31u << 26) | (4u << 21) | (27u << 16) | (467u << 1)});

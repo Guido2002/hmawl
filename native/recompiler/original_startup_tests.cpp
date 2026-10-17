@@ -1058,6 +1058,8 @@ int main(int argc, char** argv) {
                 uint64_t pcmTicks = 1000000;
                 uint64_t submittedFrames = 0;
                 unsigned pcmHandlers = 0, pcmCallbacks = 0;
+                unsigned commandHandshakes = 0;
+                uint32_t commandAddress = 0;
                 const auto bindPcmTest = [](PpcState& guest, uint64_t& ticks, uint64_t& frames) {
                     guest.readTimeBase = [&guest, &ticks] {
                         return ticks += ((*guest.aiControl & 1u) || guest.pcm->active) ? 8 : 1000;
@@ -1077,26 +1079,37 @@ int main(int argc, char** argv) {
                 const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 1000000, 128, [&](uint32_t pc) {
                     if (pc == 0x801c1bc0u) ++pcmHandlers;
                     if (pc == 0x801f2ab8u) ++pcmCallbacks;
+                    if (pc == 0x801f2e64u) commandAddress = pcmState.gpr[31];
+                    if (pc == 0x801f2e70u) ++commandHandshakes;
                 });
                 std::cout << "PCM integration: PC=" << std::hex << pcmResult.pc << " LR=" << pcmResult.lr << std::dec
                           << " reason=" << pcmResult.reason << " frames=" << submittedFrames
                           << " periods=" << pcmState.pcm->completedBuffers << " handlers=" << pcmHandlers
-                          << " callbacks=" << pcmCallbacks << " DSP PC=" << pcmState.dspHardware->instructionPc << '\n';
+                          << " callbacks=" << pcmCallbacks << " DSP PC=" << pcmState.dspHardware->instructionPc
+                          << " DMA=" << pcmState.dspHardware->task->dataTransfers << "/"
+                          << pcmState.dspHardware->task->transferredBytes << " command returns=" << commandHandshakes << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            pcmResult.pc == 0x801f2e50 && pcmResult.lr == 0x801f2e50 &&
-                            pcmResult.reason == "Native DSP task needs a translation at word 79 (instruction 33280)." &&
+                            pcmResult.pc == 0x801ec098 && pcmResult.lr == 0x801f0e2c &&
+                            pcmResult.reason == "Native DSP task needs a translation at word 1175 (instruction 18432)." &&
                             pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
                             pcmState.pcm->active && pcmState.pcm->starts == 1 &&
                             pcmState.pcm->completedBuffers == 1 && pcmState.pcm->submittedFrames == submittedFrames &&
                             submittedFrames == 320 && pcmHandlers == 1 && pcmCallbacks == 1 &&
-                            pcmState.dspHardware->task->cpuMailSent == 11 &&
-                            pcmState.dspHardware->task->cpuMailConsumed == 10 &&
-                            pcmState.dspHardware->toDspMailbox == 0xbabe0024u &&
-                            pcmState.dspHardware->instructionPc == 0x4f &&
+                            commandAddress != 0 && commandHandshakes == 1 &&
+                            pcmState.dspHardware->task->cpuMailSent == 12 &&
+                            pcmState.dspHardware->task->cpuMailConsumed == 12 &&
+                            !(pcmState.dspHardware->toDspMailbox & 0x80000000u) &&
+                            pcmState.dspHardware->task->dataTransfers == 6 &&
+                            pcmState.dspHardware->task->transferredBytes == 2852 &&
+                            pcmState.dspHardware->instructionPc == 0x497 &&
                             pcmState.dspHardware->completedPrograms == 1 &&
                             !pcmState.systemCallActive && pcmState.externalInterrupt->active &&
                             pcmState.externalInterrupt->inHandler,
-                        "Original PCM IRQ/callback did not reach its real DSP command or fabricated mixing/return.");
+                        "Original command transport/DMA/initialization did not reach the real processing boundary.");
+                for (unsigned i = 0; i < 18; ++i) {
+                    Require(pcmState.dspHardware->dataRam[0xc00 + i] == ppc_read_u16(pcmState, commandAddress + i * 2),
+                            "DSP command-list DMA differs from original CPU RAM.");
+                }
                 auto plainPcm = CreateOriginalStartupState(image);
                 InstallOriginalStartupDisc(plainPcm, disc);
                 plainPcm.pcm.emplace();
@@ -1117,6 +1130,12 @@ int main(int argc, char** argv) {
                             plainPcm.pcm->phase == pcmState.pcm->phase &&
                             plainPcm.pcm->completedBuffers == pcmState.pcm->completedBuffers &&
                             plainPcm.dspHardware->executedInstructions == pcmState.dspHardware->executedInstructions &&
+                            plainPcm.dspHardware->dataRam == pcmState.dspHardware->dataRam &&
+                            plainPcm.dspHardware->task->registers == pcmState.dspHardware->task->registers &&
+                            plainPcm.dspHardware->task->dataTransfers == pcmState.dspHardware->task->dataTransfers &&
+                            plainPcm.dspHardware->task->transferredBytes == pcmState.dspHardware->task->transferredBytes &&
+                            plainPcm.dspHardware->task->returnAddresses == pcmState.dspHardware->task->returnAddresses &&
+                            plainPcm.dspHardware->task->loops.size() == pcmState.dspHardware->task->loops.size() &&
                             plainPcm.externalInterrupt->delivered == pcmState.externalInterrupt->delivered &&
                             plainPcm.externalInterrupt->returned == pcmState.externalInterrupt->returned,
                         "PCM observation changed CPU/RAM, DMA timing, original interrupts or native DSP execution.");

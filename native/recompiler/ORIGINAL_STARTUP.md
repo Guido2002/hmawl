@@ -140,9 +140,28 @@ conditional polling branches and HALT are supported. A 256-instruction cooperati
 quantum and backward-wait yields let the original CPU service mail/interrupts;
 this is not cycle-accurate DSP timing. CPU HALT pauses rather than restarts a live
 task; reset clears the live protocol, and the explicit loader profile starts fresh
-parameters/registers. Unsupported instructions, stack accesses, task memory or
-mailbox overwrites fail explicitly. Command processing next needs translation at
-DSP word `0x4F`; command-list DMA and mixing are not implemented.
+parameters/registers, with WR0..3 at their reset value `0xFFFF` (linear addressing).
+Unsupported instructions, explicit stack-register accesses, task memory or
+mailbox overwrites fail explicitly.
+
+The original command header comparison, separate pointer consumption, command-list
+DMA and instruction-memory table dispatch now execute natively. The compiler accepts
+explicit build-time indirect roots from the original 19-entry command table, not a
+runtime instruction decoder. Instruction-data reads also check the compiled image.
+Signed-40 arithmetic/status, accumulator comparison/negation/shift, indexed and
+parallel transfers, native call/return and single/block loops execute the original
+initialization and subsequent parameter preparation. Loops preserve remaining counts
+across the 256-instruction quantum. Calls/loops share a conservative combined
+four-entry bound; explicit stack-register manipulation, nonlinear addressing and
+control-flow instructions at loop endpoints fail explicitly.
+
+DSP-side DMA uses actual main RAM/DRAM in either direction, preserves big-endian
+word order and validates the whole even-byte range before copying. This profile
+is synchronous: control has no busy bit after the copy, and byte length reads zero.
+This is not a cycle-timed DMA engine. Instruction-RAM replacement and DSP ROM
+branches remain explicit dependencies. No DMA injects task mail or completion.
+The runner performs six data transfers/2852 bytes before DSP word `0x497` (`ADDAX`),
+where the following original processing/mixing still needs translation.
 
 ### Windows PCM output and DMA
 
@@ -337,9 +356,11 @@ has asserted exactly one IRQ. No ROM bytes or task-ready/completion messages are
 fabricated. This no-PCM library profile retains its independently checked boundary.
 With the real Windows backend bound, original AIStartDMA returns. Actual timed
 reloads execute the original handler/callback and its cache-sync system call, then
-send `0xBABE0024`. A measured runner execution reaches `PC=LR=0x801F2E50`,
-SP `0x8035CAB8`, DSP PC `0x4F`, where the original `CMP` needs translation.
-That run submits 3040 actual RAM frames at 32028 Hz, completes 18 DMA periods and
+send `0xBABE0024` and the separate pointer. Both are now consumed; the original CPU
+submission returns while the DSP executes command initialization and preparation.
+A measured runner execution reaches `PC=0x801EC098`, LR `0x801F0E2C`,
+SP `0x8035CB88`, DSP PC `0x497`, where original `ADDAX` needs translation.
+That run submits 1920 actual RAM frames at 32028 Hz, completes 11 DMA periods and
 enters the original handler/callback twice. These steady-clock counts depend on
 host elapsed time. Host timing can also expose other untranslated startup paths;
 the next scene constructor at `0x80086044` is not bound yet. No mixed or audible
@@ -360,15 +381,19 @@ constructor words fail integrity validation without claiming later milestones.
 The separate deterministic PCM fixture uses 8 ticks while either AI sampling or PCM
 DMA is active. One actual timed DMA period submits the second 160-frame buffer and
 executes exactly one original handler/callback. It reaches the same real DSP command
-boundary with 320 submitted frames, eleven CPU mail words sent/ten consumed, no
+boundary with 320 submitted frames, twelve CPU mail words sent/twelve consumed, no
 completed task and no finished outer interrupt. Observed and unobserved executions
-match RAM/CPU state, clock samples, DMA phase/counts and interrupt/DSP steps.
+match RAM/CPU state, DSP DRAM/registers, clock samples, DMA phase/counts and
+interrupt/DSP steps. Six DSP data DMAs transfer 2852 bytes; all 18 command-list
+words match the actual CPU RAM source. The original CPU submission handshake
+completes once; this does not imply completion of the entire DSP command list.
 The game main loop, GX renderer,
 general scheduled game-thread execution, input and saves have not run.
 
-The next connected milestone is native execution of the original DSP bootstrap/task
-handoff, then completion of original audio/game initialization. PCM DMA still needs
-a real playback backend. Geometry/texture rendering and XFB pixel scanout
+The next connected audio milestone is original DSP processing/mixing and actual
+command-list completion beyond `0x497`, not a replacement mixer. The native loader,
+task startup, command transport/initialization and Windows PCM backend are present.
+Completion of original game initialization, geometry/texture rendering and XFB pixel scanout
 are still required for a real displayed frame; Screen return alone does not establish one.
 Generated translation registration uses non-inlined batches
 of at most 64 regular bindings (plus the console binding in the final batch), avoiding
@@ -522,7 +547,8 @@ and execution backend plus modified DSP program rejection,
 complete original task IRAM bytes and guards, host/DSP mailbox counts, actual
 task interrupt and CPU callback, running/waiting versus completed program state,
 and corrupt-task rejection before IRAM upload or init callback,
-original PCM start/remaining/reload/handler/buffer callback, real first DSP header,
+original PCM start/remaining/reload/handler/buffer callback, real DSP header/pointer
+consumption, exact command-list copy, six data DMAs and original command preparation,
 system-call return inside the active interrupt and complete observed/unobserved
 PCM-path equivalence using an explicitly test-only output sink,
 original real-mode BAT/SRR state, five MI handler slots, exact native RAM metadata,

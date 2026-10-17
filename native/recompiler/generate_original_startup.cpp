@@ -201,7 +201,9 @@ int main(int argc, char** argv) {
         for (uint32_t offset = 0; offset < taskBytes; offset += 2) {
             taskProgram.push_back(ppc_read_u16(dspSource, 0x802e3da0u + offset));
         }
-        functions << RecompileDspTask(taskProgram, 0x10, "OriginalDspAudioTask");
+        std::vector<uint16_t> taskCommands;
+        for (unsigned i = 0; i < 19; ++i) taskCommands.push_back(taskProgram.at(0xaff + i));
+        functions << RecompileDspTask(taskProgram, 0x10, "OriginalDspAudioTask", taskCommands);
         functions << "static void ValidateOriginalDspAudioTask(const PpcState& state, "
                      "uint32_t source, uint16_t destination, uint16_t bytes, uint16_t entry) {\n"
                      "static constexpr uint16_t expected[] = {";
