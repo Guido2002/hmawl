@@ -520,21 +520,22 @@ int main(int argc, char** argv) {
                       << " DI transfers=" << discState.discInterface->completedTransfers
                       << " VI fields=" << discState.video->fields << '\n';
             Require(discResult.stop == OriginalStartupStop::Dependency &&
-                        discResult.pc == 0x801ceadcu && discResult.lr == 0x8017a8f0u &&
-                        discResult.stack == 0x8035cf18u && discResult.osInitReturned &&
+                        discResult.pc == 0x801b8ae0u && discResult.lr == 0x8020ad8cu &&
+                        discResult.stack == 0x8035cea8u && discResult.osInitReturned &&
                         discResult.constructorsReturned == 93 && discResult.userInitReturned &&
                         discResult.gameMainEntered && discResult.memoryInitialized &&
                         discResult.screenInitEntered && discResult.gxInitEntered &&
                         discResult.gxInitReturned && discResult.viInitEntered &&
                         discResult.viInitReturned && discResult.viConfigured && discResult.viRetraceReturned &&
+                        discResult.screenInitReturned &&
                         !discState.callGuest && !discState.callException &&
-                        discResult.reason.find("EFB copy requires a renderer/copy backend") != std::string::npos &&
+                        discResult.reason == "No native translation registered at 0x801B8AE0." &&
                         discState.discInterface->completedTransfers == 1 &&
                         discState.discInterface->status == 0x2au &&
                         discState.discInterface->dmaLength == 0 &&
                         discState.discInterface->control == 2 &&
-                        discState.externalInterrupt->delivered == 7 &&
-                        discState.externalInterrupt->returned == 7 && discState.threadContextReturns == 1 &&
+                        discState.externalInterrupt->delivered == 162 &&
+                        discState.externalInterrupt->returned == 162 && discState.threadContextReturns == 1 &&
                         !discState.externalInterrupt->active && discState.externalInterruptsEnabled &&
                         discState.piInterruptMask == 0xffcu &&
                         ppc_read_u16(discState, 0x800030e6u) == 0x8001u &&
@@ -557,19 +558,39 @@ int main(int argc, char** argv) {
             for (const auto value : gx.poke) std::cout << " " << std::hex << value;
             std::cout << std::dec << " metric resets=" << gx.performanceResets
                       << " interval bursts/commands=" << gx.performanceBursts << "/" << gx.performanceCommands << '\n';
-            Require(gx.bursts == 68 && gx.decodedCommands == 337 &&
-                        gx.gathered.size() == 1 && gx.commands.size() == 34 &&
+            Require(gx.bursts == 77 && gx.decodedCommands == 404 &&
+                        gx.gathered.size() == 15 && gx.commands.empty() &&
                         gx.cpuBase == fifo && gx.cpuEnd == fifo + 0x5ffe0 &&
-                        gx.cpuWrite == fifo + 68 * 32 && gx.fifo[0] == gx.cpuBase &&
-                        gx.fifo[1] == gx.cpuEnd && gx.fifo[4] == 32 &&
-                        gx.fifo[5] == gx.cpuWrite && gx.fifo[6] == gx.cpuWrite - 32 &&
+                        gx.cpuWrite == fifo + 77 * 32 && gx.fifo[0] == gx.cpuBase &&
+                        gx.fifo[1] == gx.cpuEnd && gx.fifo[4] == 0 &&
+                        gx.fifo[5] == gx.cpuWrite && gx.fifo[6] == gx.cpuWrite &&
                         gx.writeGatherAddress == 0x0c008000u && (discState.hid2 & 0x40000000u) != 0 &&
                         gx.peControl == 3 && gx.performanceResets == 1 &&
-                        gx.performanceBursts == 5 && gx.performanceCommands == 22 &&
+                        gx.performanceBursts == 14 && gx.performanceCommands == 89 &&
                         gx.poke == std::array<uint16_t, 5>{0x1f, 0xf038, 0, 0x700, 5} &&
                         NativeGxInterruptCause(gx) == 0,
                     "Original GX FIFO/PE setup did not consume the exact actual command bursts.");
-            const uint32_t viewport[] = {0x43a00000, 0xc3600000, 0x4b800000,
+            Require(gx.efb && gx.efb->copies == 1 && gx.efb->clears == 1 &&
+                        gx.efb->undefinedCopies == 1 && gx.efb->lastCopy &&
+                        gx.efb->lastCopy->address == 0x0157b160u &&
+                        gx.efb->lastCopy->width == 640 && gx.efb->lastCopy->height == 448 &&
+                        gx.efb->lastCopy->stride == 1280 &&
+                        gx.efb->lastCopy->undefinedPixels == 640 * 448 &&
+                        (ppc_read_u32(discState, ppc_read_u32(discState, 0x803491b4u) + 4) & 0x3fffffffu) ==
+                            gx.efb->lastCopy->address,
+                    "Original Screen did not copy its unspecified power-on EFB into the actual second XFB before clearing.");
+            for (uint32_t pixel = 0; pixel < NativeEfb::width * NativeEfb::height; ++pixel) {
+                const bool cleared = pixel < 640 * 448;
+                Require(gx.efb->color[pixel] == (cleared ? 0x404040ffu : 0xcdcdcdffu) &&
+                            gx.efb->depth[pixel] == (cleared ? 0xffffffu : 0xcdcdcdu) &&
+                            gx.efb->defined[pixel] == (cleared ? 3 : 0),
+                        "Original EFB clear changed the wrong rectangle, masks, RGB/depth or defined-pixel state.");
+            }
+            for (uint32_t offset = 0; offset < 640 * 448 * 2; offset += 4) {
+                Require(ppc_read_u32(discState, gx.efb->lastCopy->address + offset) == 0xc080c080u,
+                        "Original XFB RAM does not contain the documented representative of undefined power-on pixels.");
+            }
+            const uint32_t viewport[] = {0x43a00000, 0xc3600000, 0x4b7fc000,
                                          0x44258000, 0x440d8000, 0x4b800000};
             std::cout << "XF viewport:";
             for (unsigned index = 0; index < 6; ++index) std::cout << " " << std::hex << gx.xf[0x101a + index];
@@ -599,14 +620,32 @@ int main(int argc, char** argv) {
             size_t entered = 0, returned = 0;
             bool initializedHeap = false;
             bool gxReturned = false;
-            bool viReturned = false, viConfigured = false, retraceReturned = false;
+            bool viReturned = false, viConfigured = false, retraceReturned = false, screenReturned = false;
             unsigned viHandlers = 0;
             std::optional<PpcState> peSource;
             uint64_t peSourceTicks = 0;
             std::vector<std::pair<uint32_t, uint32_t>> allocations;
+            std::vector<std::pair<uint32_t, uint32_t>> allAllocations;
+            std::optional<std::pair<uint32_t, uint32_t>> allocationRequest;
             std::array<uint32_t, 32> savedRegisters{};
             std::array<uint64_t, 18> savedFprs{};
             const auto observe = [&](uint32_t pc) {
+                if (allocationRequest && pc == allocationRequest->first) {
+                    const auto address = traced.gpr[3], size = allocationRequest->second;
+                    Require(initializedHeap && size != 0 && (address & 31u) == 0 &&
+                                address >= 0x8035efa0u && uint64_t(address) + size <= 0x81701fe0u &&
+                                std::all_of(allAllocations.begin(), allAllocations.end(), [&](const auto& previous) {
+                                    return uint64_t(address) + size <= previous.first ||
+                                           uint64_t(previous.first) + previous.second <= address;
+                                }),
+                            "Original allocation returned overlapping, unaligned or out-of-arena memory.");
+                    allAllocations.emplace_back(address, size);
+                    allocationRequest.reset();
+                }
+                if (pc == 0x80178e88u || pc == 0x80178ff8u || pc == 0x801786d4u) {
+                    Require(!allocationRequest, "Original allocator unexpectedly nested an allocation.");
+                    allocationRequest = std::make_pair(traced.lr, traced.gpr[3]);
+                }
                 if (pc == 0x801b7cc0u) {
                     Require(entered == returned && entered < constructors.size() &&
                                 traced.gpr[12] == constructors[entered] &&
@@ -652,6 +691,13 @@ int main(int argc, char** argv) {
                     Require(viConfigured && viHandlers == 2 && traced.threadContextReturns == 1,
                             "VIWaitForRetrace did not use the original VI interrupt and scheduler context restore.");
                     retraceReturned = true;
+                } else if (pc == 0x8000addcu) {
+                    std::cout << "Screen return SP=" << std::hex << traced.gpr[1] << std::dec
+                              << " allocations=" << ppc_read_u32(traced, 0x80349494u) << '\n';
+                    Require(retraceReturned && traced.gpr[1] == 0x8035cf68u &&
+                                ppc_read_u32(traced, 0x80349494u) == 11,
+                            "Original Screen constructor did not return after retrace and eleven real allocations.");
+                    screenReturned = true;
                 } else if (pc == 0x8000ad5cu) {
                     const uint32_t size = (0x81701fe0u - 0x8035efa0u) & ~31u;
                     Require(ppc_read_u32(traced, 0x80000030u) == 0x8035efa0u &&
@@ -694,16 +740,19 @@ int main(int argc, char** argv) {
             try {
                 dispatcher.Execute(traced, image.entryPoint(), 1000000, 128, observe);
             } catch (const std::exception& error) {
-                reachedBoundary = traced.pc == 0x801ceadcu &&
-                    std::string(error.what()).find("EFB copy requires a renderer/copy backend") != std::string::npos;
+                reachedBoundary = traced.pc == 0x801b8ae0u &&
+                    std::string(error.what()) == "No native translation registered at 0x801B8AE0.";
                 if (!reachedBoundary) throw;
             }
             std::cout << "Observed original initialization allocations=" << allocations.size()
+                      << ", all returned allocations=" << allAllocations.size()
                       << ", allocator count=" << ppc_read_u32(traced, 0x80349494u) << '\n';
             Require(initializedHeap && allocations.size() == 11,
                     "Original initialization did not return all eleven observed heap/framebuffer allocations.");
-            Require(ppc_read_u32(traced, 0x80349494u) == allocations.size(),
-                    "Original allocation counter differs from eleven observed allocations.");
+            Require(!allocationRequest && allAllocations.size() == 39 &&
+                        std::equal(allocations.begin(), allocations.end(), allAllocations.begin()) &&
+                        ppc_read_u32(traced, 0x80349494u) == allAllocations.size(),
+                    "Original allocation counter/returned requests differ from observed allocations.");
             Require(ppc_read_u32(traced, 0x8034915cu) == allocations[0].first &&
                         ppc_read_u32(traced, 0x8034919cu) == allocations[1].first &&
                         ppc_read_u32(traced, 0x803491b4u) == allocations[7].first &&
@@ -712,7 +761,7 @@ int main(int argc, char** argv) {
                         ppc_read_u32(traced, allocations[7].first + 4) == allocations[10].first &&
                         ppc_read_u32(traced, allocations[7].first + 8) == allocations[10].first,
                     "Original manager singletons or Screen FIFO pointer differ from allocated objects.");
-            Require(reachedBoundary && gxReturned && viReturned && viConfigured && retraceReturned &&
+            Require(reachedBoundary && gxReturned && viReturned && viConfigured && retraceReturned && screenReturned &&
                         entered == 93 && returned == 93 &&
                         traced.memory == discState.memory && tracedConsole == discConsole &&
                         tracedTicks == ticks && traced.pc == discState.pc && traced.lr == discState.lr &&
@@ -724,9 +773,22 @@ int main(int argc, char** argv) {
                         !traced.callGuest && !traced.callException,
                     "Observed startup changed original initialization, memory, registers or callback cleanup.");
             const auto& observedGx = *traced.graphics;
+            Require(observedGx.efb && observedGx.efb->lastCopy &&
+                        observedGx.efb->color == gx.efb->color &&
+                        observedGx.efb->depth == gx.efb->depth &&
+                        observedGx.efb->defined == gx.efb->defined &&
+                        observedGx.efb->copies == gx.efb->copies &&
+                        observedGx.efb->clears == gx.efb->clears &&
+                        observedGx.efb->undefinedCopies == gx.efb->undefinedCopies &&
+                        observedGx.efb->lastCopy->address == gx.efb->lastCopy->address &&
+                        observedGx.efb->lastCopy->width == gx.efb->lastCopy->width &&
+                        observedGx.efb->lastCopy->height == gx.efb->lastCopy->height &&
+                        observedGx.efb->lastCopy->stride == gx.efb->lastCopy->stride &&
+                        observedGx.efb->lastCopy->undefinedPixels == gx.efb->lastCopy->undefinedPixels,
+                    "Observer changed EFB storage, clear/copy effects or undefined-pixel provenance.");
             const auto& vi = *discState.video;
             const auto& observedVi = *traced.video;
-            Require(vi.resets == 1 && vi.fields == 2 && vi.clockStarted &&
+            Require(vi.resets == 1 && vi.fields == 152 && viHandlers == 152 && vi.clockStarted &&
                         vi.registers[1] == 1 && vi.registers[3] == 429 &&
                         NativeViInterruptCause(vi) == 0 &&
                         observedVi.registers == vi.registers && observedVi.lastTicks == vi.lastTicks &&

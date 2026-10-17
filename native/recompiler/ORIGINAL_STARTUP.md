@@ -224,12 +224,18 @@ abandoned C++ guest-call chain, not the guest's saved stack. The original curren
 context's PC/MSR/SP are checked, and the dispatch budget and code-integrity checks
 remain in force. This is not a replacement scheduler; interrupt-time thread
 switches beyond restoring the interrupted context remain explicitly unsupported.
-The next dependency stop is `PC=0x801CEADC`, LR `0x8017A8F0`, SP `0x8035CF18`:
-the FIFO reaches the original EFB copy while Screen subsequently emits copy-clear
-registers. The copy remains unconsumed without a renderer/copy backend.
+**Original Screen construction returns at `0x8000ADDC`, SP `0x8035CF68`.**
+Its first actual EFB copy writes a 640x448 YUYV image into the second original XFB
+at physical `0x0157B160`, stride 1280, then clears the EFB rectangle to RGB 64/64/64
+and depth `0xFFFFFF`. All 286720 copied pixels are still undefined power-on contents:
+the copy occurs before the clear. This is not a rendered or presented game frame.
+The original game continues through PAD setup, array constructors, collision-reset
+vtables and kernel/camera class initialization. The next dependency is
+`PC=0x801B8AE0`, LR `0x8020AD8C`, SP `0x8035CEA8`: original vector subtraction
+requires the untranslated paired-single `ps_sub` instruction.
 The inquiry result remains `0x8001` and the entire real FST is intact.
-The deterministic 1000-tick/block regression returns seven external exceptions
-(five SI/DI, two VI) and one scheduler context; steady-clock runner field/interrupt
+The deterministic 1000-tick/block regression returns 162 external exceptions,
+advances 152 VI fields and restores one scheduler context; steady-clock runner field/interrupt
 counts depend on elapsed host time, not a forced completion.
 Real-disc tests verify every constructor in original table order and preservation
 of its stack, SDA and nonvolatile integer/floating registers. Traced and untraced
@@ -238,8 +244,9 @@ constructor words fail integrity validation without claiming later milestones.
 The game main loop, GX renderer,
 general scheduled game-thread execution, audio, input and saves have not run.
 
-The next connected milestone is a real EFB rendering/copy and XFB pixel-scanout backend.
-Returning from the retrace wait does not establish a rendered frame or game main loop.
+The next connected milestone is paired-single vector/camera arithmetic and return
+from original game initialization. Geometry/texture rendering and XFB pixel scanout
+are still required for a real displayed frame; Screen return alone does not establish one.
 Generated translation registration uses non-inlined batches
 of at most 64 regular bindings (plus the console binding in the final batch), avoiding
 MSVC's oversized temporary stack frames without increasing the executable stack.
@@ -262,17 +269,20 @@ Disabled readers do not consume bytes; full/mismatched rings fail before
 overwriting unread data. CP/BP/XF register loads, BP write masks, NOPs and
 vertex-cache invalidation update explicit graphics state. Token/finish commands
 assert their PE sources only after decoding, rather than reporting success early.
-Draws, EFB copies, texture/TLUT DMA, display lists and unknown opcodes fail explicitly.
+Draws, unsupported EFB copy modes, texture/TLUT DMA, display lists and unknown opcodes fail explicitly.
 There is no replacement scene or generated frame.
 
-The real Windows runner publishes **68 FIFO bursts** and decodes **337 register/NOP
-commands**, with 34 pending command bytes and one still-gathered byte at the
-EFB-copy boundary. The unconsumed CP burst retains a 32-byte FIFO distance; a
-rejected copy is not counted as decoded work. Original attribute/texcoord/texture-format tables supply bounded
+The real Windows runner publishes **77 FIFO bursts** and decodes **404 register/NOP
+commands**, with no pending command bytes, 15 still-gathered bytes and zero unread
+CP FIFO distance at the vector-arithmetic boundary. A successful command prefix
+is committed before the next command: retrying a rejected copy/DMA does not replay
+an earlier token or copy/clear, nor stage the same RAM burst twice.
+Original attribute/texcoord/texture-format tables supply bounded
 build-time indirect branch roots, alongside original texture-region callbacks.
-The six XF viewport words at `0x101A` are exactly `43A00000 C3600000 4B800000
+The six XF viewport words at `0x101A` after Screen setup are exactly `43A00000 C3600000 4B7FC000
 44258000 440D8000 4B800000` (640x448 after original overscan adjustment,
-original depth scale 16777216).
+original updated depth scale 16760832).
+
 PE poke depth/blend/destination-alpha/alpha-test/alpha-read retain their actual
 register state (`001F F038 0000 0700 0005`); no pixel operation is synthesized.
 CP offset `+6` holds the performance selector, while `+0xE` holds the token.
@@ -295,6 +305,23 @@ Original startup NI mode works for normal inputs/results; denormal NI behavior,
 enabled FP exceptions and Gekko's 25-bit rounding for non-single `fmuls` multipliers
 fail explicitly before mutation. Fused arithmetic is not implemented.
 
+### Checked EFB clear and XFB RAM copy
+
+An opt-in 640x528 software EFB stores RGB8/Z24 pixels and independent color/depth
+defined bits. Cold backing values are deterministic `CD/CD/CD` representatives
+with defined bits clear, not a fabricated clear or visible image. Production
+reports copy/clear counts and undefined copied pixels explicitly.
+The supported path copies non-AA RGB8/Z24 to checked Y0/Cb/Y1/Cr guest RAM using
+limited-range BT.601 conversion, shared horizontal chroma, a seven-weight/three-row
+vertical filter, source-edge clamp flags and unity vertical scale.
+Copy precedes optional clear; original color/depth update masks determine which
+source components become defined. Scaling, gamma changes, field/half copies,
+other pixel formats, filter overflow, textures and AA remain explicit failures.
+This limited conversion profile has not been certified as console-bit-exact for
+arbitrary filtering/color inputs and does not implement scanout or geometry.
+The entire request, EFB dimensions, mapped destination and FIFO non-overlap are
+validated before modifying guest RAM or pixels.
+
 ### Checked NTSC video timing and context continuation
 
 The opt-in VI profile maps configuration, framebuffer and filter registers plus
@@ -312,8 +339,8 @@ before each compiled block when display output is enabled; MMIO beam reads expos
 that last sample. No host sleep, fabricated retrace callback or forced guest return
 is used. Backwards time, elapsed-time overflow, invalid enabled comparators,
 live scan-clock changes and other display modes fail explicitly.
-PAL/MPAL/progressive modes, external beam latches, pixel scanout and EFB/XFB
-conversion are not implemented.
+PAL/MPAL/progressive modes, external beam latches and pixel scanout are not
+implemented. EFB/XFB conversion is limited to the checked profile above.
 
 `hmawl_native_vi_tests` verifies exact before/at/after comparator thresholds,
 frame wrap, large jumps, masked latches/unmasking, independent acknowledgements,
@@ -355,11 +382,14 @@ the user-init return and the exact graphics-initialization dependency boundary. 
 observer checks each original table target and per-constructor ABI restoration;
 a second execution compares the complete 24 MiB RAM image, CPU registers,
 console output and deterministic clock samples against the production runner.
-It also verifies original heap descriptors, eleven allocation return addresses,
+It also verifies original heap descriptors, the eleven named Screen-era allocation
+return addresses and all subsequent observed allocator requests/returns (39 total),
 requested sizes, 32-byte alignment, arena bounds, non-overlap, allocation count,
 manager singleton pointers, the Screen's FIFO pointer and both XFB pointers.
 It verifies exact CP/PE/ring state, burst/command counts and identical graphics
-state with/without observation, plus exact VI registers, elapsed timing, field counts,
+state with/without observation, including EFB color/depth/defined storage, copy
+metadata/counters, actual XFB bytes and the exact clear rectangle/masks.
+It also checks exact VI registers, elapsed timing, field counts,
 original interrupt delivery and scheduler context-return counts. A separate injection
 into the original GXInit-return snapshot, before VI startup, flushes the actual pending
 matrix and submits token/finish FIFO commands.

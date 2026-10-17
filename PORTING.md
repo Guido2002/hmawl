@@ -44,11 +44,14 @@ and `__init_user` also return, reaching original game `main`. Original memory se
 resource managers and Screen construction execute through to original GXInit.
 Original CP/PE/FIFO setup, viewport/projection arithmetic, texture-region callbacks
 and PE configuration execute; **original GXInit returns to Screen in the runner**.
-It publishes 68 actual FIFO bursts and decodes 337 register/NOP commands.
+It publishes 77 actual FIFO bursts and decodes 404 register/NOP commands.
 Original VIInit, VIConfigure and VIWaitForRetrace return using native NTSC timing,
 the original VI interrupt handler and a checked scheduler context restore.
-Eleven original allocations include both 640x448 framebuffers. The runner stops
-at `0x801CEADC` on the first decoded EFB copy requiring a renderer/copy backend.
+Eleven original allocations through Screen include both 640x448 framebuffers.
+The original Screen constructor now returns after an actual XFB RAM copy and EFB
+clear; the first copy's power-on pixels are explicitly undefined, not a game frame.
+Controller setup, array construction and collision reset continue into kernel/camera
+initialization. The runner stops at `0x801B8AE0` on untranslated paired-single `ps_sub`.
 Pixel scanout, the main loop and a rendered game frame remain unfinished.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
@@ -577,6 +580,19 @@ queue. Full runtime scheduling and device services are still needed.
   Verify original VI interrupts, scheduler wake/resume, exact overscanned viewport,
   68 FIFO bursts/337 commands, complete observed/unobserved CPU/RAM/VI/GX equivalence
   and separate original PE handler injection. No pixels or game main loop yet.
+- [x] Complete original Screen return with checked EFB clear and XFB RAM copy.
+  Keep cold EFB pixels explicitly undefined; copy before clearing RGB/depth,
+  honor update masks and validate format, filter, scale, bounds, stride and FIFO
+  non-overlap before effects. Commit successful FIFO prefixes so retrying a later
+  rejected command never replays a copy/clear or token. Verify YUYV colors,
+  filtered/clamped edges, independent masks/provenance, row guards and atomic errors.
+  Production executes one 640x448 copy into the real second framebuffer and one
+  clear, then returns from Screen at `0x8000ADDC`, SP `0x8035CF68`.
+  Follow original PAD/array/collision/kernel class dependencies together, reaching
+  vector subtraction at `0x801B8AE0`, LR `0x8020AD8C`, SP `0x8035CEA8`.
+  Verify 77 bursts/404 commands, all actual allocator requests/returns and complete
+  observed/unobserved EFB/CPU/RAM/VI/GX equivalence. The first copy has 286720
+  undefined power-on pixels; no rendered game frame, scanout or main loop is claimed.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

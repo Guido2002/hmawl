@@ -71,15 +71,30 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
         leaders.insert(target);
         pending.push_back(target);
     }
-    // Indirect construction calls and graphics interrupt handlers need explicit original roots.
-    for (uint32_t target : {0x80199eecu, 0x8001b920u, 0x80022790u, 0x800226f0u,
+    // Original collision-reset switch, guarded to ten cases by cmplwi.
+    for (uint32_t index = 0; index < 10; ++index) {
+        const auto target = ppc_read_u32(source, 0x80299c40u + index * 4);
+        if ((target & 3u) != 0 || target < 0x800207c4u || target >= 0x800207f4u) {
+            throw std::runtime_error("Original collision-reset switch exceeds its bounded case range.");
+        }
+        leaders.insert(target);
+        pending.push_back(target);
+    }
+    // Indirect constructors, reset vtables and interrupt callbacks are original code.
+    for (uint32_t target : {0x8000ad40u, 0x80199eecu, 0x8001b920u, 0x80022790u, 0x800226f0u,
                             0x8002b80cu, 0x8002f27cu, 0x8002f100u, 0x8002efbcu,
                             0x80179ee8u, 0x80179c90u, 0x801059a4u,
                             0x8019ad5cu, 0x80190204u, 0x8000b4c4u, 0x80198f54u,
                             0x80199ed8u, 0x8017a3a0u,
                             0x801cc448u, 0x801ce08cu, 0x801ce158u,
                             0x801cb0c8u, 0x801cb1c4u,
-                            0x801be410u, 0x801bde64u}) {
+                            0x801be410u, 0x801bde64u, 0x801c0044u,
+                            0x8000c9c4u, 0x8000c920u, 0x8000c82cu, 0x8000c788u,
+                            0x80021ab0u, 0x80021ef8u, 0x80021f48u, 0x80022004u,
+                            0x80022158u, 0x800222acu, 0x801809b0u, 0x801809c8u,
+                            0x8020b984u, 0x8020b72cu, 0x802191a0u, 0x802197bcu,
+                            0x8021b4e4u, 0x8021b3e8u, 0x8021b440u, 0x8021b448u,
+                            0x8021b44cu, 0x8021b4b8u}) {
         leaders.insert(target);
         pending.push_back(target);
     }

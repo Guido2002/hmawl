@@ -1,6 +1,8 @@
 #ifndef HMAWL_NATIVE_GX_H
 #define HMAWL_NATIVE_GX_H
 
+#include "native_efb.h"
+
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -33,6 +35,7 @@ struct NativeGx {
     uint64_t bursts = 0;
     uint64_t decodedCommands = 0;
     uint64_t vertexCacheInvalidations = 0;
+    std::optional<NativeEfb> efb;
 };
 
 uint32_t NativeGxInterruptCause(const NativeGx& gx);

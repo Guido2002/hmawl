@@ -27,6 +27,7 @@ add_library(hmawl_recompiler_core
     native_dvd_queue.cpp
     native_sram.cpp
     native_gx.cpp
+    native_efb.cpp
     native_vi.cpp
 )
 target_compile_features(hmawl_recompiler_core PUBLIC cxx_std_17)

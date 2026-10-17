@@ -101,6 +101,7 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.viDtvStatus = 0;
     state.serialInterface.emplace();
     state.graphics.emplace();
+    state.graphics->efb.emplace();
     state.video.emplace();
     state.transferSi = TransferDisconnectedSi;
     ppc_write_u32(state, 0x800000f8u, 162000000u);
@@ -157,6 +158,7 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x8017a42cu) result.viInitReturned = true;
             if (pc == 0x8017a4c0u) result.viConfigured = true;
             if (pc == 0x8017a674u) result.viRetraceReturned = true;
+            if (pc == 0x8000addcu) result.screenInitReturned = true;
         });
     } catch (const std::exception& error) {
         const std::string reason = error.what();
@@ -192,6 +194,7 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     else if (result.viInitEntered) text << "Original VIInit entered (not completed). ";
     if (result.viConfigured) text << "Original VIConfigure returned. ";
     if (result.viRetraceReturned) text << "Original VIWaitForRetrace returned. ";
+    if (result.screenInitReturned) text << "Original Screen constructor/initialization returned. ";
     text << "This is NOT a game boot; no game main loop or renderer ran.";
     return text.str();
 }

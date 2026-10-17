@@ -2,7 +2,6 @@
 #include "ppc_state.h"
 
 #include <stdexcept>
-#include <utility>
 
 namespace {
 
@@ -15,17 +14,16 @@ bool Breakpoint(const NativeGx& gx) {
     return (gx.control & 2u) != 0 && gx.fifo[6] == gx.fifo[7];
 }
 
-void Decode(NativeGx& gx) {
+void Decode(PpcState& state, NativeGx& gx) {
     auto& bytes = gx.commands;
-    size_t offset = 0;
-    while (offset < bytes.size()) {
-        const auto opcode = bytes[offset];
+    while (!bytes.empty()) {
+        const auto opcode = bytes[0];
         size_t length = 1;
         if (opcode == 0x08) length = 6;
         else if (opcode == 0x61) length = 5;
         else if (opcode == 0x10) {
-            if (bytes.size() - offset < 5) break;
-            const auto header = Word(bytes, offset + 1);
+            if (bytes.size() < 5) break;
+            const auto header = Word(bytes, 1);
             const auto address = header & 0xffffu;
             const auto count = (header >> 16) + 1;
             if (address >= gx.xf.size() || count > gx.xf.size() - address) {
@@ -37,22 +35,20 @@ void Decode(NativeGx& gx) {
                 ? "Native GX draw command requires a vertex/renderer backend."
                 : "Unsupported native GX FIFO opcode.");
         }
-        if (bytes.size() - offset < length) break;
+        if (bytes.size() < length) break;
         if (opcode == 0x08) {
-            gx.cp[bytes[offset + 1]] = Word(bytes, offset + 2);
+            gx.cp[bytes[1]] = Word(bytes, 2);
         } else if (opcode == 0x10) {
-            const auto address = Word(bytes, offset + 1) & 0xffffu;
+            const auto address = Word(bytes, 1) & 0xffffu;
             const auto count = (length - 5) / 4;
             for (size_t index = 0; index < count; ++index) {
-                gx.xf[address + index] = Word(bytes, offset + 5 + index * 4);
+                gx.xf[address + index] = Word(bytes, 5 + index * 4);
             }
         } else if (opcode == 0x61) {
-            const auto word = Word(bytes, offset + 1);
+            const auto word = Word(bytes, 1);
             const auto address = word >> 24;
             const auto data = (gx.bp[address] & ~gx.bpMask) | (word & gx.bpMask);
-            if (address == 0x52) {
-                throw std::runtime_error("Native GX EFB copy requires a renderer/copy backend.");
-            }
+            if (address == 0x52) NativeEfbCopy(state, data);
             if (address == 0x63 || address == 0x65) {
                 throw std::runtime_error("Native GX texture/TLUT DMA requires a texture-memory backend.");
             }
@@ -72,9 +68,8 @@ void Decode(NativeGx& gx) {
         }
         ++gx.decodedCommands;
         ++gx.performanceCommands;
-        offset += length;
+        bytes.erase(bytes.begin(), bytes.begin() + length);
     }
-    bytes.erase(bytes.begin(), bytes.begin() + offset);
 }
 
 void ValidateRing(const PpcState& state, uint32_t base, uint32_t end, uint32_t pointer) {
@@ -85,21 +80,26 @@ void ValidateRing(const PpcState& state, uint32_t base, uint32_t end, uint32_t p
     ppc_memory_offset(state, base, static_cast<size_t>(end) - base + 32);
 }
 
-void Drain(PpcState& state, NativeGx& gx) {
-    if ((gx.control & 1u) == 0 || gx.fifo[4] == 0 || Breakpoint(gx)) return;
+void ValidateReader(const PpcState& state, const NativeGx& gx) {
     ValidateRing(state, gx.fifo[0], gx.fifo[1], gx.fifo[6]);
     const uint32_t capacity = gx.fifo[1] - gx.fifo[0] + 32;
     if ((gx.fifo[4] & 31u) != 0 || gx.fifo[4] > capacity) {
         throw std::runtime_error("Invalid native GX FIFO byte count.");
     }
+}
+
+void Drain(PpcState& state, NativeGx& gx) {
+    if ((gx.control & 1u) == 0 || Breakpoint(gx)) return;
+    ValidateReader(state, gx);
+    Decode(state, gx);
     while (gx.fifo[4] != 0 && !Breakpoint(gx)) {
         const auto offset = ppc_memory_offset(state, gx.fifo[6], 32);
         gx.commands.insert(gx.commands.end(), state.memory.begin() + offset,
                            state.memory.begin() + offset + 32);
-        Decode(gx);
         gx.fifo[6] = gx.fifo[6] == gx.fifo[1] ? gx.fifo[0] : gx.fifo[6] + 32;
         gx.fifo[4] -= 32;
         if (gx.fifo[4] < gx.fifo[3]) gx.watermarkStatus |= 2u;
+        Decode(state, gx);
     }
 }
 
@@ -210,10 +210,9 @@ void NativeGxWrite(PpcState& state, uint32_t address, uint32_t value, unsigned w
         }
         if (address == 0xcc000002u) {
             if ((value & ~0x3fu) != 0) throw std::runtime_error("Unsupported native GX CP control bits.");
-            auto candidate = gx;
-            candidate.control = static_cast<uint16_t>(value);
-            Drain(state, candidate);
-            gx = std::move(candidate);
+            if (value & 1u) ValidateReader(state, gx);
+            gx.control = static_cast<uint16_t>(value);
+            Drain(state, gx);
             return;
         }
         if (address == 0xcc000004u) {

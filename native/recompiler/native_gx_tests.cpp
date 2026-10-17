@@ -15,8 +15,10 @@ void Reject(Function function, const char* reason) {
     try {
         function();
     } catch (const std::exception& error) {
-        Require(std::string(error.what()).find(reason) != std::string::npos,
-                "Graphics operation failed for an unexpected reason.");
+        if (std::string(error.what()).find(reason) == std::string::npos) {
+            throw std::runtime_error(std::string("Graphics operation expected '") + reason +
+                                     "' but failed with: " + error.what());
+        }
         return;
     }
     throw std::runtime_error("Unsupported graphics operation silently succeeded.");
@@ -242,6 +244,165 @@ void TestExplicitBoundaries() {
     Reject([&] { RecompileFunction(0x80004000, {0x7c79e3a7}); }, "WPAR");
 }
 
+PpcState CopyState() {
+    auto state = State();
+    state.graphics->efb.emplace();
+    auto& bp = state.graphics->bp;
+    bp[0x49] = 2 | (2 << 10);
+    bp[0x4a] = 3 | (1 << 10);
+    bp[0x4b] = 0x800 >> 5;
+    bp[0x4d] = 1;
+    bp[0x4e] = 256;
+    bp[0x53] = (32 << 12) | (32 << 18);
+    bp[0x4f] = 0xff40;
+    bp[0x50] = 0x4040;
+    bp[0x51] = 0xabcdef;
+    bp[0x40] = 0x1f;
+    bp[0x41] = 8;
+    return state;
+}
+
+void TestEfbCopies() {
+    auto state = CopyState();
+    auto& efb = *state.graphics->efb;
+    auto& bp = state.graphics->bp;
+    NativeEfbCopy(state, 0x4803);
+    Require(efb.copies == 1 && efb.clears == 1 && efb.undefinedCopies == 1 &&
+                efb.lastCopy->undefinedPixels == 8 && efb.lastCopy->address == 0x800 &&
+                efb.lastCopy->width == 4 && efb.lastCopy->height == 2 && efb.lastCopy->stride == 32,
+            "Cold EFB copy fabricated defined pixels or lost its actual XFB address/extent.");
+    const auto index = 2 * NativeEfb::width + 2;
+    Require(efb.color[index] == 0x404040ff && efb.depth[index] == 0xabcdef &&
+                efb.defined[index] == 3 && efb.defined[index - 1] == 0 &&
+                efb.defined[index + NativeEfb::width + 4] == 0,
+            "Copy-clear did not define only the requested RGB8/Z24 source rectangle.");
+    bp[0x4b] = 0x900 >> 5;
+    NativeEfbCopy(state, 0x4003);
+    Require(efb.copies == 2 && efb.clears == 1 && efb.undefinedCopies == 1 &&
+                efb.lastCopy->undefinedPixels == 0,
+            "A copied real clear did not produce defined XFB pixels.");
+    for (uint32_t row = 0; row < 2; ++row) {
+        const auto address = 0x900u + row * 32;
+        Require(ppc_read_u32(state, address) == 0x47804780 &&
+                    ppc_read_u32(state, address + 4) == 0x47804780 &&
+                    state.memory[address - 1] == 0xa5 && state.memory[address + 8] == 0xa5,
+                "Grey RGB8-to-YUYV copy differs or overwrote XFB row/padding guards.");
+    }
+    const uint32_t colors[] = {0xff0000ff, 0xff0000ff, 0xffffffff, 0xffffffff,
+                                0x000000ff, 0x000000ff, 0x0000ffff, 0x0000ffff};
+    for (unsigned pixel = 0; pixel < 8; ++pixel) {
+        efb.color[index + (pixel / 4) * NativeEfb::width + pixel % 4] = colors[pixel];
+    }
+    NativeEfbCopy(state, 0x4003);
+    Require(ppc_read_u32(state, 0x900) == 0x525a52f0 &&
+                ppc_read_u32(state, 0x904) == 0xeb80eb80 &&
+                ppc_read_u32(state, 0x920) == 0x10801080 &&
+                ppc_read_u32(state, 0x924) == 0x29f0296e,
+            "Primary/white/black RGB-to-limited-range Y0/Cb/Y1/Cr byte order differs.");
+    bp[0x41] = 0;
+    bp[0x40] = 0;
+    bp[0x4f] = bp[0x50] = bp[0x51] = 0;
+    NativeEfbCopy(state, 0x4803);
+    Require(efb.color[index] == colors[0] && efb.depth[index] == 0xabcdef,
+            "EFB clear ignored the color/depth update masks.");
+
+    auto filtered = CopyState();
+    auto& f = *filtered.graphics->efb;
+    auto& registers = filtered.graphics->bp;
+    registers[0x53] = 16 | (32 << 12);
+    registers[0x54] = 16 << 6;
+    for (unsigned row = 0; row < 4; ++row) {
+        for (unsigned col = 0; col < 4; ++col) {
+            const auto offset = (row + 1) * NativeEfb::width + col + 2;
+            const uint32_t grey = row * 64;
+            f.color[offset] = (grey << 24) | (grey << 16) | (grey << 8) | 255;
+            f.defined[offset] = 1;
+        }
+    }
+    NativeEfbCopy(filtered, 0x4003);
+    Require(ppc_read_u32(filtered, 0x800) == 0x55805580 &&
+                ppc_read_u32(filtered, 0x820) == 0x70807080,
+            "Clamped three-row copy filter differs at top/bottom source edges.");
+    NativeEfbCopy(filtered, 0x4000);
+    Require(ppc_read_u32(filtered, 0x800) == 0x47804780 &&
+                ppc_read_u32(filtered, 0x820) == 0x7e807e80,
+            "Unclamped copy filter did not read actual adjacent EFB rows.");
+    f.defined[NativeEfb::width + 2] = 0;
+    NativeEfbCopy(filtered, 0x4000);
+    Require(f.lastCopy->undefinedPixels == 2,
+            "Copy filter did not propagate an undefined tap to its shared-chroma pixel pair.");
+    for (unsigned masks = 0; masks < 4; ++masks) {
+        auto masked = CopyState();
+        masked.graphics->bp[0x41] = (masks & 1u) ? 8 : 0;
+        masked.graphics->bp[0x40] = (masks & 2u) ? 16 : 0;
+        NativeEfbCopy(masked, 0x4c03);
+        const auto& pixels = *masked.graphics->efb;
+        Require(pixels.defined[index] == masks &&
+                    pixels.color[index] == ((masks & 1u) ? 0x404040ffu : 0xcdcdcdffu) &&
+                    pixels.depth[index] == ((masks & 2u) ? 0xabcdefu : 0xcdcdcdu),
+                "Unity inverse-scale copy/clear did not preserve independent RGB/depth masks and provenance.");
+    }
+}
+
+void TestEfbFailuresAndRetry() {
+    const auto initial = CopyState();
+    for (unsigned test = 0; test < 18; ++test) {
+        auto state = initial;
+        auto& bp = state.graphics->bp;
+        uint32_t control = 0x4803;
+        const char* reason = "";
+        switch (test) {
+        case 0: control = 0x803; reason = "texture EFB"; break;
+        case 1: control |= 0x80; reason = "gamma 1"; break;
+        case 2: bp[0x43] = 1; reason = "RGB8/Z24"; break;
+        case 3: bp[0x4e] = 128; reason = "vertical scaling"; break;
+        case 4: bp[0x49] = 639; reason = "rectangle"; break;
+        case 5: bp[0x4d] = 0; reason = "stride"; break;
+        case 6: bp[0x4b] = 0x2000 >> 5; reason = "outside guest memory"; break;
+        case 7: bp[0x4b] = 0x1000 >> 5; reason = "command FIFO"; break;
+        case 8: bp[0x53] = 63 | (63 << 6); reason = "filter overflow"; break;
+        case 9: bp[0x4f] = 0x10000; reason = "clear configuration"; break;
+        case 10: bp[0] = 0x200; reason = "non-AA"; break;
+        case 11: control |= 0x1000; reason = "field/half scaling"; break;
+        case 12: bp[0x4a] = 2 | (1 << 10); reason = "odd X/width"; break;
+        case 13: bp[0x49] = 2 | (527 << 10); reason = "rectangle"; break;
+        case 14: state.graphics->efb->color.pop_back(); reason = "storage dimensions"; break;
+        case 15: bp[0x4b] = 1 << 21; reason = "address/stride bits"; break;
+        case 16: bp[0x4d] = 1 << 10; reason = "address/stride bits"; break;
+        case 17: bp[0x54] = 1 << 18; reason = "filter overflow"; break;
+        }
+        const auto memory = state.memory;
+        const auto before = *state.graphics->efb;
+        Reject([&] { NativeEfbCopy(state, control); }, reason);
+        const auto& efb = *state.graphics->efb;
+        Require(state.memory == memory && efb.color == before.color &&
+                    efb.depth == before.depth &&
+                    efb.defined == before.defined && efb.copies == 0 &&
+                    efb.clears == 0 && !efb.lastCopy,
+                "Rejected EFB request partially wrote RAM, cleared storage or counted success.");
+    }
+    auto retry = CopyState();
+    retry.graphics->efb.reset();
+    Reject([&] { Send(retry, {0x61, 0x48, 0, 0x12, 0x34, 0x61, 0x52, 0, 0x48, 3}); }, "renderer/copy");
+    Require(retry.graphics->decodedCommands == 1 && retry.graphics->commands[1] == 0x52 &&
+                retry.graphics->fifo[4] == 0 && retry.graphics->fifo[6] == 0x1020 &&
+                retry.graphics->token == 0x1234,
+            "Failed copy replayed a prior token or staged the same FIFO burst twice.");
+    retry.graphics->efb.emplace();
+    ppc_write_u16(retry, 0xcc000002, 0x11);
+    Require(retry.graphics->efb->copies == 1 && retry.graphics->efb->clears == 1 &&
+                retry.graphics->commands.empty() && retry.graphics->decodedCommands == 24 &&
+                retry.graphics->bursts == 1 && retry.graphics->fifo[6] == 0x1020,
+            "Retry did not consume exactly one staged copy without replaying the token/FIFO burst.");
+    auto committed = CopyState();
+    Reject([&] { Send(committed, {0x61, 0x52, 0, 0x48, 3, 0x61, 0x65, 0, 0, 1}); }, "texture/TLUT");
+    Reject([&] { ppc_write_u16(committed, 0xcc000002, 0x11); }, "texture/TLUT");
+    Require(committed.graphics->efb->copies == 1 && committed.graphics->efb->clears == 1 &&
+                committed.graphics->decodedCommands == 1 && committed.graphics->commands[1] == 0x65 &&
+                committed.graphics->fifo[4] == 0 && committed.graphics->fifo[6] == 0x1020,
+            "Retry after a later DMA rejection replayed an already committed EFB copy/clear.");
+}
+
 } // namespace
 
 int main() {
@@ -250,10 +411,12 @@ int main() {
         TestInterruptsAndReader();
         TestBurstBoundaries();
         TestExplicitBoundaries();
+        TestEfbCopies();
+        TestEfbFailuresAndRetry();
     } catch (const std::exception& error) {
         std::cerr << "Native GX test failure: " << error.what() << '\n';
         return 1;
     }
     std::cout << "Native GX FIFO RAM/gather, CP/BP/XF commands, ring wrap, interrupt sources "
-                 "and explicit draw/copy boundaries passed. No renderer ran.\n";
+                 "and checked RGB8/Z24 EFB clear/YUYV XFB copy/undefined-pixel provenance passed. No geometry renderer ran.\n";
 }

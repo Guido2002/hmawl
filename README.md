@@ -92,19 +92,23 @@ Original game initialization now runs arena-backed memory setup, eleven checked
 heap/framebuffer allocations, resource managers and `Screen` construction into original
 `GXInit`. **Original GXInit now returns to Screen in the Windows runner** after
 viewport/projection, texture-region callbacks and PE configuration. It publishes
-**68 real 32-byte FIFO bursts** to guest RAM and decodes **337 register/NOP commands**
+**77 real 32-byte FIFO bursts** to guest RAM and decodes **404 register/NOP commands**
 into CP/BP/XF state, including the original overscanned 640x448 viewport.
 Separate injected-command tests execute both original PE interrupt handlers and
 restore the interrupted CPU context; production startup has not issued those interrupts.
 **Original VIInit, VIConfigure and VIWaitForRetrace now return in the runner.**
 Native NTSC beam timing drives the original VI interrupt handler, and the
 original scheduler saves/loads its real guest context to resume the waiting thread.
-Both original 640x448 YUV framebuffer allocations complete. The runner then stops
-with **exit code 3** at `PC=0x801CEADC`, `LR=0x8017A8F0`: the FIFO reaches the
-original EFB copy command, which requires a renderer/copy backend. That command
-has not been consumed or reported as a completed frame.
-Draws, EFB copies and texture DMA fail explicitly; the game main loop and rendering
-have not run.
+Both original 640x448 YUV framebuffer allocations complete. **The original Screen
+constructor now returns in the runner**, after an actual EFB-to-XFB RAM copy and
+RGB/depth clear. Its first copy contains 286720 undefined power-on pixels, explicitly
+tracked as undefined rather than claimed as a rendered frame.
+Original controller setup, array construction and collision resets continue into
+kernel/camera initialization; tests verify all 39 returned heap allocations.
+The runner stops with **exit code 3** at
+`PC=0x801B8AE0`, `LR=0x8020AD8C`: vector subtraction needs the untranslated `ps_sub`
+paired-single instruction. Draws, unsupported copy modes and texture DMA still fail
+explicitly. Pixel scanout, a game window/intro and the game main loop have not run.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.
 The CLI creates an English/NTSC/stereo `native-console.sram` beside the input DOL

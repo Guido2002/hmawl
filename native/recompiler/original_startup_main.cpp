@@ -66,7 +66,7 @@ int RunCli(int argc, Character** argv) {
                      "using compiled native blocks only.\n"
                      "Profile: loader IR/DR, EE disabled, coherent RAM, idle opt-in "
                      "PI/MI/DSP/AI/EXI/SI, native CP/PE and checked GX register-command FIFO "
-                     "(draw/copy/texture DMA unimplemented), native NTSC VI timing/configuration/interrupts "
+                     "(non-AA RGB8 EFB/XFB copy/clear; draw/texture DMA unimplemented), native NTSC VI timing/configuration/interrupts "
                      "(pixel scanout unimplemented), cold PI reset, 24 MiB RAM BAT profile, disconnected digital cable, "
                      "empty memory-card slots/SP1 and disconnected controllers, native console "
                      "(bounded strings/32-bit integers), persisted SRAM reads (writes/RTC/ROM unimplemented); "
@@ -86,6 +86,18 @@ int RunCli(int argc, Character** argv) {
                       << gx.decodedCommands << " decoded register/NOP commands, "
                       << gx.commands.size() << " pending command bytes, "
                       << gx.gathered.size() << " gathered bytes. No rendered frame.\n";
+            if (gx.efb) {
+                const auto& efb = *gx.efb;
+                std::cerr << "Native EFB: " << efb.copies << " XFB RAM copies, " << efb.clears
+                          << " copy-clear operations; " << efb.undefinedCopies
+                          << " copies contain undefined power-on pixels (not rendered frames).\n";
+                if (efb.lastCopy) {
+                    const auto& copy = *efb.lastCopy;
+                    std::cerr << "Last XFB copy: " << copy.width << "x" << copy.height
+                              << " stride=" << copy.stride << " address=0x" << std::hex << copy.address
+                              << std::dec << " undefined pixels=" << copy.undefinedPixels << ".\n";
+                }
+            }
         }
         if (state.video) {
             const auto& vi = *state.video;
