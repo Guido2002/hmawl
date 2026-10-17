@@ -186,6 +186,8 @@ void RunHardwareDependency(uint32_t address, PpcState& state) {
     case 0x801b0a84u: ppc_801B0A84(state); break;
     case 0x801b0a8cu: ppc_801B0A8C(state); break;
     case 0x801b0a94u: ppc_801B0A94(state); break;
+    case 0x801b0afcu: ppc_801B0AFC(state); break;
+    case 0x801b0b24u: ppc_801B0B24(state); break;
     case 0x801b7bf0u: ppc_801B7BF0(state); break;
     case 0x801b7c10u: ppc_801B7C10(state); break;
     case 0x801b1584u: ppc_801B1584(state); break;
@@ -195,6 +197,7 @@ void RunHardwareDependency(uint32_t address, PpcState& state) {
     case 0x801b0b2cu: ppc_801B0B2C(state); break;
     case 0x801b29dcu: ppc_801B29DC(state); break;
     case 0x801b0a28u: ppc_801B0A28(state); break;
+    case 0x801b0a30u: ppc_801B0A30(state); break;
     case 0x801b24f0u: ppc_801B24F0(state); break;
     case 0x801b2388u: ppc_801B2388(state); break;
     case 0x801b0a18u: ppc_801B0A18(state); break;
@@ -498,6 +501,63 @@ void TestOriginalFpscrAccessors(const DolImage& image) {
                  "stack guards and status bits across all rounding modes.\n";
 }
 
+void TestOriginalSpeculationDisable(const DolImage& image) {
+    auto state = image.CreateGameCubeState();
+    ppc_800032B0(state);
+    state.fpr.fill({UINT64_MAX, UINT64_MAX});
+    state.gqr.fill(0x12345678u);
+    state.performanceMonitor.fill(0x87654321u);
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    state.fpscr = 0x80000003u;
+    state.lr = 0x801b0e60u;
+    const uint32_t stack = state.gpr[1];
+    const auto before = state;
+    const size_t frame = ppc_memory_offset(state, stack - 8, 16);
+    std::vector<uint32_t> calls;
+    state.callGuest = [&](uint32_t address, PpcState& guest) {
+        Require(calls.size() < 2, "Speculation wrapper exceeded dependency budget.");
+        calls.push_back(address);
+        RunHardwareDependency(address, guest);
+    };
+    for (bool interrupts : {false, true}) {
+        state.externalInterruptsEnabled = interrupts;
+        for (uint32_t initial : {0u, 0x200u, 0x4000u, 0x4200u,
+                                 0x8000u, 0x8200u, 0xc000u, 0xc200u}) {
+            // Preserve a loader bit without supporting changes to that bit.
+            state.hid0 = initial | 0x00100000u;
+            for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                calls.clear();
+                ppc_801B0AFC(state);
+                Require(calls == std::vector<uint32_t>{0x801b0a28u, 0x801b0a30u} &&
+                            state.hid0 == (initial | 0x00100200u) &&
+                            state.gpr[3] == state.hid0 && state.pc == state.lr &&
+                            state.lr == before.lr && state.ctr == before.ctr &&
+                            state.externalInterruptsEnabled == interrupts,
+                        "Original speculation wrapper failed SPD, call order, return or interrupt state.");
+                Require(state.cr == before.cr && state.xer == before.xer &&
+                            state.fpscr == before.fpscr && state.fpr == before.fpr &&
+                            state.gqr == before.gqr && state.msr == before.msr &&
+                            state.hid2 == before.hid2 && state.l2cr == before.l2cr &&
+                            state.performanceMonitor == before.performanceMonitor,
+                        "Original speculation wrapper changed unrelated CPU state.");
+                for (unsigned reg = 0; reg < 32; ++reg) {
+                    if (reg == 0 || reg == 3) continue;
+                    Require(state.gpr[reg] == before.gpr[reg],
+                            "Original speculation wrapper damaged its return ABI.");
+                }
+                for (size_t i = 0; i < state.memory.size(); ++i) {
+                    if (i >= frame && i < frame + 16) continue;
+                    Require(state.memory[i] == before.memory[i],
+                            "Original speculation wrapper wrote outside its stack frame.");
+                }
+            }
+        }
+    }
+    std::cout << "Original PPCDisableSpeculation sets HID0 SPD through original wrappers; "
+                 "cache bits, loader bits, interrupts and ABI preserved. No pipeline emulation.\n";
+}
+
 void TestOriginalNonIeeeMode(const DolImage& image) {
     auto state = image.CreateGameCubeState();
     ppc_800032B0(state);
@@ -678,14 +738,18 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     constexpr uint64_t offset = 2;
     ppc_write_u64(state, 0x800030d8u, offset);
     unsigned reads = 0;
-    std::vector<uint32_t> performanceCalls;
+    std::vector<uint32_t> setupCalls;
+    const auto fpr = state.fpr;
     state.performanceMonitor.fill(UINT32_MAX);
     state.callGuest = [&](uint32_t address, PpcState& guest) {
         Require(++calls < 150, "OSInit fixture exceeded its dependency budget.");
         if (address >= 0x801b0a6cu && address <= 0x801b0a94u) {
             Require(!guest.externalInterruptsEnabled && guest.gpr[3] == 0,
                     "OSInit did not reset performance monitoring under its interrupt mask.");
-            performanceCalls.push_back(address);
+            setupCalls.push_back(address);
+        } else if (address == 0x801b0afcu || address == 0x801b0b24u) {
+            Require(!guest.externalInterruptsEnabled, "OSInit setup lost its interrupt mask.");
+            setupCalls.push_back(address);
         }
         RunHardwareDependency(address, guest);
     };
@@ -698,16 +762,18 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     state.lr = 0x80003268u;
     const auto beforeOs = state.memory;
     ppc_801B0DE0(state);
-    Require(state.pc == 0x801b0e5cu && reads == 3 &&
-                performanceCalls == std::vector<uint32_t>{0x801b0a6cu, 0x801b0a74u,
-                    0x801b0a7cu, 0x801b0a84u, 0x801b0a8cu, 0x801b0a94u} &&
+    Require(state.pc == 0x801b0e64u && reads == 3 &&
+                setupCalls == std::vector<uint32_t>{0x801b0a6cu, 0x801b0a74u,
+                    0x801b0a7cu, 0x801b0a84u, 0x801b0a8cu, 0x801b0a94u,
+                    0x801b0afcu, 0x801b0b24u} &&
+                state.hid0 == 0xc200u && state.fpscr == 4 && state.fpr == fpr &&
                 std::all_of(state.performanceMonitor.begin(), state.performanceMonitor.end(),
                             [](uint32_t value) { return value == 0; }) &&
                 state.gpr[1] == stack - 0x18u &&
                 ppc_read_u32(state, 0x803495e0u) == 1 &&
                 ppc_read_u64(state, 0x803495f8u) == ticks + offset &&
                 !state.externalInterruptsEnabled,
-            "Original OSInit prefix did not record time, mask interrupts or reset monitoring.");
+            "Original OSInit prefix failed time, interrupts, monitor reset or SPD/NI setup.");
     const auto prefixFrame = ppc_memory_offset(state, stack - 0x38u, 0x40);
     for (size_t i = 0; i < beforeOs.size(); ++i) {
         if ((i >= prefixFrame && i < prefixFrame + 0x40) ||
@@ -723,11 +789,13 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
                 state.gpr[29] == r29 && state.gpr[30] == r30 && state.gpr[31] == r31,
             "Original OSInit epilogue did not restore its saved frame.");
     state.externalInterruptsEnabled = true;
-    performanceCalls.clear();
+    setupCalls.clear();
     state.performanceMonitor.fill(0x12345678u);
+    state.hid0 = 0xc000u;
+    state.fpscr = 3;
     ppc_801B0DE0(state);
     Require(state.pc == 0x801b119cu && reads == 3 && state.externalInterruptsEnabled &&
-                performanceCalls.empty() &&
+                setupCalls.empty() && state.hid0 == 0xc000u && state.fpscr == 3 &&
                 std::all_of(state.performanceMonitor.begin(), state.performanceMonitor.end(),
                             [](uint32_t value) { return value == 0x12345678u; }),
             "Original OSInit re-entry did not skip initialization.");
@@ -742,8 +810,8 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
                 "OSInit re-entry changed memory outside its stack frame.");
     }
     std::cout << "Original OSInit prefix sets initialization flag/start time, masks "
-                 "interrupts and resets MMCR0/1 plus PMC1..4; stops at 0x801b0e5c "
-                 "before speculation setup. "
+                 "interrupts, resets MMCR0/1 plus PMC1..4, sets HID0 SPD and FPSCR NI; "
+                 "stops at 0x801b0e64 before boot-info/arena setup. "
                  "Re-entry skip/epilogue tested separately; first OSInit does not return.\n";
 }
 
@@ -910,6 +978,7 @@ int main(int argc, char** argv) {
         TestOriginalFprSaveRestore(image);
         TestOriginalFpscrAccessors(image);
         TestOriginalNonIeeeMode(image);
+        TestOriginalSpeculationDisable(image);
         TestStartupHelpers(image);
         TestArgumentRelocation(image);
         TestMemoryFunctions(image);

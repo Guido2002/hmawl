@@ -223,8 +223,9 @@ in isolated fixtures.
 
 The complete original `__OSPSInit` now runs, including the HID2 SDK wrappers,
 `ICFlashInvalidate`, `sync`, all eight GQR resets and the original stack/return
-epilogue. HID0 SPR transfers support cache enable bits ICE/DCE and synchronous,
-self-clearing instruction-cache invalidation ICFI. Other changed HID0 bits
+epilogue. HID0 SPR transfers support cache enable bits ICE/DCE, synchronous,
+self-clearing instruction-cache invalidation ICFI and the speculation-disable
+status bit SPD. Other changed HID0 bits
 (including cache locking and data-cache flash invalidation) fail before
 mutation. `sync` and `isync` issue host memory fences; guest RAM aliases already
 share coherent storage, and static translations still undergo code-word checks
@@ -261,7 +262,9 @@ MMIO, throw rather than being silently treated as RAM.
 Continuing that verified state, an independent original `OSInit` prefix now
 sets `AreWeInitialized`, calls the original `__OSGetSystemTime`, records
 `__OSStartTime`, masks interrupts and calls the six original MMCR0/1 and PMC1..4
-reset wrappers. It stops at `0x801b0e5c` before speculation setup;
+reset wrappers, then executes original `PPCDisableSpeculation` and
+`PPCSetFpNonIEEEMode` to set HID0 SPD and FPSCR NI. It stops at `0x801b0e64`
+before boot-info/arena setup;
 first-time `OSInit` does not yet return. Its
 already-initialized branch and return epilogue are tested separately, not used
 to skip the unfinished first-time path.
@@ -290,6 +293,11 @@ exception summaries, register/RAM preservation and unchanged host rounding.
 The original `PPCSetFpNonIEEEMode` wrapper (`0x801b0b24`) independently sets NI
 and returns without disturbing rounding bits or FPR lanes. This is guest status
 support, not implementation of NI arithmetic or completion of `OSInit`.
+Original `PPCDisableSpeculation` (`0x801b0afc`) also runs independently, using
+the original HID0 getter/setter. Tests cover both initial SPD states, all
+cache-enable combinations, repeated calls, preserved loader bits, both interrupt
+states and stack/ABI guards. SPD is retained guest control state, not emulation
+of a speculative processor pipeline.
 
 ### REL module parsing and linking
 

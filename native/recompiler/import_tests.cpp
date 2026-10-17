@@ -449,7 +449,7 @@ void TestNativeDvdQueue() {
     const auto quantizationRegisters = state.gqr;
     state.msr = 0x2000u;
     state.hid2 = 0xa0000000u;
-    state.hid0 = 0xc000u;
+    state.hid0 = 0xc200u;
     state.l2cr = 0x80000000u;
     state.performanceMonitor.fill(0x12345678u);
     const auto monitor = state.performanceMonitor;
@@ -496,7 +496,7 @@ void TestNativeDvdQueue() {
                     state.fpr == floatingRegisters && state.fpscr == 0xf1234567u &&
                     state.gqr == quantizationRegisters &&
                     state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
-                    state.hid0 == 0xc000u && state.l2cr == 0x80000000u &&
+                    state.hid0 == 0xc200u && state.l2cr == 0x80000000u &&
                     state.performanceMonitor == monitor &&
                     state.pc == 0x80003004u && state.externalInterruptsEnabled,
                 "DVD completion priority/FIFO, status, result or CPU restoration differs.");
@@ -520,7 +520,7 @@ void TestNativeDvdQueue() {
     Require(state.fpr == floatingRegisters && state.fpscr == 0xf1234567u &&
                 state.gqr == quantizationRegisters &&
                 state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
-                state.hid0 == 0xc000u && state.l2cr == 0x80000000u &&
+                state.hid0 == 0xc200u && state.l2cr == 0x80000000u &&
                 state.performanceMonitor == monitor,
             "DVD cancellation callback damaged floating-point context.");
     const auto rejectSubmit = [&](const char* message) {
@@ -592,7 +592,7 @@ void TestNativeDvdQueue() {
     Require(state.fpr == floatingRegisters && state.fpscr == 0xf1234567u &&
                 state.gqr == quantizationRegisters &&
                 state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
-                state.hid0 == 0xc000u && state.l2cr == 0x80000000u &&
+                state.hid0 == 0xc200u && state.l2cr == 0x80000000u &&
                 state.performanceMonitor == monitor,
             "Throwing DVD callback damaged floating-point context.");
     prepare(info, output, 0);

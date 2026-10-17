@@ -828,20 +828,22 @@ void TestCacheControlRegisters() {
     const auto fpr = state.fpr;
     const auto gqr = state.gqr;
     for (uint32_t preserved : {0u, 0x00100000u}) {
-        for (uint32_t initial : {0u, 0x4000u, 0x8000u, 0xc000u}) {
+        for (uint32_t initial : {0u, 0x200u, 0x4000u, 0x4200u,
+                                 0x8000u, 0x8200u, 0xc000u, 0xc200u}) {
             state.hid0 = initial | preserved;
             ppc_00009340(state);
             Require(state.gpr[3] == (initial | preserved) && state.pc == 0x9344u,
                     "Compiled HID0 read did not preserve cache/other state.");
-            for (unsigned combination = 0; combination < 8; ++combination) {
+            for (unsigned combination = 0; combination < 16; ++combination) {
                 const uint32_t desired = ((combination & 3u) << 14) |
-                                         ((combination & 4u) << 9) | preserved;
+                                         ((combination & 4u) << 9) |
+                                         ((combination & 8u) << 6) | preserved;
                 for (unsigned repeat = 0; repeat < 2; ++repeat) {
                     state.gpr[3] = desired;
                     ppc_00009350(state);
                     Require(state.pc == 0x9354u && state.gpr[3] == desired &&
                                 state.hid0 == (desired & ~0x800u),
-                            "Compiled HID0 write failed enables, ICFI completion or repetition.");
+                            "Compiled HID0 write failed enables, SPD, ICFI completion or repetition.");
                     ppc_00009340(state);
                     Require(state.gpr[3] == (desired & ~0x800u),
                             "Instruction-cache invalidation did not self-clear on readback.");
@@ -851,7 +853,7 @@ void TestCacheControlRegisters() {
     }
     for (unsigned bit = 0; bit < 32; ++bit) {
         const uint32_t flag = 1u << bit;
-        if ((flag & 0xc800u) != 0) continue;
+        if ((flag & 0xca00u) != 0) continue;
         for (bool clearing : {false, true}) {
             state.hid0 = 0xc000u | (clearing ? flag : 0u);
             const uint32_t before = state.hid0;

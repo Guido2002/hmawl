@@ -158,7 +158,7 @@ queue. Full runtime scheduling and device services are still needed.
   including cancellation and exceptions. This does not implement privileged
   execution, FP-unavailable exceptions or HID2 instruction gating, and does
   not move the entry-point boot boundary.
-- [x] Compile HID0 SPR transfers for ICE/DCE and self-clearing ICFI, plus
+- [x] Compile HID0 SPR transfers for ICE/DCE, self-clearing ICFI and SPD, plus
   `sync`/`isync` as host memory fences over coherent guest RAM. Reject reserved
   instruction fields and all other changed HID0 bits atomically. Verify all
   enable/invalidation combinations, repeated invalidation, preserved unrelated
@@ -199,14 +199,15 @@ queue. Full runtime scheduling and device services are still needed.
   carry/wrap, both interrupt states and RAM/ABI guards.
   Continue the verified entry state with the original `OSInit` prefix: set the
   initialization flag, record system start time and mask interrupts. Continue
-  through six original performance-monitor reset wrappers to `0x801b0e5c`,
-  before speculation setup. Test the already-initialized
+  through six original performance-monitor reset wrappers, speculation disable
+  and non-IEEE setup to `0x801b0e64`, before boot-info/arena setup.
+  Test the already-initialized
   skip and epilogue separately; never claim they complete first-time startup.
 - [x] Compile FPSCR bit operations `mtfsb0`/`mtfsb1`, including record forms,
   derived VX/FEX summaries and sticky FX on newly set exception causes.
   Check all bit selectors, repeated writes, existing causes with FX cleared,
   CR1, reserved encoding rejection and unchanged RAM/registers/host rounding.
-  Execute original `PPCSetFpNonIEEEMode` independently: NI is guest status,
+  Execute original `PPCSetFpNonIEEEMode` independently and in OSInit: NI is guest status,
   not arithmetic behavior or a bypass of the pending OSInit dependencies.
 - [x] Compile zero-only `mtspr` resets for MMCR0/1 (SPR 952/956) and PMC1..4
   (953/954/957/958). Preserve their guest state across DVD completion,
@@ -214,6 +215,12 @@ queue. Full runtime scheduling and device services are still needed.
   both interrupt states, every nonzero single-bit rejection before mutation,
   unsupported read/record encodings and the original OSInit reset-call order.
   Nonzero monitor writes and hardware event counting remain unsupported.
+- [x] Retain HID0 SPD (`0x200`) as guest control state and execute the original
+  `PPCDisableSpeculation` through original HID0 wrappers. Test all SPD/cache
+  combinations, repeated calls, both interrupt states, loader-bit preservation
+  and stack/ABI guards. Continue OSInit through original SPD and NI setup in
+  order; ensure its already-initialized path leaves both settings untouched.
+  No speculative pipeline or NI arithmetic is implemented.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic
@@ -423,8 +430,8 @@ systems and the executable can be packaged without the GameCube build toolchain.
    Implement remaining OS/platform dependencies explicitly rather than treating
    unsupported hardware instructions as successful no-ops.
    The initial `OSInit` prefix is independently verified through start-time
-   capture/interrupt masking and MMCR/PMC resets (`0x801b0e5c`);
-   speculation/FPSCR setup and the remaining OS subsystem initialization
+   capture/interrupt masking, MMCR/PMC resets and HID0 SPD/FPSCR NI setup
+   (`0x801b0e64`); boot-info/arena setup and the remaining OS subsystem initialization
    still follow.
 2. Expand the recompiler's opcode coverage, extend the tested REL/native-function
    bridge with function discovery and module lifetime management, implement

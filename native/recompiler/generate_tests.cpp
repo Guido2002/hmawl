@@ -319,11 +319,11 @@ int main(int argc, char** argv) {
                 {0x801b34ecu, 0x218}, {0x801b3a44u, 0x14},
                 {0x801b3a6cu, 0x24}, {0x801d33e4u, 0x50},
                 {0x801d3348u, 0x28},
-                {0x801b0de0u, 0x7c}, {0x801b119cu, 0x1c},
+                {0x801b0de0u, 0x84}, {0x801b119cu, 0x1c},
                 {0x801b0a6cu, 8}, {0x801b0a74u, 8}, {0x801b0a7cu, 8},
                 {0x801b0a84u, 8}, {0x801b0a8cu, 8}, {0x801b0a94u, 8},
                 {0x801b7bf0u, 0x18}, {0x801b7c10u, 0x64},
-                {0x801b0b24u, 8},
+                {0x801b0afcu, 0x28}, {0x801b0b24u, 8},
                 {0x801b0a9cu, 0x20}, {0x801b0abcu, 0x28},
                 {0x80235e00u, 0x4c}, {0x80235e4cu, 0x4c}}) {
                 generated += RecompileFunction(range.first,

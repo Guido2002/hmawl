@@ -78,8 +78,8 @@ inline void ppc_sync() {
 }
 
 inline void ppc_write_hid0(PpcState& state, uint32_t value) {
-    if (((state.hid0 ^ value) & ~0xc800u) != 0) {
-        throw std::runtime_error("Unsupported PowerPC HID0 change (only ICE/DCE/ICFI supported).");
+    if (((state.hid0 ^ value) & ~0xca00u) != 0) {
+        throw std::runtime_error("Unsupported PowerPC HID0 change (only ICE/DCE/ICFI/SPD supported).");
     }
     // RAM is coherent and translations are static, with code checks at dispatch.
     if ((value & 0x800u) != 0) {
