@@ -244,16 +244,17 @@ void TestInvalidSignExtendHalfword() {
 }
 
 void TestInvalidTimeBaseAndConditionXor() {
-    for (const uint32_t instruction : {0x7c6c42e7u, 0x7c6e42e6u, 0x4cc63183u}) {
+    for (const uint32_t instruction : {0x7c6c42e7u, 0x7c6e42e6u, 0x4cc63183u,
+                                       0x44000002u, 0x4c000064u}) {
         bool rejected = false;
         try {
             RecompileFunction(0x80003100u, {instruction});
         } catch (const std::runtime_error& error) {
             Require(std::string(error.what()).find("at 0x80003100") != std::string::npos,
-                    "Invalid time-base/CR instruction failed without a guest address.");
+                    "Unsupported control instruction failed without a guest address.");
             rejected = true;
         }
-        Require(rejected, "Invalid time-base/CR instruction was accepted.");
+        Require(rejected, "Unsupported control instruction was accepted.");
     }
 }
 

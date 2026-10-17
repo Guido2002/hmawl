@@ -191,6 +191,7 @@ void RunHardwareDependency(uint32_t address, PpcState& state) {
     case 0x801b20e4u: ppc_801B20E4(state); break;
     case 0x801b20ecu: ppc_801B20EC(state); break;
     case 0x801b11b8u: ppc_801B11B8(state); break;
+    case 0x801b6988u: ppc_801B6988(state); break;
     case 0x801b1460u: ppc_801B1460(state); break;
     case 0x801d33c8u: ppc_801D33C8(state); break;
     case 0x801b2428u: ppc_801B2428(state); break;
@@ -777,6 +778,78 @@ void TestOriginalExceptionInitialization(const DolImage& image) {
                  "Installed exception code is not executed.\n";
 }
 
+void ExpectSystemCallInstallation(PpcState& expected) {
+    for (uint32_t i = 0; i < 0x1c; ++i) {
+        ppc_write_u8(expected, 0x80000c00u + i,
+                     ppc_read_u8(expected, 0x801b6968u + i));
+    }
+}
+
+void TestOriginalSystemCallInstallation(const DolImage& image) {
+    for (bool interrupts : {false, true}) {
+        for (bool existingVector : {false, true}) {
+            auto state = image.CreateGameCubeState();
+            ppc_800032B0(state);
+            state.externalInterruptsEnabled = interrupts;
+            state.lr = 0x801b0f64u;
+            state.cr = 0x12345678u;
+            state.xer = 0xe0000000u;
+            state.fpscr = 4;
+            state.hid0 = 0xc200u;
+            state.fpr.fill({UINT64_MAX, UINT64_MAX});
+            state.gqr.fill(0x12345678u);
+            state.performanceMonitor.fill(0x87654321u);
+            std::fill(state.memory.begin() + 0xc00, state.memory.begin() + 0xd00,
+                      existingVector ? 0xa5 : 0);
+            for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                const auto before = state;
+                auto expected = state;
+                ExpectSystemCallInstallation(expected);
+                std::vector<uint32_t> calls;
+                state.callGuest = [&](uint32_t address, PpcState& guest) {
+                    Require(calls.size() < 3, "System-call installation exceeded dependency budget.");
+                    calls.push_back(address);
+                    Require(guest.externalInterruptsEnabled == interrupts,
+                            "System-call installation changed the interrupt mask.");
+                    if (address == 0x800055ccu) {
+                        Require(guest.gpr[3] == 0x80000c00u && guest.gpr[4] == 0x801b6968u &&
+                                    guest.gpr[5] == 0x1c,
+                                "System-call installation passed an incorrect vector copy range.");
+                    } else {
+                        Require(guest.gpr[3] == 0x80000c00u && guest.gpr[4] == 0x100,
+                                "System-call installation passed an incorrect cache range.");
+                    }
+                    RunHardwareDependency(address, guest);
+                };
+                ppc_801B6988(state);
+                Require(calls == std::vector<uint32_t>{0x800055ccu, 0x801b2428u, 0x801b24acu} &&
+                            state.pc == before.lr && state.lr == before.lr &&
+                            state.fpr == before.fpr && state.gqr == before.gqr &&
+                            state.fpscr == before.fpscr && state.hid0 == before.hid0 &&
+                            state.hid2 == before.hid2 && state.msr == before.msr &&
+                            state.l2cr == before.l2cr &&
+                            state.performanceMonitor == before.performanceMonitor &&
+                            state.externalInterruptsEnabled == interrupts,
+                        "Original system-call installer failed call order, return or CPU guards.");
+                for (unsigned reg = 0; reg < 32; ++reg) {
+                    if (reg == 0 || (reg >= 3 && reg <= 6)) continue;
+                    Require(state.gpr[reg] == before.gpr[reg],
+                            "System-call installer damaged a preserved integer register.");
+                }
+                const size_t frame = ppc_memory_offset(state, before.gpr[1] - 0x10, 0x18);
+                for (size_t i = 0; i < state.memory.size(); ++i) {
+                    if (i >= frame && i < frame + 0x18) continue;
+                    Require(state.memory[i] == expected.memory[i],
+                            "System-call installer changed RAM outside its vector and stack.");
+                }
+            }
+        }
+    }
+    std::cout << "Original __OSInitSystemCall installs exact 0x1c-byte vector at 0x80000c00; "
+                 "0x100-byte cache ranges, replacement/repetition and interrupt/ABI guards passed. "
+                 "System-call vector execution remains unsupported.\n";
+}
+
 void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     auto state = image.CreateGameCubeState();
     Require(ppc_read_u64(state, 0x803495d0u) == 0 &&
@@ -911,8 +984,9 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     auto expectedExceptions = state;
     ExpectExceptionInitialization(expectedExceptions, false, 0,
                                    ppc_read_u32(state, 0x80000044u));
+    ExpectSystemCallInstallation(expectedExceptions);
     ppc_801B0DE0(state);
-    Require(state.pc == 0x801b0f60u && reads == 3 &&
+    Require(state.pc == 0x801b0f64u && reads == 3 &&
                 setupCalls == std::vector<uint32_t>{0x801b0a6cu, 0x801b0a74u,
                     0x801b0a7cu, 0x801b0a84u, 0x801b0a8cu, 0x801b0a94u,
                     0x801b0afcu, 0x801b0b24u} &&
@@ -970,8 +1044,8 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     }
     std::cout << "Original OSInit prefix sets initialization flag/start time, masks "
                  "interrupts, resets MMCR0/1 plus PMC1..4, sets HID0 SPD and FPSCR NI; "
-                 "initializes boot info, arenas and exception vectors, stops at 0x801b0f60 "
-                 "before __OSInitSystemCall. "
+                 "initializes boot info, arenas, exception and system-call vectors; "
+                 "stops at 0x801b0f64 before OSInitAlarm. "
                  "Re-entry skip/epilogue tested separately; first OSInit does not return.\n";
 }
 
@@ -1281,6 +1355,7 @@ int main(int argc, char** argv) {
         TestOriginalSpeculationDisable(image);
         TestOriginalArenaAccessors(image);
         TestOriginalExceptionInitialization(image);
+        TestOriginalSystemCallInstallation(image);
         TestOriginalCacheRanges(image);
         TestOriginalBootInfoAndArena(image);
         TestStartupHelpers(image);

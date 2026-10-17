@@ -265,7 +265,8 @@ sets `AreWeInitialized`, calls the original `__OSGetSystemTime`, records
 reset wrappers, then executes original `PPCDisableSpeculation` and
 `PPCSetFpNonIEEEMode` to set HID0 SPD and FPSCR NI. The original boot-info
 and arena setup then runs through `OSSetArenaLo`/`OSSetArenaHi`, followed by
-original `OSExceptionInit`. It stops at `0x801b0f60`, before `__OSInitSystemCall`;
+original `OSExceptionInit` and `__OSInitSystemCall`. It stops at `0x801b0f64`,
+before `OSInitAlarm`;
 first-time `OSInit` does not yet return. Its
 already-initialized branch and return epilogue are tested separately, not used
 to skip the unfinished first-time path.
@@ -319,6 +320,14 @@ patches/restoration, original cache-call ranges and preserved stack/registers.
 The installed vector code and default handlers are not executed: exception
 delivery, privileged exception-return instructions and system calls remain
 unsupported.
+
+Original `__OSInitSystemCall` replaces the first `0x1c` bytes at `0x80000c00`
+with the original system-call vector and synchronizes the `0x100`-byte range
+using the original cache routines. Tests verify exact copied bytes, untouched
+trailing data, call order/range arguments, repeated installation, both interrupt
+states and stack/register preservation. The entry-derived OSInit test checks
+this replacement after exception installation. Copying the vector does not
+enable system-call execution: `sc` and `rfi` remain explicitly rejected.
 
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings

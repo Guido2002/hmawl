@@ -201,7 +201,7 @@ queue. Full runtime scheduling and device services are still needed.
   initialization flag, record system start time and mask interrupts. Continue
   through six original performance-monitor reset wrappers, speculation disable
   and non-IEEE setup, boot-info/arena initialization and exception installation
-  to `0x801b0f60`, before `__OSInitSystemCall`.
+  plus system-call vector installation to `0x801b0f64`, before `OSInitAlarm`.
   Test the already-initialized
   skip and epilogue separately; never claim they complete first-time startup.
 - [x] Compile FPSCR bit operations `mtfsb0`/`mtfsb1`, including record forms,
@@ -242,7 +242,13 @@ queue. Full runtime scheduling and device services are still needed.
   thresholds, marked masks and an existing integrator; verify cache-call ranges,
   template restoration, RAM guards and return ABI. Continue entry-derived OSInit
   to `0x801b0f60`. Installed vector/default-handler code is not executed:
-  exception delivery, exception returns and system-call initialization are pending.
+  exception delivery and exception returns remain pending.
+- [x] Execute original `__OSInitSystemCall` through original memcpy and cache
+  routines. Check exact `0x1c`-byte vector replacement at `0x80000c00`, untouched
+  trailing bytes, `0x100`-byte cache ranges and call order, repeated installation,
+  both interrupt states and stack/register preservation. Continue entry-derived
+  OSInit to `0x801b0f64` before alarm initialization. System-call execution is
+  not implemented; compilation of `sc` and `rfi` remains explicitly rejected.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic
@@ -453,8 +459,8 @@ systems and the executable can be packaged without the GameCube build toolchain.
    unsupported hardware instructions as successful no-ops.
    The initial `OSInit` prefix is independently verified through start-time
    capture/interrupt masking, MMCR/PMC resets and HID0 SPD/FPSCR NI setup
-   plus boot-info/arena and exception installation (`0x801b0f60`);
-   system-call setup and remaining subsystem initialization
+   plus boot-info/arena, exception and system-call vector installation
+   (`0x801b0f64`); alarm setup and remaining subsystem initialization
    still follow.
 2. Expand the recompiler's opcode coverage, extend the tested REL/native-function
    bridge with function discovery and module lifetime management, implement
