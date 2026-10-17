@@ -11,6 +11,10 @@ struct NativeGx {
     uint16_t control = 0;
     uint16_t watermarkStatus = 0;
     uint16_t cpToken = 0;
+    uint16_t performanceSelect = 0;
+    uint64_t performanceBursts = 0;
+    uint64_t performanceCommands = 0;
+    uint64_t performanceResets = 0;
     std::array<uint32_t, 8> fifo = {};
     uint32_t cpuBase = 0;
     uint32_t cpuEnd = 0;
@@ -24,6 +28,7 @@ struct NativeGx {
     uint32_t bpMask = 0xffffffu;
     uint16_t peControl = 0;
     uint16_t pePending = 0;
+    std::array<uint16_t, 5> poke = {};
     uint16_t token = 0;
     uint64_t bursts = 0;
     uint64_t decodedCommands = 0;

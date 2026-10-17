@@ -151,6 +151,8 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x8000ad5cu) result.memoryInitialized = true;
             if (pc == 0x8017a3e0u) result.screenInitEntered = true;
             if (pc == 0x801cb378u) result.gxInitEntered = true;
+            if (pc == 0x8017a41cu) result.gxInitReturned = true;
+            if (pc == 0x801be3bcu) result.viInitEntered = true;
         });
     } catch (const std::exception& error) {
         const std::string reason = error.what();
@@ -180,7 +182,9 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.gameMainEntered) text << "Original game main entered. ";
     if (result.memoryInitialized) text << "Original Memory::Initialize returned. ";
     if (result.screenInitEntered) text << "Original Screen initialization entered. ";
-    if (result.gxInitEntered) text << "Original GXInit entered (not completed). ";
+    if (result.gxInitReturned) text << "Original GXInit returned to Screen. ";
+    else if (result.gxInitEntered) text << "Original GXInit entered (not completed). ";
+    if (result.viInitEntered) text << "Original VIInit entered (not completed). ";
     text << "This is NOT a game boot; no game main loop or renderer ran.";
     return text.str();
 }

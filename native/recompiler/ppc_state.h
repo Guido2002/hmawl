@@ -2,6 +2,7 @@
 #define HMAWL_PPC_STATE_H
 
 #include "native_gx.h"
+#include "ppc_float.h"
 
 #include <algorithm>
 #include <array>

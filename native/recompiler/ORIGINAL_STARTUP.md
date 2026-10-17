@@ -210,11 +210,14 @@ resource-manager and Screen setup. Original `Memory::Initialize` constructs heap
 from the real arena (`0x8035EFA0` to `0x81701FE0`). Nine original allocations,
 including a nested `0x1730` resource allocation and `0x60000` FIFO buffer, complete.
 The original Screen enters GXInit and prints the SDK's GX version. Original
-CP/PE setup, FIFO linking, write gathering and matrix stores execute as described below.
-The runner's next dependency stop is `PC=0x801CBE64`, LR `0x801CBE2C`,
-SP `0x8035CE48`, at untranslated `fsubs` in viewport setup.
+CP/PE setup, FIFO linking, write gathering, matrix stores, viewport/projection
+arithmetic, texture-region callbacks and PE poke configuration execute.
+**Original GXInit returns to Screen at `0x8017A41C`**, with SP `0x8035CF28`
+and the original FIFO object `0x80318B20`. Screen calls original VIInit and prints
+the SDK's VI version. The next dependency stop is `PC=0x801BE410`,
+LR `0x801BE3FC`, SP `0x8035CF10`, reading unmapped VI control `0xCC002002`.
 The original inquiry callback result remains `0x8001`, five external exceptions
-returned and the entire real FST is intact. GXInit has not returned.
+returned and the entire real FST is intact. VIInit has not returned.
 Real-disc tests verify every constructor in original table order and preservation
 of its stack, SDA and nonvolatile integer/floating registers. Traced and untraced
 startup produce identical RAM, CPU state, output and sampled time; damaged
@@ -222,9 +225,8 @@ constructor words fail integrity validation without claiming later milestones.
 The game main loop, GX renderer,
 scheduled game threads, audio, input and saves have not run.
 
-The next connected milestone is original floating-point viewport/projection setup
-and completion of GXInit, followed by original VI initialization and a renderer.
-Reaching GXInit does not establish a completed graphics initialization, scheduled
+The next connected milestone is original VI initialization, scanout/retrace and a renderer.
+Returning from GXInit does not establish a completed graphics initialization, scheduled
 game thread or frame. Generated translation registration uses non-inlined batches
 of at most 64 regular bindings (plus the console binding in the final batch), avoiding
 MSVC's oversized temporary stack frames without increasing the executable stack.
@@ -250,12 +252,33 @@ assert their PE sources only after decoding, rather than reporting success early
 Draws, EFB copies, texture/TLUT DMA, display lists and unknown opcodes fail explicitly.
 There is no replacement scene or generated frame.
 
-The real Windows runner publishes **29 FIFO bursts** and decodes **121 register/NOP
-commands**, with 29 incomplete command bytes and 24 still-gathered bytes at the
-viewport arithmetic boundary. Original attribute/texcoord tables supply bounded
-build-time indirect branch roots. Original paired matrix stores use bit-preserving
+The real Windows runner publishes **63 FIFO bursts** and decodes **315 register/NOP
+commands**, with seven incomplete command bytes and 12 still-gathered bytes at the
+VI boundary. Original attribute/texcoord/texture-format tables supply bounded
+build-time indirect branch roots, alongside original texture-region callbacks.
+The six XF viewport words at `0x101A` are exactly `43A00000 C3700000 4B800000
+44258000 44118000 4B800000` (640x480, original depth scale 16777216).
+PE poke depth/blend/destination-alpha/alpha-test/alpha-read retain their actual
+register state (`001F F038 0000 0700 0005`); no pixel operation is synthesized.
+CP offset `+6` holds the performance selector, while `+0xE` holds the token.
+Metric clear starts a new measured FIFO work interval without resetting lifetime
+burst/command totals. Hardware clock/geometry metric reads remain unsupported.
+Original paired matrix stores use bit-preserving
 float transfers, including single-lane, immediate/indexed and update forms; integer
-store quantization remains an explicit failure. No general FP arithmetic is added.
+store quantization remains an explicit failure.
+
+Scalar single/double arithmetic is evaluated with integer significands, guard/round/
+sticky bits and a portable 53x53-bit product or long division, avoiding host FP
+environment changes and single-result double rounding. Add/subtract/multiply/divide,
+ordered/unordered comparisons and `fctiwz` preserve independent paired lanes or
+duplicate single results as appropriate. Tests exercise all four rounding modes,
+exact integer-bias subtraction, NaNs/infinities/signed zeros, sticky causes,
+underflow/overflow, FPRF, integer bounds, register aliases and CR1 records.
+100,000 deterministic finite input cases compare single and double results
+against independent host IEEE arithmetic compiled with strict FP semantics.
+Original startup NI mode works for normal inputs/results; denormal NI behavior,
+enabled FP exceptions and Gekko's 25-bit rounding for non-single `fmuls` multipliers
+fail explicitly before mutation. Fused arithmetic is not implemented.
 
 ## Targeted regression
 

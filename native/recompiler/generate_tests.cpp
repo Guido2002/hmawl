@@ -351,6 +351,33 @@ int main(int argc, char** argv) {
             }
         } else {
             std::ostringstream output;
+            for (unsigned index = 0; index < 32; ++index) {
+                const unsigned operation = (index % 16) / 4;
+                const unsigned xo = operation == 0 ? 18 : operation == 1 ? 20 : operation == 2 ? 21 : 25;
+                const unsigned destination = index % 2 ? 4 : 3;
+                const uint32_t word = ((index < 16 ? 59u : 63u) << 26) | (destination << 21) |
+                    (4u << 16) | (xo == 25 ? (5u << 6) : (5u << 11)) |
+                    (xo << 1) | ((index % 4) / 2);
+                Emit(output, 0xf000u + index * 16, {word});
+            }
+            output << "static void (*const FloatArithmeticTestFunctions[])(PpcState&) = {\n";
+            for (unsigned index = 0; index < 32; ++index) {
+                output << "ppc_0000" << std::hex << std::uppercase << (0xf000u + index * 16)
+                       << ",\n" << std::dec;
+            }
+            output << "};\n";
+            for (unsigned field = 0; field < 8; ++field) {
+                Emit(output, 0xf200u + field * 16,
+                     {(63u << 26) | (field << 23) | (4u << 16) | (5u << 11)});
+            }
+            output << "static void (*const FloatCompareTestFunctions[])(PpcState&) = {\n";
+            for (unsigned field = 0; field < 8; ++field) {
+                output << "ppc_0000" << std::hex << std::uppercase << (0xf200u + field * 16)
+                       << ",\n" << std::dec;
+            }
+            output << "};\n";
+            Emit(output, 0xf280, {(63u << 26) | (3u << 21) | (4u << 11) | (15u << 1) | 1u});
+            Emit(output, 0xf290, {(63u << 26) | (3u << 23) | (4u << 16) | (5u << 11) | (32u << 1)});
             Emit(output, 0xb400u, {0x38630001u, 0x4200fffcu, 0x38800001u}, {true, true});
             Emit(output, 0xb420u, {0x48000000u, 0x38800001u}, {true, true});
             Emit(output, 0xb430u, {0x4e800420u, 0x38800001u}, {true, true});

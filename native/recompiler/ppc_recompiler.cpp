@@ -410,8 +410,42 @@ std::string RecompileFunction(uint32_t address,
                 opcode <= 51, opcode == 49 || opcode == 51 || opcode == 53 || opcode == 55,
                 opcode == 48 || opcode == 49 || opcode == 52 || opcode == 53);
             break;
+        case 59:
         case 63: {
             const uint32_t extendedOpcode = Bits(instruction, 1, 10);
+            const uint32_t arithmetic = Bits(instruction, 1, 5);
+            if (arithmetic == 18 || arithmetic == 20 || arithmetic == 21 || arithmetic == 25) {
+                const auto rc = Bits(instruction, 6, 5);
+                if ((arithmetic == 25 && rb != 0) || (arithmetic != 25 && rc != 0)) {
+                    throw std::runtime_error("Invalid floating-point arithmetic encoding at " + Hex(pc) + ".");
+                }
+                output << "    PpcFloatArithmetic(state, " << rt << ", " << ra << ", "
+                       << (arithmetic == 25 ? rc : rb) << ", PpcFloatOperation::"
+                       << (arithmetic == 18 ? "Divide" : arithmetic == 20 ? "Subtract" :
+                           arithmetic == 21 ? "Add" : "Multiply")
+                       << ", " << (opcode == 59 ? "true" : "false") << ");\n";
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
+            }
+            if (opcode == 59) {
+                throw UnsupportedPpcInstruction("Unsupported single-precision arithmetic at " + Hex(pc) + ".");
+            }
+            if (extendedOpcode == 0 || extendedOpcode == 32) {
+                if ((instruction & 0x00600001u) != 0) {
+                    throw std::runtime_error("Invalid floating-point comparison at " + Hex(pc) + ".");
+                }
+                output << "    PpcFloatCompare(state, " << (rt >> 2) << ", " << ra << ", " << rb
+                       << ", " << (extendedOpcode == 32 ? "true" : "false") << ");\n";
+                break;
+            }
+            if (extendedOpcode == 15) {
+                if (ra != 0) {
+                    throw std::runtime_error("Invalid fctiwz instruction at " + Hex(pc) + ".");
+                }
+                output << "    PpcFloatToInteger(state, " << rt << ", " << rb << ");\n";
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
+            }
             if (extendedOpcode == 38 || extendedOpcode == 70) {
                 if (ra != 0 || rb != 0) {
                     throw std::runtime_error("Invalid FPSCR bit instruction at " + Hex(pc) + ".");

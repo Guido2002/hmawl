@@ -71,6 +71,7 @@ void Decode(NativeGx& gx) {
             ++gx.vertexCacheInvalidations;
         }
         ++gx.decodedCommands;
+        ++gx.performanceCommands;
         offset += length;
     }
     bytes.erase(bytes.begin(), bytes.begin() + offset);
@@ -122,6 +123,7 @@ void Gather(PpcState& state, NativeGx& gx, uint32_t value, unsigned width) {
     gx.gathered.erase(gx.gathered.begin(), gx.gathered.begin() + 32);
     gx.cpuWrite = gx.cpuWrite == gx.cpuEnd ? gx.cpuBase : gx.cpuWrite + 32;
     ++gx.bursts;
+    ++gx.performanceBursts;
     if ((gx.control & 0x10u) != 0) {
         gx.fifo[5] = gx.cpuWrite;
         gx.fifo[4] += 32;
@@ -150,13 +152,17 @@ uint32_t NativeGxRead(const PpcState& state, uint32_t address, unsigned width) {
         if (address == 0xcc003014u) return gx.cpuWrite;
     }
     if (width == 2) {
+        if (address >= 0xcc001000u && address <= 0xcc001008u && (address & 1u) == 0) {
+            return gx.poke[(address - 0xcc001000u) / 2];
+        }
         if (address == 0xcc000000u) {
             const bool readIdle = gx.fifo[4] == 0 || (gx.control & 1u) == 0 || Breakpoint(gx);
             return gx.watermarkStatus | (readIdle ? 4u : 0u) |
                    (gx.commands.empty() ? 8u : 0u) | (Breakpoint(gx) ? 0x10u : 0u);
         }
         if (address == 0xcc000002u) return gx.control;
-        if (address == 0xcc000006u) return gx.cpToken;
+        if (address == 0xcc000006u) return gx.performanceSelect;
+        if (address == 0xcc00000eu) return gx.cpToken;
         if (address >= 0xcc000020u && address <= 0xcc00003eu && (address & 1u) == 0) {
             const auto index = (address - 0xcc000020u) / 4;
             return (gx.fifo[index] >> ((address & 2u) * 8)) & 0xffffu;
@@ -169,6 +175,15 @@ uint32_t NativeGxRead(const PpcState& state, uint32_t address, unsigned width) {
 
 void NativeGxWrite(PpcState& state, uint32_t address, uint32_t value, unsigned width) {
     auto& gx = state.graphics.value();
+    if (width == 2 && address >= 0xcc001000u && address <= 0xcc001008u && (address & 1u) == 0) {
+        constexpr uint16_t masks[] = {0x001f, 0xffff, 0x01ff, 0x07ff, 0x0007};
+        const auto index = (address - 0xcc001000u) / 2;
+        if ((value & ~uint32_t(masks[index])) != 0) {
+            throw std::runtime_error("Unsupported native GX PE poke configuration bits.");
+        }
+        gx.poke[index] = static_cast<uint16_t>(value);
+        return;
+    }
     if (address == 0xcc008000u && (width == 1 || width == 2 || width == 4)) {
         Gather(state, gx, value, width);
         return;
@@ -186,6 +201,10 @@ void NativeGxWrite(PpcState& state, uint32_t address, uint32_t value, unsigned w
     }
     if (width == 2) {
         if (address == 0xcc000006u) {
+            gx.performanceSelect = static_cast<uint16_t>(value);
+            return;
+        }
+        if (address == 0xcc00000eu) {
             gx.cpToken = static_cast<uint16_t>(value);
             return;
         }
@@ -198,8 +217,13 @@ void NativeGxWrite(PpcState& state, uint32_t address, uint32_t value, unsigned w
             return;
         }
         if (address == 0xcc000004u) {
-            if ((value & ~3u) != 0) throw std::runtime_error("Unsupported native GX CP clear bits.");
-            gx.watermarkStatus &= ~value;
+            if ((value & ~7u) != 0) throw std::runtime_error("Unsupported native GX CP clear bits.");
+            gx.watermarkStatus &= ~(value & 3u);
+            if (value & 4u) {
+                gx.performanceBursts = 0;
+                gx.performanceCommands = 0;
+                ++gx.performanceResets;
+            }
             return;
         }
         if (address >= 0xcc000020u && address <= 0xcc00003eu && (address & 1u) == 0) {

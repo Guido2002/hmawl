@@ -24,6 +24,52 @@ void Require(bool condition, const char* message) {
     }
 }
 
+void TestFloatingPointArithmetic() {
+    for (unsigned index = 0; index < 32; ++index) {
+        PpcState state;
+        state.fpr[4] = {0x4008000000000000, 0x0123456789abcdef};
+        state.fpr[5] = {0x4000000000000000, 0xfedcba9876543210};
+        state.fpr[3].ps1 = 0x123456789abcdef0;
+        state.fpscr = 4;
+        state.cr = 0x12345678;
+        FloatArithmeticTestFunctions[index](state);
+        const unsigned dest = index % 2 ? 4 : 3;
+        const uint64_t values[] = {0x3ff8000000000000, 0x3ff0000000000000,
+                                   0x4014000000000000, 0x4018000000000000};
+        const auto expected = values[(index % 16) / 4];
+        const uint64_t paired = index < 16 ? expected :
+            dest == 4 ? UINT64_C(0x0123456789abcdef) : UINT64_C(0x123456789abcdef0);
+        Require(state.fpr[dest] == PpcFpr{expected, paired} && state.fpscr == 0x4004 &&
+                    state.cr == ((index % 4) >= 2 ? 0x10345678u : 0x12345678u),
+                "Generated arithmetic source decoding, aliasing, precision, NI or CR1 record differs.");
+    }
+    for (unsigned field = 0; field < 8; ++field) {
+        PpcState state;
+        state.fpr[4].ps0 = 0xbff0000000000000;
+        state.fpr[5].ps0 = 0x3ff0000000000000;
+        state.cr = 0x12345678;
+        state.fpscr = 0x60004;
+        FloatCompareTestFunctions[field](state);
+        const unsigned shift = 28 - field * 4;
+        Require(state.cr == ((0x12345678u & ~(15u << shift)) | (8u << shift)) &&
+                    state.fpscr == 0x68004,
+                "Generated comparison did not preserve other CR fields and FPSCR status.");
+    }
+    PpcState state;
+    state.fpr[4] = {0x400e000000000000, 0};
+    state.fpr[3].ps1 = 0x123456789abcdef0;
+    state.cr = 0x12345678;
+    ppc_0000F280(state);
+    Require(state.fpr[3] == PpcFpr{0xfff8000000000003, 0x123456789abcdef0} &&
+                state.fpscr == 0x82020000 && state.cr == 0x18345678,
+            "Generated truncating integer conversion or CR1 record differs.");
+    state.fpscr = 0;
+    state.fpr[4].ps0 = 0x7ff8000000000000;
+    ppc_0000F290(state);
+    Require(state.fpscr == 0xa0081000 && ((state.cr >> 16) & 15) == 1,
+            "Generated ordered NaN comparison did not raise VXVC and unordered CR3.");
+}
+
 template <typename Function>
 void Reject(Function function, const std::string& message) {
     try {
@@ -3576,6 +3622,7 @@ int main() {
         TestLogicalRegisters();
         TestYieldingBranchesAndPrecisePc();
         TestFloatingPointTransfers();
+        TestFloatingPointArithmetic();
         TestSingleTransfers();
         TestFloatingPointMoves();
         TestFpscrWrites();

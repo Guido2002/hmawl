@@ -341,7 +341,14 @@ void TestInvalidFloatingPointInstructions() {
         (63u << 26) | (38u << 1) | (1u << 11),
         (63u << 26) | (70u << 1) | (1u << 16),
         (63u << 26) | (70u << 1) | (1u << 11),
-        0xfc64282au, // fadd must not fall through to a register move.
+        0xfc64286au, // fadd reserves its third source field.
+        0xec642826u, // Reserved single-precision arithmetic operation.
+        0xfc64282au | (1u << 6),
+        0xec642824u | (1u << 6),
+        (63u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (25u << 1),
+        (63u << 26) | (4u << 16) | (5u << 11) | 1u,
+        (63u << 26) | (1u << 21) | (4u << 16) | (5u << 11),
+        (63u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (15u << 1),
         0x10210090u, // Reserved ps_mr source field.
         (57u << 26) | (3u << 21),
         (4u << 26) | (3u << 21) | (4u << 11) | (38u << 1),

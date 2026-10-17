@@ -512,13 +512,14 @@ int main(int argc, char** argv) {
             const auto discResult = RunOriginalStartup(dispatcher, discState);
             std::cout << DescribeOriginalStartupStop(discResult) << '\n';
             Require(discResult.stop == OriginalStartupStop::Dependency &&
-                        discResult.pc == 0x801cbe64u && discResult.lr == 0x801cbe2cu &&
-                        discResult.stack == 0x8035ce48u && discResult.osInitReturned &&
+                        discResult.pc == 0x801be410u && discResult.lr == 0x801be3fcu &&
+                        discResult.stack == 0x8035cf10u && discResult.osInitReturned &&
                         discResult.constructorsReturned == 93 && discResult.userInitReturned &&
                         discResult.gameMainEntered && discResult.memoryInitialized &&
                         discResult.screenInitEntered && discResult.gxInitEntered &&
+                        discResult.gxInitReturned && discResult.viInitEntered &&
                         !discState.callGuest && !discState.callException &&
-                        discResult.reason.find("No native translation registered") != std::string::npos &&
+                        discResult.reason.find("not mapped to GameCube RAM") != std::string::npos &&
                         discState.discInterface->completedTransfers == 1 &&
                         discState.discInterface->status == 0x2au &&
                         discState.discInterface->dmaLength == 0 &&
@@ -534,6 +535,8 @@ int main(int argc, char** argv) {
                         ppc_read_u32(discState, 0x803495fcu) != 0 &&
                         discConsole.find("SDK - DVD") != std::string::npos &&
                         discConsole.find("SDK - GX") != std::string::npos &&
+                        discConsole.find("SDK - VI") != std::string::npos &&
+                        DescribeOriginalStartupStop(discResult).find("GXInit returned") != std::string::npos &&
                         DescribeOriginalStartupStop(discResult).find("OSInit returned") != std::string::npos &&
                         std::equal(fst.begin(), fst.end(), discState.memory.begin() + fstOffset),
                     "Original entry did not reach original graphics setup through constructors, heaps and real DVD DMA.");
@@ -541,15 +544,29 @@ int main(int argc, char** argv) {
             const auto fifo = ppc_read_u32(discState, ppc_read_u32(discState, 0x803491b4u) + 12) & 0x3fffffffu;
             std::cout << "Original GX bursts=" << gx.bursts << " commands=" << gx.decodedCommands
                       << " CP control=" << gx.control << " PE control=" << gx.peControl << '\n';
-            Require(gx.bursts == 29 && gx.decodedCommands == 121 &&
-                        gx.gathered.size() == 24 && gx.commands.size() == 29 &&
+            std::cout << "PE poke:";
+            for (const auto value : gx.poke) std::cout << " " << std::hex << value;
+            std::cout << std::dec << " metric resets=" << gx.performanceResets
+                      << " interval bursts/commands=" << gx.performanceBursts << "/" << gx.performanceCommands << '\n';
+            Require(gx.bursts == 63 && gx.decodedCommands == 315 &&
+                        gx.gathered.size() == 12 && gx.commands.size() == 7 &&
                         gx.cpuBase == fifo && gx.cpuEnd == fifo + 0x5ffe0 &&
-                        gx.cpuWrite == fifo + 29 * 32 && gx.fifo[0] == gx.cpuBase &&
+                        gx.cpuWrite == fifo + 63 * 32 && gx.fifo[0] == gx.cpuBase &&
                         gx.fifo[1] == gx.cpuEnd && gx.fifo[4] == 0 &&
                         gx.fifo[5] == gx.cpuWrite && gx.fifo[6] == gx.cpuWrite &&
                         gx.writeGatherAddress == 0x0c008000u && (discState.hid2 & 0x40000000u) != 0 &&
-                        gx.peControl == 3 && NativeGxInterruptCause(gx) == 0,
+                        gx.peControl == 3 && gx.performanceResets == 1 &&
+                        gx.performanceBursts == 0 && gx.performanceCommands == 0 &&
+                        gx.poke == std::array<uint16_t, 5>{0x1f, 0xf038, 0, 0x700, 5} &&
+                        NativeGxInterruptCause(gx) == 0,
                     "Original GX FIFO/PE setup did not consume the exact actual command bursts.");
+            const uint32_t viewport[] = {0x43a00000, 0xc3700000, 0x4b800000,
+                                         0x44258000, 0x44118000, 0x4b800000};
+            std::cout << "XF viewport:";
+            for (unsigned index = 0; index < 6; ++index) std::cout << " " << std::hex << gx.xf[0x101a + index];
+            std::cout << std::dec << '\n';
+            Require(std::equal(std::begin(viewport), std::end(viewport), gx.xf.begin() + 0x101a),
+                    "Original floating-point viewport did not publish exact 640x480 XF coefficients.");
             for (uint32_t address = 0x80317a40u; address < 0x80317a60u; ++address) {
                 Require(ppc_read_u8(discState, address) == (address == 0x80317a43u ? 1 : 0),
                         "Native virtual-drive identity differs or claims console firmware.");
@@ -572,6 +589,7 @@ int main(int argc, char** argv) {
                     "Original constructor table does not have exactly 93 entries.");
             size_t entered = 0, returned = 0;
             bool initializedHeap = false;
+            bool gxReturned = false;
             std::vector<std::pair<uint32_t, uint32_t>> allocations;
             std::array<uint32_t, 32> savedRegisters{};
             std::array<uint64_t, 18> savedFprs{};
@@ -597,6 +615,13 @@ int main(int argc, char** argv) {
                 } else if (pc == 0x800032a0u || pc == 0x8000aa54u) {
                     Require(entered == 93 && returned == 93 && traced.gpr[1] == 0x8035cf98u,
                             "User initialization/game entry preceded complete constructor return.");
+                } else if (pc == 0x8017a41cu) {
+                    std::cout << "GXInit return SP=" << std::hex << traced.gpr[1]
+                              << " FIFO=" << traced.gpr[3] << std::dec << '\n';
+                    Require(!gxReturned && traced.gpr[1] == 0x8035cf28u &&
+                                traced.gpr[3] == 0x80318b20u,
+                            "Original GXInit did not return its FIFO object and restore the Screen stack.");
+                    gxReturned = true;
                 } else if (pc == 0x8000ad5cu) {
                     const uint32_t size = (0x81701fe0u - 0x8035efa0u) & ~31u;
                     Require(ppc_read_u32(traced, 0x80000030u) == 0x8035efa0u &&
@@ -636,9 +661,9 @@ int main(int argc, char** argv) {
             bool reachedBoundary = false;
             try {
                 dispatcher.Execute(traced, image.entryPoint(), 1000000, 128, observe);
-            } catch (const std::runtime_error& error) {
-                reachedBoundary = traced.pc == 0x801cbe64u &&
-                    std::string(error.what()).find("No native translation registered") != std::string::npos;
+            } catch (const std::exception& error) {
+                reachedBoundary = traced.pc == 0x801be410u &&
+                    std::string(error.what()).find("not mapped to GameCube RAM") != std::string::npos;
                 if (!reachedBoundary) throw;
             }
             std::cout << "Observed original initialization allocations=" << allocations.size()
@@ -652,7 +677,7 @@ int main(int argc, char** argv) {
                         ppc_read_u32(traced, 0x803491b4u) == allocations[7].first &&
                         ppc_read_u32(traced, allocations[7].first + 12) == allocations[8].first,
                     "Original manager singletons or Screen FIFO pointer differ from allocated objects.");
-            Require(reachedBoundary && entered == 93 && returned == 93 &&
+            Require(reachedBoundary && gxReturned && entered == 93 && returned == 93 &&
                         traced.memory == discState.memory && tracedConsole == discConsole &&
                         tracedTicks == ticks && traced.pc == discState.pc && traced.lr == discState.lr &&
                         std::equal(std::begin(traced.gpr), std::end(traced.gpr), std::begin(discState.gpr)) &&
@@ -673,6 +698,10 @@ int main(int argc, char** argv) {
                         observedGx.writeGatherAddress == gx.writeGatherAddress &&
                         observedGx.watermarkStatus == gx.watermarkStatus &&
                         observedGx.cpToken == gx.cpToken && observedGx.token == gx.token &&
+                        observedGx.performanceSelect == gx.performanceSelect &&
+                        observedGx.performanceBursts == gx.performanceBursts &&
+                        observedGx.performanceCommands == gx.performanceCommands &&
+                        observedGx.performanceResets == gx.performanceResets && observedGx.poke == gx.poke &&
                         observedGx.bursts == gx.bursts && observedGx.decodedCommands == gx.decodedCommands &&
                         observedGx.vertexCacheInvalidations == gx.vertexCacheInvalidations,
                     "Observed execution changed actual GX command, FIFO or interrupt state.");
@@ -680,7 +709,7 @@ int main(int argc, char** argv) {
                 auto pe = traced;
                 uint64_t peTicks = tracedTicks;
                 pe.readTimeBase = [&] { return peTicks += 1000; };
-                for (unsigned byte = 0; byte < 8; ++byte) ppc_write_u8(pe, 0xcc008000u, 0);
+                for (unsigned byte = 0; byte < 20; ++byte) ppc_write_u8(pe, 0xcc008000u, 0);
                 Require(pe.graphics->commands.empty() && pe.graphics->gathered.empty(),
                         "Original pending matrix command did not finish on an actual gather flush.");
                 const uint8_t requests[] = {0x61, 0x48, 0, 0x12, 0x34, 0x61, 0x45, 0, 0, 2};
@@ -696,9 +725,9 @@ int main(int argc, char** argv) {
                         if (pc == 0x801ce08cu) ++tokenHandlers;
                         if (pc == 0x801ce158u) ++finishHandlers;
                     });
-                } catch (const std::runtime_error& error) {
+                } catch (const std::exception& error) {
                     resumed = pe.pc == traced.pc &&
-                        std::string(error.what()).find("No native translation registered") != std::string::npos;
+                        std::string(error.what()).find("not mapped to GameCube RAM") != std::string::npos;
                     if (!resumed) throw;
                 }
                 Require(resumed && tokenHandlers == 1 && finishHandlers == 1 &&

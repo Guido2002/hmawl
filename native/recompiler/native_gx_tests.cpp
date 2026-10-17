@@ -100,6 +100,21 @@ void TestGatherAndCommands() {
 void TestInterruptsAndReader() {
     auto state = State();
     auto& gx = *state.graphics;
+    const uint16_t pokeValues[] = {0x17, 0xffff, 0x1a5, 0x7cd, 6};
+    for (unsigned index = 0; index < 5; ++index) {
+        const auto address = 0xcc001000u + index * 2;
+        Require(ppc_read_u16(state, address) == 0, "PE poke configuration did not start reset.");
+        ppc_write_u16(state, address, pokeValues[index]);
+        Require(ppc_read_u16(state, address) == pokeValues[index] && gx.poke[index] == pokeValues[index],
+                "PE poke depth/blend/alpha configuration was not retained.");
+    }
+    for (const auto address : {0xcc001000u, 0xcc001004u, 0xcc001008u}) {
+        const auto before = gx.poke;
+        Reject([&] { ppc_write_u16(state, address, 0x8000); }, "poke configuration");
+        Require(gx.poke == before, "Invalid PE poke configuration modified state.");
+    }
+    Reject([&] { ppc_read_u8(state, 0xcc001002u); }, "access width");
+    Reject([&] { ppc_write_u32(state, 0xcc001002u, 0); }, "access width");
     ppc_write_u32(state, 0xcc003004u, 0xef0);
     ppc_write_u16(state, 0xcc00100au, 15);
     Send(state, {0x61, 0x48, 0x00, 0x12, 0x34, 0x61, 0x45, 0, 0, 2});
@@ -122,6 +137,15 @@ void TestInterruptsAndReader() {
             "Disabled reader consumed a command or missed its high watermark interrupt.");
     ppc_write_u16(state, 0xcc000004u, 1);
     Require(NativeGxInterruptCause(gx) == 0, "CP clear did not acknowledge latched overflow.");
+    const auto bursts = gx.bursts, commands = gx.decodedCommands;
+    Require(gx.performanceBursts != 0 && gx.performanceCommands != 0,
+            "Native performance interval did not account for actual FIFO work.");
+    ppc_write_u16(state, 0xcc000006u, 5);
+    ppc_write_u16(state, 0xcc000004u, 4);
+    Require(gx.performanceResets == 1 && gx.performanceBursts == 0 && gx.performanceCommands == 0 &&
+                gx.bursts == bursts && gx.decodedCommands == commands &&
+                ppc_read_u16(state, 0xcc000006u) == 5 && ppc_read_u16(state, 0xcc00000eu) == 0x1234,
+            "CP metric reset altered lifetime work, selector or actual token register.");
     gx.fifo[3] = 32;
     ppc_write_u16(state, 0xcc000002u, 0x19);
     Require(gx.cp[0x60] == 0x01020304 && gx.fifo[4] == 0 &&

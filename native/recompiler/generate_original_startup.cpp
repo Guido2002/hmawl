@@ -59,13 +59,21 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
         leaders.insert(target);
         pending.push_back(target);
     }
+    // Original GXInitTexObj format-to-tile switch, bounded by its cmplwi guard.
+    for (uint32_t index = 0; index < 15; ++index) {
+        const auto target = ppc_read_u32(source, 0x802e20ccu + index * 4);
+        leaders.insert(target);
+        pending.push_back(target);
+    }
     // Indirect construction calls and graphics interrupt handlers need explicit original roots.
     for (uint32_t target : {0x80199eecu, 0x8001b920u, 0x80022790u, 0x800226f0u,
                             0x8002b80cu, 0x8002f27cu, 0x8002f100u, 0x8002efbcu,
                             0x80179ee8u, 0x80179c90u, 0x801059a4u,
                             0x8019ad5cu, 0x80190204u, 0x8000b4c4u, 0x80198f54u,
                             0x80199ed8u, 0x8017a3a0u,
-                            0x801cc448u, 0x801ce08cu, 0x801ce158u}) {
+                            0x801cc448u, 0x801ce08cu, 0x801ce158u,
+                            0x801cb0c8u, 0x801cb1c4u,
+                            0x801be410u}) {
         leaders.insert(target);
         pending.push_back(target);
     }

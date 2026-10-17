@@ -90,13 +90,14 @@ the original game `main` is entered in the Windows runner. Tests verify construc
 order, nonvolatile registers and exact observer/non-observer execution equivalence.
 Original game initialization now runs arena-backed memory setup, nine checked
 heap allocations, resource managers and `Screen` construction into original
-`GXInit`. Original CP/PE setup, CPU/GPU FIFO linking, write gathering and matrix
-stores now execute: the Windows runner publishes **29 real 32-byte FIFO bursts**
-to guest RAM and decodes **121 register/NOP commands** into CP/BP/XF state.
+`GXInit`. **Original GXInit now returns to Screen in the Windows runner** after
+viewport/projection, texture-region callbacks and PE configuration. It publishes
+**63 real 32-byte FIFO bursts** to guest RAM and decodes **315 register/NOP commands**
+into CP/BP/XF state, including exact 640x480 viewport coefficients.
 Separate injected-command tests execute both original PE interrupt handlers and
 restore the interrupted CPU context; production startup has not issued those interrupts.
-The runner stops with **exit code 3** at untranslated floating-point viewport setup,
-`PC=0x801CBE64`, `LR=0x801CBE2C`. GXInit has not returned.
+The runner enters original `VIInit`, then stops with **exit code 3** on the first
+unmapped VI control-register read at `PC=0x801BE410`, `LR=0x801BE3FC`.
 Draws, EFB copies and texture DMA fail explicitly; the game main loop and rendering
 have not run.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices
@@ -255,9 +256,17 @@ cause/enable combinations, sticky FX preservation and all rounding-mode bits.
 The original `PPCMffpscr`/`PPCMtfpscr` SDK wrappers run with checked stack
 boundaries and preserved f31/paired lanes.
 
-This is status-register support only: no host rounding environment is changed,
-and floating-point arithmetic or MSR-dependent program-exception delivery is
-not implemented. Privileged setup and paired-single initialization are not
+Scalar single/double add, subtract, multiply and divide now use integer-based
+software arithmetic, with four rounding modes, signed zeros, NaNs, sticky FPSCR
+causes, FPRF and record forms. Unordered/ordered comparisons and truncating integer
+conversion support the original GX initialization. A deterministic 100,000-case
+finite single/double differential suite checks all four arithmetic operations;
+targeted cases check rounding ties, underflow/overflow, special values and flags.
+No host rounding environment is changed. Enabled FP exceptions, NI-mode denormals
+and non-single-representable `fmuls` multipliers fail explicitly; Gekko-specific
+25-bit multiplier rounding is not yet implemented. Fused operations and
+MSR-dependent program-exception delivery remain unsupported.
+Privileged setup and paired-single initialization are not
 skipped in a claimed full startup. DVD callback context restoration includes
 both FPR lanes and FPSCR, including cancellation and throwing callbacks.
 

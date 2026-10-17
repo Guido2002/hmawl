@@ -25,6 +25,8 @@ struct OriginalStartupResult {
     bool memoryInitialized = false;
     bool screenInitEntered = false;
     bool gxInitEntered = false;
+    bool gxInitReturned = false;
+    bool viInitEntered = false;
     uint32_t constructorsReturned = 0;
 };
 

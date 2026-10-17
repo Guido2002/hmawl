@@ -15,6 +15,7 @@ FetchContent_MakeAvailable(zstd)
 add_library(hmawl_recompiler_core
     dol_image.cpp
     ppc_recompiler.cpp
+    ppc_float.cpp
     dsp_init_recompiler.cpp
     rvz_image.cpp
     disc_import.cpp
@@ -66,6 +67,12 @@ if(BUILD_TESTING)
     add_executable(hmawl_native_gx_tests native_gx_tests.cpp)
     target_link_libraries(hmawl_native_gx_tests PRIVATE hmawl_recompiler_core)
     add_test(NAME hmawl_native_gx_tests COMMAND hmawl_native_gx_tests)
+    add_executable(hmawl_ppc_float_tests ppc_float_tests.cpp)
+    target_link_libraries(hmawl_ppc_float_tests PRIVATE hmawl_recompiler_core)
+    if(MSVC)
+        target_compile_options(hmawl_ppc_float_tests PRIVATE /fp:strict)
+    endif()
+    add_test(NAME hmawl_ppc_float_tests COMMAND hmawl_ppc_float_tests)
     add_executable(hmawl_import_tests import_tests.cpp)
     target_link_libraries(hmawl_import_tests PRIVATE hmawl_recompiler_core libzstd_static)
     add_test(NAME hmawl_import_tests COMMAND hmawl_import_tests)
