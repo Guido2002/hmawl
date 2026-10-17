@@ -80,8 +80,11 @@ SystemTask and all three original task-list passes now return to main. The first
 scene/asset update registers the original fade task and builds real deferred queues.
 Deferred audio/camera updates and queue cleanup now return, followed by original
 Screen frame preparation and the kernel's sorted render-task insertion.
-With `--max-blocks 50000000`, the next untranslated render-state callback is
-`PC=0x80181E7C`, LR `0x8017D180`.
+The eight scheduled render callbacks, original queue cleanup and frame draw-sync
+submission now return. Perspective/tangent calculation, GX projection
+save/apply/restore and viewport restoration execute original code.
+With `--max-blocks 50000000`, the next untranslated post-render callback is
+`PC=0x8000CC9C`, LR `0x8000ACFC`.
 The original main loop enters its first iteration and its reset/update/resource/
 audio preparation returns, but no complete iteration or rendered frame is verified.
 The default one-million-block limit can expire earlier.
@@ -780,8 +783,20 @@ queue. Full runtime scheduling and device services are still needed.
   node unlinking, the empty update queue and all eight sorted render entries.
   Full observed/unobserved CPU/RAM/interrupt/PCM/DSP parity remains required.
   Screen frame preparation returns; main enters the first kernel render-state
-  callback at `0x80181E7C`, LR `0x8017D180`, where translation remains missing.
+  callback at `0x80181E7C`, LR `0x8017D180` (the boundary at this milestone).
   No draw, displayed frame, completed loop or audible music is claimed.
+- [x] Complete the original sorted render-state pass and cleanup.
+  Compile the six connected kernel callbacks, original perspective/tangent chain,
+  camera virtual dispatch, viewport restoration, scene-manager callback and render
+  node cleanup. All eight callbacks and eight cleanup callbacks execute in order;
+  the scene-manager callback is an original no-op, not a substitute draw routine.
+  Independently check all 16 perspective coefficients, their application to GX,
+  projection save/restore, all unlinked nodes and the empty render queue.
+  Original frame draw-sync submission returns. Interrupting the first callback
+  must not claim completion or leak scene bindings. Full CPU/RAM/hardware parity
+  and the independent `BUILD_TESTING=OFF` Windows runner reach the post-render
+  dependency at `0x8000CC9C`, LR `0x8000ACFC`.
+  This verifies render-state execution, not visible geometry or a complete loop.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -994,9 +1009,11 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue the original render-state callback from `0x80181E7C`,
-   LR `0x8017D180`, through the sorted kernel/camera/scene render queue toward
-   real geometry and a completed main-loop iteration.
+1. Continue the original post-render callback from `0x8000CC9C`,
+   LR `0x8000ACFC`, toward retrace wait, framebuffer exchange and a completed
+   main-loop iteration. The eight sorted kernel/camera/scene render callbacks,
+   original node cleanup and frame draw-sync submission now return, but no
+   visible geometry or displayed game frame is verified.
    The genuine relocated `wlp1.rel` prolog now executes all 28 constructors,
    followed by original scene/asset loading and 31 completed DVD reads.
    Its prolog now returns with the loader queue drained; SystemTask and all three

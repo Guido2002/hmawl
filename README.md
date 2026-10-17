@@ -148,8 +148,13 @@ original fade task; updates build the real deferred audio/camera and camera/scen
 Original audio listener orientation/inverse matrices and the camera view/orthographic
 projection execute; Screen frame preparation returns. The original kernel merges
 six render tasks with the queued camera and scene in priority order.
-With `--max-blocks 50000000`, the next untranslated render-state callback is
-`PC=0x80181E7C`, `LR=0x8017D180` (**exit code 3**, not a successful game boot).
+**All eight original scheduled render callbacks now return, followed by queue
+cleanup and frame draw-sync submission.** The connected perspective/tangent
+calculation, GX projection save/apply/restore and viewport restoration execute
+original statically translated code. This is a render-state pass, not proof of
+drawn geometry or a displayed frame.
+With `--max-blocks 50000000`, the next untranslated post-render callback is
+`PC=0x8000CC9C`, `LR=0x8000ACFC` (**exit code 3**, not a successful game boot).
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
 imports), 31 real reads totaling 8819232 bytes, original archive initialization,

@@ -1278,6 +1278,15 @@ int main(int argc, char** argv) {
                 unsigned taskPass = 0;
                 std::vector<uint32_t> deferredMethods, cleanupMethods;
                 std::vector<uint32_t> updateQueue, sceneQueue, renderQueue;
+                std::vector<uint32_t> renderMethods, renderCleanupMethods;
+                std::array<uint32_t, 7> cameraProjection{};
+                bool perspectiveChecked = false, perspectiveApplied = false, projectionRestored = false;
+                const auto readFloat = [&](uint32_t address) {
+                    const auto bits = ppc_read_u32(pcmState, address);
+                    float value;
+                    std::memcpy(&value, &bits, sizeof(value));
+                    return double(value);
+                };
                 const auto queuedObjects = [&](uint32_t list) {
                     std::vector<uint32_t> objects;
                     auto node = ppc_read_u32(pcmState, list + 4);
@@ -1326,6 +1335,57 @@ int main(int argc, char** argv) {
                     }
                     if (pc == 0x8017cf70u) {
                         renderQueue = queuedObjects(ppc_read_u32(pcmState, 0x8034923cu) + 0x48);
+                        const auto gx = ppc_read_u32(pcmState, pcmState.gpr[2] - 0x5f48u);
+                        for (unsigned index = 0; index < cameraProjection.size(); ++index)
+                            cameraProjection[index] = ppc_read_u32(pcmState, gx + 0x4d8 + index * 4);
+                    }
+                    if (pc == 0x80181ec4u) {
+                        const auto angle = float(float(readFloat(0x8034bec0u)) * float(readFloat(0x8034bb60u)));
+                        const auto radians = float(float(readFloat(0x8034bec4u)) * angle);
+                        const auto cotangent = 1.0 / std::tan(double(radians));
+                        const auto nearPlane = readFloat(0x8034bb68u), farPlane = readFloat(0x8034bb6cu);
+                        const std::array<double, 16> expected = {
+                            cotangent / readFloat(0x8034bb64u), 0, 0, 0,
+                            0, cotangent, 0, 0, 0, 0, -nearPlane / (farPlane - nearPlane),
+                            -farPlane * nearPlane / (farPlane - nearPlane), 0, 0, -1, 0};
+                        for (unsigned index = 0; index < expected.size(); ++index)
+                            Require(std::abs(readFloat(pcmState.gpr[1] + 8 + index * 4) - expected[index]) <
+                                        0.00001 * std::max(1.0, std::abs(expected[index])),
+                                    "Original tangent/perspective chain produced an incorrect projection matrix.");
+                        perspectiveChecked = true;
+                    }
+                    if (pc == 0x80181ed0u) {
+                        const auto gx = ppc_read_u32(pcmState, pcmState.gpr[2] - 0x5f48u);
+                        Require(ppc_read_u32(pcmState, gx + 0x4d8) == 0,
+                                "Original kernel did not select the perspective GX projection.");
+                        const std::array<unsigned, 6> offsets = {0, 8, 20, 24, 40, 44};
+                        for (unsigned index = 0; index < offsets.size(); ++index)
+                            Require(ppc_read_u32(pcmState, gx + 0x4dc + index * 4) ==
+                                        ppc_read_u32(pcmState, pcmState.gpr[1] + 8 + offsets[index]),
+                                    "Original kernel did not apply its computed perspective coefficients to GX.");
+                        perspectiveApplied = true;
+                    }
+                    if (pc == 0x80181f14u) {
+                        const auto gx = ppc_read_u32(pcmState, pcmState.gpr[2] - 0x5f48u);
+                        Require(readFloat(0x80315600u) == double(cameraProjection[0]),
+                                "Original kernel did not save the projection type.");
+                        for (unsigned index = 0; index < cameraProjection.size(); ++index) {
+                            Require(ppc_read_u32(pcmState, gx + 0x4d8 + index * 4) == cameraProjection[index],
+                                    "Original kernel did not restore the saved camera projection.");
+                            if (index)
+                                Require(ppc_read_u32(pcmState, 0x80315600u + index * 4) == cameraProjection[index],
+                                        "Original kernel saved incorrect projection coefficients.");
+                        }
+                        projectionRestored = true;
+                    }
+                    if (pc == 0x80235d7cu &&
+                        (pcmState.lr == 0x8017d180u || pcmState.lr == 0x8017d1e0u)) {
+                        const auto descriptor = pcmState.gpr[12];
+                        const auto vtable = ppc_read_u32(pcmState, pcmState.gpr[3] +
+                            ppc_read_u32(pcmState, descriptor) + ppc_read_u32(pcmState, descriptor + 8));
+                        auto& methods = pcmState.lr == 0x8017d180u ? renderMethods : renderCleanupMethods;
+                        Require(methods.size() < 8, "Original render callback or cleanup repeated unexpectedly.");
+                        methods.push_back(ppc_read_u32(pcmState, vtable + ppc_read_u32(pcmState, descriptor + 4)));
                     }
                     if (pc == 0x80235d7cu &&
                         (pcmState.lr == 0x8017d29cu || pcmState.lr == 0x8017d2fcu)) {
@@ -1441,13 +1501,15 @@ int main(int argc, char** argv) {
                           << " thread context returns=" << pcmState.threadContextReturns
                           << " archive handles=" << archiveHandles << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            sceneProlog != 0 && pcmResult.pc == 0x80181e7cu && pcmResult.lr == 0x8017d180u &&
+                            sceneProlog != 0 && pcmResult.pc == 0x8000cc9cu && pcmResult.lr == 0x8000acfcu &&
                             pcmResult.sceneModuleLinked && pcmResult.scenePrologEntered &&
                             pcmResult.sceneInitializationEntered && pcmResult.scenePrologReturned &&
                             pcmResult.sceneConstructorsReturned == 28 && pcmResult.systemTaskReturned &&
                             pcmResult.taskPassesReturned == 3 &&
                             pcmResult.deferredUpdatesReturned && pcmResult.deferredUpdateQueueCleared &&
                             pcmResult.screenPreparationReturned && pcmResult.renderQueuePrepared &&
+                            pcmResult.renderPassReturned && pcmResult.renderQueueCleared &&
+                            pcmResult.frameDrawSyncReturned &&
                             sceneConstructors.returned == 28 && !sceneConstructors.active &&
                             !dispatcher.Contains(sceneProlog) &&
                             pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
@@ -1523,9 +1585,18 @@ int main(int argc, char** argv) {
                         "Original deferred audio/camera callbacks did not return and unlink their queue nodes.");
                 Require(renderQueue == std::vector<uint32_t>{
                             0x80315534u, 0x80315558u, 0x8031557cu, 0x803155a0u,
-                            0x803155c4u, sceneQueue[0], 0x803155e8u, sceneQueue[1]} &&
-                            pcmResult.argument3 == renderQueue.front(),
+                            0x803155c4u, sceneQueue[0], 0x803155e8u, sceneQueue[1]},
                         "Original kernel did not merge its six render tasks with camera/scene in sorted order.");
+                Require(renderMethods == std::vector<uint32_t>{
+                            0x80181e7cu, 0x80181efcu, 0x80181f6cu, 0x80181f94u,
+                            0x80181fd4u, 0x8008660cu, 0x80182048u, 0x80154fb4u} &&
+                            renderCleanupMethods == std::vector<uint32_t>(8, 0x800094e8u) &&
+                            perspectiveChecked && perspectiveApplied && projectionRestored &&
+                            queuedObjects(tasks + 0x48).empty(),
+                        "Original sorted render pass, perspective restoration or queue cleanup did not complete.");
+                for (const auto node : renderQueue)
+                    Require(ppc_read_u32(pcmState, node) == 0 && ppc_read_u32(pcmState, node + 4) == 0,
+                            "Original render cleanup did not unlink every scheduled node.");
                 const auto listener = ppc_read_u32(pcmState, taskObjects[0][1] + 0x54) + 0x84;
                 const std::array<uint32_t, 12> listenerInverse = {
                     0xbf800000u, 0x80000000u, 0, 0x80000000u, 0x3f800000u, 0x80000000u,
@@ -1538,12 +1609,6 @@ int main(int argc, char** argv) {
                         "Original listener did not normalize its original 127-volume input to one.");
                 TestScenePlacements(image, sceneBytes);
                 const auto camera = returnedObjects.front();
-                const auto readFloat = [&](uint32_t address) {
-                    const auto bits = ppc_read_u32(pcmState, address);
-                    float value;
-                    std::memcpy(&value, &bits, sizeof(value));
-                    return double(value);
-                };
                 const auto view = ppc_read_u32(pcmState, 0x80349238u);
                 Require(ppc_read_u32(pcmState, view + 8) == camera + 0x9c &&
                             ppc_read_u8(pcmState, view + 4) == 1,
@@ -1660,6 +1725,8 @@ int main(int argc, char** argv) {
                             plainResult.systemTaskReturned && plainResult.taskPassesReturned == 3 &&
                             plainResult.deferredUpdatesReturned && plainResult.deferredUpdateQueueCleared &&
                             plainResult.screenPreparationReturned && plainResult.renderQueuePrepared &&
+                            plainResult.renderPassReturned && plainResult.renderQueueCleared &&
+                            plainResult.frameDrawSyncReturned &&
                             !dispatcher.Contains(sceneProlog) &&
                             plainResult.startupObjectsReturned == pcmResult.startupObjectsReturned &&
                             plainResult.resourceReadNotifications == pcmResult.resourceReadNotifications &&
@@ -1680,6 +1747,21 @@ int main(int argc, char** argv) {
                             !rejectedScene.sceneInitializationEntered && !rejectedScene.scenePrologReturned &&
                             !dispatcher.Contains(sceneProlog) && !failedScene.callGuest && !failedScene.callException,
                         "Scene execution failure leaked native bindings or fabricated initialization.");
+                auto interruptedRender = StartupFixture(image);
+                InstallOriginalStartupDisc(*interruptedRender, disc);
+                interruptedRender->pcm.emplace();
+                uint64_t interruptedTicks = 1000000, interruptedFrames = 0;
+                bindPcmTest(*interruptedRender, interruptedTicks, interruptedFrames);
+                const auto rejectedRender = RunOriginalStartup(dispatcher, *interruptedRender, 50000000, 128,
+                    [&](uint32_t pc) {
+                        if (pc == 0x80181e7cu) throw std::runtime_error("Injected render observer failure.");
+                    });
+                Require(rejectedRender.reason == "Injected render observer failure." &&
+                            rejectedRender.renderQueuePrepared && !rejectedRender.renderPassReturned &&
+                            !rejectedRender.renderQueueCleared && !rejectedRender.frameDrawSyncReturned &&
+                            !dispatcher.Contains(sceneProlog) &&
+                            !interruptedRender->callGuest && !interruptedRender->callException,
+                        "Interrupted original render pass fabricated completion or leaked native scene bindings.");
                 auto damagedLink = CreateOriginalStartupState(image);
                 InstallOriginalStartupDisc(damagedLink, disc);
                 damagedLink.pcm.emplace();

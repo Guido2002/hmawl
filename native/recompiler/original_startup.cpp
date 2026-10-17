@@ -178,6 +178,9 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x8000acc4u) result.deferredUpdateQueueCleared = true;
             if (pc == 0x8000acd8u) result.screenPreparationReturned = true;
             if (pc == 0x8000acdcu) result.renderQueuePrepared = true;
+            if (pc == 0x8000ace8u) result.renderPassReturned = true;
+            if (pc == 0x8000acf0u) result.renderQueueCleared = true;
+            if (pc == 0x8000acf8u) result.frameDrawSyncReturned = true;
             if (pc == 0x80177c6cu && state.gpr[3] == 1) {
                 result.sceneModuleLinked = true;
                 sceneModule = ppc_read_u32(state, state.gpr[31] + 0x70u);
@@ -265,6 +268,9 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.deferredUpdateQueueCleared) text << "Original deferred update queue cleared. ";
     if (result.screenPreparationReturned) text << "Original Screen frame preparation returned. ";
     if (result.renderQueuePrepared) text << "Original kernel prepared the sorted render queue. ";
+    if (result.renderPassReturned) text << "Original scheduled render callbacks returned. ";
+    if (result.renderQueueCleared) text << "Original render queue cleared. ";
+    if (result.frameDrawSyncReturned) text << "Original frame draw-sync submission returned. ";
     text << "This is NOT a playable game boot; no complete game-loop iteration or rendered frame is verified.";
     return text.str();
 }

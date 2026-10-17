@@ -51,6 +51,9 @@ struct OriginalStartupResult {
     bool deferredUpdateQueueCleared = false;
     bool screenPreparationReturned = false;
     bool renderQueuePrepared = false;
+    bool renderPassReturned = false;
+    bool renderQueueCleared = false;
+    bool frameDrawSyncReturned = false;
     uint32_t sceneConstructorsReturned = 0;
     uint32_t constructorsReturned = 0;
     uint32_t startupObjectsReturned = 0;

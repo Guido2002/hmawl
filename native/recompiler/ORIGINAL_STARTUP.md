@@ -223,8 +223,9 @@ executes all 28 module constructors and enters mode-41 scene initialization.
 Manager initialization, resource loading and SystemTask now return. All three
 original task-list passes execute, including the first scene/asset update and
 fade registration. Deferred audio/camera updates, queue cleanup and Screen frame
-preparation now return. The kernel schedules its original render tasks; the next
-dependency is its first render-state callback at `0x80181E7C`, LR `0x8017D180`.
+preparation now return. The kernel schedules its original render tasks; all eight
+render callbacks, render queue cleanup and frame draw-sync submission now return.
+The next dependency is the post-render callback at `0x8000CC9C`, LR `0x8000ACFC`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -400,8 +401,9 @@ SystemTask now loads and links `wlp1.rel` through the original SDK `OSLink`.
 The relocated prolog executes its 28 constructors, loads scene assets and returns.
 SystemTask and the three original task-list passes now return. Deferred
 audio/camera updates, queue cleanup, Screen frame preparation and kernel render
-scheduling return. The next untranslated render-state callback is
-`PC=0x80181E7C`, LR `0x8017D180`;
+scheduling return. All eight scheduled render callbacks, render queue cleanup and
+frame draw-sync submission return. The next untranslated post-render callback is
+`PC=0x8000CC9C`, LR `0x8000ACFC`;
 DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier.
 Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
@@ -519,10 +521,23 @@ that projection coefficients match the original 640x448 bounds and depth planes.
 Original cleanup invokes both node callbacks, unlinks the nodes and empties the
 update queue. Screen's draw-sync check and frame preparation return.
 The original kernel inserts six render-state tasks; tests verify all eight resulting
-entries, including camera and scene, in exact sorted order. The first original
-render-state callback is the next untranslated dependency:
-`0x80181E7C`, LR `0x8017D180`. No completed render pass, main-loop iteration
-or rendered scene is verified. No runtime PPC decoder or
+entries, including camera and scene, in exact sorted order.
+All eight original callbacks now execute, followed by eight original node-cleanup
+callbacks. The six kernel callbacks apply alpha/blend/depth state, compute a
+perspective matrix through the original tangent function (`0x8023DC28`), save and
+restore the previous GX projection and restore the viewport. The camera callback
+uses its original virtual dispatch; the scene-manager callback returns zero in the
+original game code. No host tangent or replacement draw callback is substituted.
+The fixture independently verifies every perspective matrix coefficient against
+the original inputs, its six GX coefficients and perspective type, exact saved and
+restored orthographic coefficients, ordered callback targets, all node links
+cleared and an empty render queue. Injecting a failure at the first callback must
+leave render completion, cleanup and draw-sync markers false and release native
+scene bindings. Observed and unobserved CPU/RAM/interrupt/PCM/DSP states still match.
+The original frame draw-sync submission returns at `0x8000ACF8`; execution next
+needs the post-render callback at `0x8000CC9C`, LR `0x8000ACFC`.
+This completes the scheduled render-state pass, not a main-loop iteration or
+rendered scene. No runtime PPC decoder or
 replacement linker is involved in the original startup path.
 An independent `BUILD_TESTING=OFF` Windows build reaches the same dependency;
 production execution does not depend on the test generator or fixture bindings.
