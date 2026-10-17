@@ -256,8 +256,9 @@ poisoning excludes the two zero constants that hardware reads before BSS clear.
 Tests check BSS, stack linkage, DB interface/verbose globals and the physical
 exception destination installed by `DBInit`. OS services, floating-point
 arithmetic/rounding conversions, MSR-dependent exception handling and full paired-single support,
-GX, audio and dynamic REL runtime integration are still missing. Unmapped addresses, including
-MMIO, throw rather than being silently treated as RAM.
+GX, audio and dynamic REL runtime integration are still missing. Unmapped addresses,
+including MMIO other than explicitly enabled register support below, throw
+rather than being silently treated as RAM.
 
 Continuing that verified state, an independent original `OSInit` prefix now
 sets `AreWeInitialized`, calls the original `__OSGetSystemTime`, records
@@ -348,15 +349,27 @@ native translations, or connect the SDK module list to the existing host linker.
 Original `__OSInterruptInit` now runs independently and from the saved
 entry-derived OSInit state through its RAM setup: it installs the handler-table
 pointer, clears all 32 handler slots and resets the two software mask words.
-It then explicitly rejects the PI interrupt-mask write at `0x801b3b08`
+Without optional PI support it explicitly rejects the interrupt-mask write at `0x801b3b08`
 (`0xcc003004`); its stack frame remains active, so this is not a completed call.
 Tests verify exact RAM/stack writes, poisoned tables, both interrupt states and
 repeated rejection without RAM changes. Original interrupt-handler accessors
 are tested across all 32 slots, cached/uncached table aliases, null handlers,
 previous-handler returns and signed low-halfword index behavior. These SDK
 accessors do not validate indices; native memory bounds checks still apply.
-PI/device interrupt masks, interrupt dispatch and hardware delivery remain
+General device interrupt masks, interrupt dispatch and hardware delivery remain
 unimplemented. The completed OSInit prefix still ends at `0x801b0f6c`.
+
+Optional PI mask storage now accepts the original bootstrap write `0xf0` and
+32-bit readback at exactly `0xcc003004`. It is disabled by default; other values,
+widths, unaligned/neighboring addresses and unsupported aliases remain errors.
+It retains device state rather than restoring it with DVD callback CPU context,
+including after cancellation or a throwing callback. It does not implement
+interrupt causes, event sources or delivery, and is not a general PI model.
+With this enabled, original `__OSMaskInterrupts`/`SetInterruptMask` execute through
+the software-mask update and then reject the MI mask write at `0x801b3be0`
+(`0xcc00401c`). Tests check exact RAM/stack changes independently and from the
+entry-derived state. New compiled `andc` supports this path, with record/SO,
+source/destination alias and XER-preservation tests.
 
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings

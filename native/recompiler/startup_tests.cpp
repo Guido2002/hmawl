@@ -1108,6 +1108,69 @@ void TestOriginalInterruptTableInitialization(const DolImage& image) {
                  "(0xcc003004). The saved frame remains active; initialization has not returned.\n";
 }
 
+void RunInterruptPiSetupToMi(PpcState& state) {
+    const uint32_t stack = state.gpr[1];
+    auto expected = state;
+    ExpectInterruptTableInitialization(expected, stack, state.lr);
+    ppc_write_u32(expected, stack - 0xcu, 0x801b3b10u);
+    ppc_write_u32(expected, stack - 0x30u, stack - 0x10u);
+    ppc_write_u32(expected, stack - 0x18u, state.gpr[30]);
+    ppc_write_u32(expected, stack - 0x1cu, state.gpr[29]);
+    ppc_write_u32(expected, 0x800000c4u, 0xffffffe0u);
+    unsigned calls = 0;
+    state.callGuest = [&](uint32_t address, PpcState& guest) {
+        Require(++calls < 10, "PI startup exceeded its dependency budget.");
+        switch (address) {
+        case 0x800054e4u: ppc_800054E4(guest); break;
+        case 0x80005514u: ppc_80005514(guest); break;
+        case 0x801b3e0cu:
+            Require(ppc_read_u32(guest, 0xcc003004u) == 0xf0u,
+                    "Original interrupt initialization did not write the PI startup mask.");
+            ppc_801B3E0C(guest);
+            break;
+        case 0x801b3a44u: ppc_801B3A44(guest); break;
+        case 0x801b3b34u: ppc_801B3B34(guest); break;
+        default:
+            throw std::runtime_error("Unexpected PI startup dependency: " +
+                                     std::to_string(address));
+        }
+    };
+    bool rejected = false;
+    try {
+        ppc_801B3AC0(state);
+    } catch (const std::out_of_range& error) {
+        rejected = std::string(error.what()).find("not mapped to GameCube RAM") != std::string::npos;
+    }
+    Require(rejected && calls == 5 && state.piInterruptMask == 0xf0u &&
+                ppc_read_u32(state, 0x800000c4u) == 0xffffffe0u &&
+                ppc_read_u32(state, 0x800000c8u) == 0 &&
+                state.gpr[4] == 0xcc004000u && state.gpr[0] == 0 &&
+                !state.externalInterruptsEnabled &&
+                state.gpr[1] == stack - 0x30u &&
+                state.memory == expected.memory &&
+                state.fpr == expected.fpr && state.fpscr == expected.fpscr &&
+                state.gqr == expected.gqr && state.msr == expected.msr &&
+                state.hid0 == expected.hid0 && state.hid2 == expected.hid2 &&
+                state.l2cr == expected.l2cr &&
+                state.performanceMonitor == expected.performanceMonitor,
+            "PI-backed startup did not reach the unsupported MI mask write with original state.");
+    state.callGuest = {};
+}
+
+void TestOriginalInterruptPiSetup(const DolImage& image) {
+    for (bool interrupts : {false, true}) {
+        auto state = image.CreateGameCubeState();
+        ppc_800032B0(state);
+        state.lr = 0x801b0f70u;
+        state.externalInterruptsEnabled = interrupts;
+        state.piInterruptMask = 0;
+        RunInterruptPiSetupToMi(state);
+    }
+    std::cout << "Opt-in PI mask register accepts original 0xf0 startup write; original "
+                 "__OSMaskInterrupts/SetInterruptMask then reject MI write at 0x801b3be0 "
+                 "(0xcc00401c). No device interrupts are delivered.\n";
+}
+
 void TestOriginalInterruptHandlerAccessors(const DolImage& image) {
     for (bool interrupts : {false, true}) {
         auto state = image.CreateGameCubeState();
@@ -1374,6 +1437,12 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
             "Entry-derived interrupt prefix changed RAM outside its exact initialization writes.");
     std::cout << "Entry-derived state continues into original interrupt table/mask reset, "
                  "then rejects PI MMIO at 0x801b3b08; OSInit has not returned.\n";
+    state = firstTime;
+    state.lr = 0x801b0f70u;
+    state.piInterruptMask = 0;
+    RunInterruptPiSetupToMi(state);
+    std::cout << "With opt-in PI mask state, entry-derived interrupt initialization reaches "
+                 "the unsupported MI mask write at 0x801b3be0; OSInit remains incomplete.\n";
 }
 
 void TestOriginalArenaAccessors(const DolImage& image) {
@@ -1688,6 +1757,7 @@ int main(int argc, char** argv) {
         TestOriginalModuleInitialization(image);
         TestOriginalInterruptTableInitialization(image);
         TestOriginalInterruptHandlerAccessors(image);
+        TestOriginalInterruptPiSetup(image);
         TestOriginalCacheRanges(image);
         TestOriginalBootInfoAndArena(image);
         TestStartupHelpers(image);

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -44,6 +45,8 @@ struct PpcState {
     std::function<uint64_t()> readTimeBase;
     std::function<void(PpcState&)> submitDvdRead;
     std::function<void(PpcState&)> cancelDvdRead;
+    // Device state is opt-in and is not restored with DVD callback CPU context.
+    std::optional<uint32_t> piInterruptMask;
     bool externalInterruptsEnabled = true;
 };
 
@@ -130,6 +133,10 @@ inline void ppc_flush_cache_block(const PpcState& state, uint32_t address) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003004u &&
+        state.piInterruptMask.has_value()) {
+        return *state.piInterruptMask;
+    }
     const size_t offset = ppc_memory_offset(state, address, sizeof(uint32_t));
     return (static_cast<uint32_t>(state.memory[offset]) << 24) |
            (static_cast<uint32_t>(state.memory[offset + 1]) << 16) |
@@ -181,6 +188,14 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003004u &&
+        state.piInterruptMask.has_value()) {
+        if (value != 0xf0u) {
+            throw std::runtime_error("Unsupported PI interrupt mask write (only startup mask 0xf0 supported).");
+        }
+        *state.piInterruptMask = value;
+        return;
+    }
     const size_t offset = ppc_memory_offset(state, address, sizeof(uint32_t));
     state.memory[offset] = static_cast<uint8_t>(value >> 24);
     state.memory[offset + 1] = static_cast<uint8_t>(value >> 16);

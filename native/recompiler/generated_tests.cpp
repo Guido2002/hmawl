@@ -855,6 +855,141 @@ void TestCacheBlockInstructions() {
     }
 }
 
+void TestAndComplement() {
+    const auto functions = {ppc_0000B300, ppc_0000B310, ppc_0000B320,
+                            ppc_0000B330, ppc_0000B340, ppc_0000B350};
+    unsigned index = 0;
+    for (auto function : functions) {
+        const unsigned destination = index % 3 == 0 ? 4 : index % 3 == 1 ? 3 : 5;
+        for (uint32_t left : {0u, 1u, 0x80000000u, 0x55555555u, UINT32_MAX}) {
+            for (uint32_t right : {0u, 1u, 0x80000000u, 0xaaaaaaaau, UINT32_MAX}) {
+                for (uint32_t xer : {0u, 0xe0000000u}) {
+                    PpcState state;
+                    state.gpr[3] = left;
+                    state.gpr[4] = 0x12345678u;
+                    state.gpr[5] = right;
+                    state.cr = 0x12345678u;
+                    state.xer = xer;
+                    const auto before = state;
+                    function(state);
+                    const uint32_t result = left & ~right;
+                    const uint32_t flags = (result == 0 ? 2u :
+                        (result & 0x80000000u) != 0 ? 8u : 4u) | (xer >> 31);
+                    Require(state.gpr[destination] == result && state.xer == xer &&
+                                state.cr == (index < 3 ? before.cr :
+                                    (before.cr & 0x0fffffffu) | (flags << 28)) &&
+                                state.pc == 0xb304u + index * 16,
+                            "Compiled andc failed aliasing, CR0/SO, XER or PC.");
+                    for (unsigned reg = 0; reg < 32; ++reg) {
+                        if (reg == destination) continue;
+                        Require(state.gpr[reg] == before.gpr[reg],
+                                "Compiled andc changed an unrelated register.");
+                    }
+                }
+            }
+        }
+        ++index;
+    }
+}
+
+void TestPiInterruptMask() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    state.gpr[4] = 0xcc003004u;
+    state.gpr[3] = 0xf0u;
+    const auto ram = state.memory;
+    bool rejected = false;
+    try {
+        ppc_0000B210(state);
+    } catch (const std::out_of_range&) {
+        rejected = true;
+    }
+    Require(rejected && !state.piInterruptMask.has_value() && state.memory == ram,
+            "PI register was enabled implicitly.");
+    state.piInterruptMask = 0;
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    state.fpscr = 4;
+    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+        state.gpr[3] = 0xf0u;
+        ppc_0000B210(state);
+        Require(*state.piInterruptMask == 0xf0u && state.pc == 0xb214u,
+                "Compiled PI startup write did not persist.");
+        state.gpr[3] = 0;
+        ppc_0000B200(state);
+        Require(state.gpr[3] == 0xf0u && state.pc == 0xb204u &&
+                    state.memory == ram && state.cr == 0x12345678u &&
+                    state.xer == 0xe0000000u && state.fpscr == 4,
+                "Compiled PI readback changed RAM or CPU status.");
+    }
+    for (uint32_t value : {0u, 1u, 0xefu, 0xf1u, UINT32_MAX}) {
+        state.gpr[3] = value;
+        rejected = false;
+        try {
+            ppc_0000B210(state);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("only startup mask") != std::string::npos;
+        }
+        Require(rejected && *state.piInterruptMask == 0xf0u && state.memory == ram,
+                "Unsupported PI mask value mutated device state or RAM.");
+    }
+    for (uint32_t address : {0xcc003000u, 0xcc003005u, 0xcc003008u,
+                              0x0c003004u, 0xcc00401cu}) {
+        state.gpr[4] = address;
+        for (auto operation : {ppc_0000B200, ppc_0000B210}) {
+            rejected = false;
+            try {
+                operation(state);
+            } catch (const std::out_of_range&) {
+                rejected = true;
+            }
+            Require(rejected && *state.piInterruptMask == 0xf0u && state.memory == ram,
+                    "Unknown or unaligned PI/device address was accepted.");
+        }
+    }
+    for (unsigned width : {1u, 2u, 8u}) {
+        for (bool write : {false, true}) {
+            rejected = false;
+            try {
+                if (write) {
+                    if (width == 1) ppc_write_u8(state, 0xcc003004u, 0xf0);
+                    else if (width == 2) ppc_write_u16(state, 0xcc003004u, 0xf0);
+                    else ppc_write_u64(state, 0xcc003004u, 0xf0);
+                } else {
+                    if (width == 1) (void)ppc_read_u8(state, 0xcc003004u);
+                    else if (width == 2) (void)ppc_read_u16(state, 0xcc003004u);
+                    else (void)ppc_read_u64(state, 0xcc003004u);
+                }
+            } catch (const std::out_of_range&) {
+                rejected = true;
+            }
+            Require(rejected && *state.piInterruptMask == 0xf0u && state.memory == ram,
+                    "Unsupported PI access width bypassed register checks.");
+        }
+    }
+    state.gpr[4] = 0x80001000u;
+    state.gpr[3] = 0x12345678u;
+    ppc_0000B210(state);
+    ppc_0000B200(state);
+    Require(state.gpr[3] == 0x12345678u && *state.piInterruptMask == 0xf0u,
+            "PI register support changed ordinary RAM access.");
+    state.piInterruptMask.reset();
+    rejected = false;
+    try {
+        (void)ppc_read_u32(state, 0xcc003004u);
+    } catch (const std::out_of_range&) {
+        rejected = true;
+    }
+    Require(rejected, "Disabling PI support left a readable register.");
+    state.memoryMap = PpcMemoryMap::Flat;
+    state.memory.resize(64);
+    state.piInterruptMask = 0xf0u;
+    ppc_write_u32(state, 4, 0x11223344u);
+    Require(ppc_read_u32(state, 4) == 0x11223344u && *state.piInterruptMask == 0xf0u,
+            "PI option changed flat-memory semantics.");
+}
+
 void TestCacheControlRegisters() {
     PpcState state;
     state.memory.resize(64, 0xa5);
@@ -1559,6 +1694,8 @@ int main() {
         TestIndexedPairedAddresses();
         TestHardwareControlRegisters();
         TestCacheControlRegisters();
+        TestPiInterruptMask();
+        TestAndComplement();
         TestCacheBlockInstructions();
         TestL2ControlRegisters();
         TestRegisterAddCarry();

@@ -274,6 +274,15 @@ queue. Full runtime scheduling and device services are still needed.
   aliases, null/previous handlers and signed low-halfword selectors, preserving
   the SDK's unchecked indexing and existing native memory bounds checks.
   PI/device masks, interrupt dispatch and delivery still need native support.
+- [x] Add opt-in bootstrap PI mask state at exactly `0xcc003004`, supporting
+  only the original `0xf0` write and 32-bit readback. Reject other values,
+  widths/addresses and retain default unmapped behavior without opt-in.
+  Device writes persist through DVD completion/cancellation/throwing callbacks,
+  unlike saved CPU context. This is not interrupt delivery or a general PI model.
+  Compile `andc` with record/SO and alias tests; run original `__OSMaskInterrupts`
+  and `SetInterruptMask` through the software-mask update to the unsupported
+  MI mask write (`0x801b3be0`, `0xcc00401c`), independently and from the saved
+  entry-derived state. Verify exact RAM/stack changes; OSInit remains incomplete.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic

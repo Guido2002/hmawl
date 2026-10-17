@@ -691,8 +691,10 @@ std::string RecompileFunction(uint32_t address,
                              std::to_string(rt) + "] << (" + right + " & 31u)";
                 break;
             case 28:
+            case 60:
                 destination = ra;
-                expression = "state.gpr[" + std::to_string(rt) + "] & " + right;
+                expression = "state.gpr[" + std::to_string(rt) + "] & " +
+                    (extendedOpcode == 60 ? "~" : "") + right;
                 break;
             case 599:
             case 631:

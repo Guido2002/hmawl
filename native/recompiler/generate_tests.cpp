@@ -324,6 +324,7 @@ int main(int argc, char** argv) {
                 {0x801b3a90u, 0x1c}, {0x801b3aacu, 0x14},
                 {0x801b3ac0u, 0x74},
                 {0x801b3b08u, 4},
+                {0x801b3b34u, 0x2d8}, {0x801b3e0cu, 0x88},
                 {0x801b6988u, 0x64},
                 {0x801b1618u, 0x58}, {0x801b147cu, 0x14},
                 {0x801b5550u, 0x84},
@@ -363,6 +364,14 @@ int main(int argc, char** argv) {
             Emit(output, 0xb110, {XForm(0, 4, 3, 86)});
             Emit(output, 0xb120, {XForm(0, 0, 3, 982)});
             Emit(output, 0xb130, {XForm(0, 4, 3, 982)});
+            Emit(output, 0xb200, {0x80640000u});
+            Emit(output, 0xb210, {0x90640000u});
+            for (unsigned record = 0; record < 2; ++record) {
+                for (unsigned alias = 0; alias < 3; ++alias) {
+                    Emit(output, 0xb300u + (record * 3 + alias) * 16u,
+                         {XForm(3, alias == 0 ? 4 : alias == 1 ? 3 : 5, 5, 60, record != 0)});
+                }
+            }
             unsigned monitor = 0;
             for (unsigned spr : {952u, 956u, 953u, 954u, 957u, 958u}) {
                 Emit(output, 0xb000u + monitor++ * 16u, {
