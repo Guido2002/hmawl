@@ -1108,7 +1108,7 @@ void TestOriginalInterruptTableInitialization(const DolImage& image) {
                  "(0xcc003004). The saved frame remains active; initialization has not returned.\n";
 }
 
-void RunInterruptPiSetupToMi(PpcState& state) {
+void RunInterruptPiSetupToDevice(PpcState& state) {
     const uint32_t stack = state.gpr[1];
     auto expected = state;
     ExpectInterruptTableInitialization(expected, stack, state.lr);
@@ -1141,10 +1141,13 @@ void RunInterruptPiSetupToMi(PpcState& state) {
     } catch (const std::out_of_range& error) {
         rejected = std::string(error.what()).find("not mapped to GameCube RAM") != std::string::npos;
     }
-    Require(rejected && calls == 5 && state.piInterruptMask == 0xf0u &&
+    const bool miEnabled = state.miInterruptMask.has_value();
+    Require(rejected && calls == (miEnabled ? 6u : 5u) && state.piInterruptMask == 0xf0u &&
                 ppc_read_u32(state, 0x800000c4u) == 0xffffffe0u &&
                 ppc_read_u32(state, 0x800000c8u) == 0 &&
-                state.gpr[4] == 0xcc004000u && state.gpr[0] == 0 &&
+                (miEnabled ? state.miInterruptMask == 0 &&
+                    state.gpr[5] == 0xcc00500au && state.gpr[0] == 0x04000000u :
+                    state.gpr[4] == 0xcc004000u && state.gpr[0] == 0) &&
                 !state.externalInterruptsEnabled &&
                 state.gpr[1] == stack - 0x30u &&
                 state.memory == expected.memory &&
@@ -1153,7 +1156,7 @@ void RunInterruptPiSetupToMi(PpcState& state) {
                 state.hid0 == expected.hid0 && state.hid2 == expected.hid2 &&
                 state.l2cr == expected.l2cr &&
                 state.performanceMonitor == expected.performanceMonitor,
-            "PI-backed startup did not reach the unsupported MI mask write with original state.");
+            "PI/MI-backed startup did not reach the next unsupported device access with original state.");
     state.callGuest = {};
 }
 
@@ -1164,11 +1167,20 @@ void TestOriginalInterruptPiSetup(const DolImage& image) {
         state.lr = 0x801b0f70u;
         state.externalInterruptsEnabled = interrupts;
         state.piInterruptMask = 0;
-        RunInterruptPiSetupToMi(state);
+        const auto before = state;
+        RunInterruptPiSetupToDevice(state);
+        for (uint16_t mask : {uint16_t{0}, uint16_t{0x1f}, uint16_t{0xffff}}) {
+            state = before;
+            state.miInterruptMask = mask;
+            RunInterruptPiSetupToDevice(state);
+        }
     }
     std::cout << "Opt-in PI mask register accepts original 0xf0 startup write; original "
                  "__OSMaskInterrupts/SetInterruptMask then reject MI write at 0x801b3be0 "
                  "(0xcc00401c). No device interrupts are delivered.\n";
+    std::cout << "With opt-in MI mask state, original masking clears MI enables and reaches "
+                 "unsupported DSP control read at 0x801b3bfc (0xcc00500a). "
+                 "Interrupt initialization has not returned.\n";
 }
 
 void TestOriginalInterruptHandlerAccessors(const DolImage& image) {
@@ -1440,9 +1452,16 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     state = firstTime;
     state.lr = 0x801b0f70u;
     state.piInterruptMask = 0;
-    RunInterruptPiSetupToMi(state);
+    RunInterruptPiSetupToDevice(state);
     std::cout << "With opt-in PI mask state, entry-derived interrupt initialization reaches "
                  "the unsupported MI mask write at 0x801b3be0; OSInit remains incomplete.\n";
+    state = firstTime;
+    state.lr = 0x801b0f70u;
+    state.piInterruptMask = 0;
+    state.miInterruptMask = 0x1fu;
+    RunInterruptPiSetupToDevice(state);
+    std::cout << "With opt-in PI/MI state, entry-derived setup reaches unsupported DSP "
+                 "control read at 0x801b3bfc; OSInit remains incomplete.\n";
 }
 
 void TestOriginalArenaAccessors(const DolImage& image) {

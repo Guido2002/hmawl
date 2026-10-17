@@ -892,6 +892,108 @@ void TestAndComplement() {
     }
 }
 
+void TestMiInterruptMask() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    state.gpr[4] = 0xcc00401cu;
+    const auto ram = state.memory;
+    for (auto operation : {ppc_0000B220, ppc_0000B230}) {
+        bool rejected = false;
+        try {
+            operation(state);
+        } catch (const std::out_of_range&) {
+            rejected = true;
+        }
+        Require(rejected && !state.miInterruptMask.has_value() && state.memory == ram,
+                "MI register was enabled implicitly.");
+    }
+    state.miInterruptMask = 0x1fu;
+    ppc_0000B220(state);
+    Require(state.gpr[3] == 0x1fu && state.pc == 0xb224u,
+            "Compiled MI read did not return the supplied mask.");
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    state.fpscr = 4;
+    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+        state.gpr[3] = 0xffff0000u; // sth transfers only the low halfword.
+        ppc_0000B230(state);
+        Require(state.miInterruptMask == 0 && state.pc == 0xb234u,
+                "Compiled MI reset failed or ignored halfword truncation.");
+        state.gpr[3] = UINT32_MAX;
+        ppc_0000B220(state);
+        Require(state.gpr[3] == 0 && state.memory == ram &&
+                    state.cr == 0x12345678u && state.xer == 0xe0000000u && state.fpscr == 4,
+                "MI readback changed RAM or CPU status.");
+    }
+    for (unsigned bit = 0; bit < 16; ++bit) {
+        state.gpr[3] = 1u << bit;
+        state.pc = 0xb230u;
+        bool rejected = false;
+        try {
+            ppc_0000B230(state);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("only zero reset") != std::string::npos;
+        }
+        Require(rejected && state.miInterruptMask == 0 && state.memory == ram &&
+                    state.pc == 0xb230u && state.gpr[3] == (1u << bit),
+                "Unsupported MI mask mutated device state, RAM, PC or source.");
+    }
+    for (uint32_t address : {0xcc00401bu, 0xcc00401du, 0xcc00401eu,
+                              0x0c00401cu, 0xcc00500au}) {
+        state.gpr[4] = address;
+        for (auto operation : {ppc_0000B220, ppc_0000B230}) {
+            bool rejected = false;
+            try {
+                operation(state);
+            } catch (const std::out_of_range&) {
+                rejected = true;
+            }
+            Require(rejected && state.miInterruptMask == 0 && state.memory == ram,
+                    "Neighboring, unaligned or unsupported MI/device address was accepted.");
+        }
+    }
+    for (unsigned width : {1u, 4u, 8u}) {
+        for (bool write : {false, true}) {
+            bool rejected = false;
+            try {
+                if (write) {
+                    if (width == 1) ppc_write_u8(state, 0xcc00401cu, 0);
+                    else if (width == 4) ppc_write_u32(state, 0xcc00401cu, 0);
+                    else ppc_write_u64(state, 0xcc00401cu, 0);
+                } else {
+                    if (width == 1) (void)ppc_read_u8(state, 0xcc00401cu);
+                    else if (width == 4) (void)ppc_read_u32(state, 0xcc00401cu);
+                    else (void)ppc_read_u64(state, 0xcc00401cu);
+                }
+            } catch (const std::out_of_range&) {
+                rejected = true;
+            }
+            Require(rejected && state.miInterruptMask == 0 && state.memory == ram,
+                    "Unsupported MI access width bypassed register checks.");
+        }
+    }
+    state.gpr[4] = 0xc0001000u;
+    state.gpr[3] = 0x1234u;
+    ppc_0000B230(state);
+    ppc_0000B220(state);
+    Require(state.gpr[3] == 0x1234u && state.miInterruptMask == 0,
+            "MI support changed ordinary halfword RAM access.");
+    state.miInterruptMask.reset();
+    bool rejected = false;
+    try {
+        (void)ppc_read_u16(state, 0xcc00401cu);
+    } catch (const std::out_of_range&) {
+        rejected = true;
+    }
+    Require(rejected, "Disabling MI support left a readable register.");
+    state.memoryMap = PpcMemoryMap::Flat;
+    state.miInterruptMask = 0x1fu;
+    ppc_write_u16(state, 4, 0x1234u);
+    Require(ppc_read_u16(state, 4) == 0x1234u && state.miInterruptMask == 0x1fu,
+            "MI option changed flat-memory semantics.");
+}
+
 void TestPiInterruptMask() {
     PpcState state;
     state.memoryMap = PpcMemoryMap::GameCubeRam;
@@ -1695,6 +1797,7 @@ int main() {
         TestHardwareControlRegisters();
         TestCacheControlRegisters();
         TestPiInterruptMask();
+        TestMiInterruptMask();
         TestAndComplement();
         TestCacheBlockInstructions();
         TestL2ControlRegisters();

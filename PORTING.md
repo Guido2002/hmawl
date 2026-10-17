@@ -283,6 +283,16 @@ queue. Full runtime scheduling and device services are still needed.
   and `SetInterruptMask` through the software-mask update to the unsupported
   MI mask write (`0x801b3be0`, `0xcc00401c`), independently and from the saved
   entry-derived state. Verify exact RAM/stack changes; OSInit remains incomplete.
+- [x] Add opt-in MI mask state at exactly `0xcc00401c`, supporting only the
+  original 16-bit zero reset and readback. Reject nonzero writes without
+  mutation, unsupported widths/addresses/aliases and accesses without opt-in.
+  Check compiled `lhz`/`sth`, halfword truncation, repeated resets, all nonzero
+  single-bit writes and unchanged RAM/status. MI writes persist through DVD
+  completion/cancellation/throwing callbacks. Original interrupt setup now
+  clears zero/poisoned MI masks and reaches the unsupported DSP control read
+  (`0x801b3bfc`, `0xcc00500a`), with both interrupt states and exact RAM/stack
+  guards; also verify entry-derived continuation. No interrupt delivery or
+  complete MI/DSP backend; OSInit still has not returned.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic

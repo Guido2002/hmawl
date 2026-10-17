@@ -47,6 +47,7 @@ struct PpcState {
     std::function<void(PpcState&)> cancelDvdRead;
     // Device state is opt-in and is not restored with DVD callback CPU context.
     std::optional<uint32_t> piInterruptMask;
+    std::optional<uint16_t> miInterruptMask;
     bool externalInterruptsEnabled = true;
 };
 
@@ -181,6 +182,10 @@ inline void ppc_write_u64(PpcState& state, uint32_t address, uint64_t value) {
 }
 
 inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00401cu &&
+        state.miInterruptMask.has_value()) {
+        return *state.miInterruptMask;
+    }
     const size_t offset = ppc_memory_offset(state, address, sizeof(uint16_t));
     return static_cast<uint16_t>(
         (static_cast<uint16_t>(state.memory[offset]) << 8) |
@@ -204,6 +209,14 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
 }
 
 inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00401cu &&
+        state.miInterruptMask.has_value()) {
+        if (value != 0) {
+            throw std::runtime_error("Unsupported MI interrupt mask write (only zero reset supported).");
+        }
+        *state.miInterruptMask = value;
+        return;
+    }
     const size_t offset = ppc_memory_offset(state, address, sizeof(uint16_t));
     state.memory[offset] = static_cast<uint8_t>(value >> 8);
     state.memory[offset + 1] = static_cast<uint8_t>(value);

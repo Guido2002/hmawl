@@ -366,6 +366,8 @@ int main(int argc, char** argv) {
             Emit(output, 0xb130, {XForm(0, 4, 3, 982)});
             Emit(output, 0xb200, {0x80640000u});
             Emit(output, 0xb210, {0x90640000u});
+            Emit(output, 0xb220, {0xa0640000u});
+            Emit(output, 0xb230, {0xb0640000u});
             for (unsigned record = 0; record < 2; ++record) {
                 for (unsigned alias = 0; alias < 3; ++alias) {
                     Emit(output, 0xb300u + (record * 3 + alias) * 16u,

@@ -371,6 +371,18 @@ the software-mask update and then reject the MI mask write at `0x801b3be0`
 entry-derived state. New compiled `andc` supports this path, with record/SO,
 source/destination alias and XER-preservation tests.
 
+Optional MI mask storage supports the original 16-bit zero reset and readback
+at exactly `0xcc00401c`. It is disabled by default, rejects nonzero writes
+before mutation and does not enable interrupt sources or delivery. Other access
+widths, neighboring/unaligned addresses and physical aliases remain unmapped.
+Like PI state, MI device writes persist through DVD completion, cancellation and
+throwing callbacks rather than being restored with CPU context.
+With both options enabled, original interrupt initialization clears MI mask
+state and reaches the next unsupported DSP control read at `0x801b3bfc`
+(`0xcc00500a`). Tests cover zero/poisoned initial masks, both interrupt states,
+exact RAM/stack writes and continuation from the saved entry-derived state.
+The interrupt call has not returned; the completed OSInit prefix is unchanged.
+
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings
 and do not suppress dispatch code-word checks. Original `DCFlushRangeNoSync`
