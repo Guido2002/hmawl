@@ -90,6 +90,7 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
                             0x801cb0c8u, 0x801cb1c4u, 0x801c1b44u, 0x801c3f64u,
                             0x801f2b60u, 0x801f2b70u,
                             0x801c1bc0u, 0x801f2ab8u, 0x801f0df4u,
+                            0x801f3438u,
                             0x801c20ecu, 0x801c3a5cu,
                             0x801f1decu,
                             0x8018101cu,
@@ -203,6 +204,7 @@ int main(int argc, char** argv) {
         }
         std::vector<uint16_t> taskCommands;
         for (unsigned i = 0; i < 19; ++i) taskCommands.push_back(taskProgram.at(0xaff + i));
+        for (unsigned i = 0; i < 4; ++i) taskCommands.push_back(taskProgram.at(0xc8d + i));
         functions << RecompileDspTask(taskProgram, 0x10, "OriginalDspAudioTask", taskCommands);
         functions << "static void ValidateOriginalDspAudioTask(const PpcState& state, "
                      "uint32_t source, uint16_t destination, uint16_t bytes, uint16_t entry) {\n"

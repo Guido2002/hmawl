@@ -6,6 +6,7 @@
 #include "native_si_bus.h"
 #include "native_sram.h"
 #include "dsp_init_recompiler.h"
+#include "ppc_recompiler.h"
 
 #include <algorithm>
 #include <cfenv>
@@ -1810,6 +1811,81 @@ void TestCompiledDspTask() {
     Reject([&] { NativeDspAdvanceTask(nonlinear); }, "linear addressing");
     Require(nonlinear.dspHardware->task->registers == nonlinearRegisters,
             "Unsupported parallel addressing changed the accumulator before failing.");
+    auto buffers = stateFor(SyntheticBufferWords);
+    buffers.memory.assign(512, 0xa5);
+    buffers.executeDspTask = SyntheticDspBuffers;
+    std::array<int64_t, 96> sums{};
+    const std::array<int32_t, 8> values = {INT32_MIN, INT32_MAX, -1, 0, 1, 0x12345678, -1234567, 32768};
+    for (unsigned i = 0; i < sums.size(); ++i) {
+        const auto left = values[i % values.size()], right = values[(i / values.size()) % values.size()];
+        sums[i] = int64_t(left) + right;
+        buffers.dspHardware->dataRam[0x100 + 2 * i] = static_cast<uint16_t>(uint32_t(left) >> 16);
+        buffers.dspHardware->dataRam[0x101 + 2 * i] = static_cast<uint16_t>(left);
+        buffers.dspHardware->dataRam[0x500 + 2 * i] = static_cast<uint16_t>(uint32_t(right) >> 16);
+        buffers.dspHardware->dataRam[0x501 + 2 * i] = static_cast<uint16_t>(right);
+    }
+    NativeDspAdvanceTask(buffers);
+    Require(!buffers.dspHardware->programHalted && buffers.dspHardware->task->dataTransfers == 0,
+            "DSP buffer processing failed to yield before its actual output DMA.");
+    for (unsigned i = 0; i < 8 && !buffers.dspHardware->programHalted; ++i) NativeDspAdvanceTask(buffers);
+    Require(buffers.dspHardware->programHalted && buffers.dspHardware->task->dataTransfers == 1 &&
+                buffers.dspHardware->task->transferredBytes == 384 &&
+                buffers.dspHardware->task->loops.empty() &&
+                buffers.dspHardware->dataRam[0x8ff] == 0xa55a &&
+                buffers.dspHardware->dataRam[0x9c0] == 0xa55a &&
+                buffers.memory[0x3f] == 0xa5 && buffers.memory[0x1c0] == 0xa5,
+            "DSP buffer loop/DMA wrote the wrong range or fabricated completion.");
+    for (unsigned i = 0; i < sums.size(); ++i) {
+        const auto sum = sums[i];
+        const auto high = sum > INT32_MAX ? uint16_t(0x7fff) : sum < INT32_MIN ? uint16_t(0x8000)
+            : static_cast<uint16_t>(uint64_t(sum) >> 16);
+        Require(ppc_read_u16(buffers, 0x40 + i * 4) == static_cast<uint16_t>(sum) &&
+                    ppc_read_u16(buffers, 0x42 + i * 4) == high,
+                "DSP signed buffer addition, old-value parallel store or S40 saturation is incorrect.");
+    }
+    auto dual = stateFor({0x80f0, 0x80c0, 0x0021});
+    dual.executeDspTask = SyntheticDspDualLoad;
+    dual.dspHardware->task->registers[0] = 0x100;
+    dual.dspHardware->task->registers[3] = 0x200;
+    dual.dspHardware->task->registers[8] = dual.dspHardware->task->registers[11] = 0xffff;
+    dual.dspHardware->dataRam[0x100] = 0x1234;
+    dual.dspHardware->dataRam[0x101] = 0x5678;
+    dual.dspHardware->dataRam[0x200] = 0xabcd;
+    NativeDspAdvanceTask(dual);
+    Require(dual.dspHardware->task->registers[26] == 0x1234 &&
+                dual.dspHardware->task->registers[27] == 0x1234 &&
+                dual.dspHardware->task->registers[24] == 0x5678 &&
+                dual.dspHardware->task->registers[25] == 0x5678 &&
+                dual.dspHardware->task->registers[0] == 0x102 &&
+                dual.dspHardware->task->registers[3] == 0x202,
+            "DSP same-bank dual-load bus behavior or address increments are incorrect.");
+    for (bool badWrap : {false, true}) {
+        auto invalidDual = stateFor({0x80f0, 0x80c0, 0x0021});
+        invalidDual.executeDspTask = SyntheticDspDualLoad;
+        invalidDual.dspHardware->task->registers[8] = 0xffff;
+        invalidDual.dspHardware->task->registers[11] = badWrap ? 0 : 0xffff;
+        invalidDual.dspHardware->task->registers[3] = badWrap ? 0 : 4096;
+        const auto registers = invalidDual.dspHardware->task->registers;
+        Reject([&] { NativeDspAdvanceTask(invalidDual); }, badWrap ? "linear" : "data RAM");
+        Require(invalidDual.dspHardware->task->registers == registers,
+                "Invalid DSP dual load partially changed its registers.");
+    }
+    for (int64_t sample : {INT64_C(0), INT64_C(0x7fff), INT64_C(-32768), INT64_C(-1)}) {
+        auto interleave = stateFor({0xf07b, 0x197d, 0xf131, 0x8139, 0x7200, 0x0021});
+        interleave.executeDspTask = SyntheticDspInterleave;
+        auto& r = interleave.dspHardware->task->registers;
+        r[1] = 0x40; r[3] = 0x80; r[9] = r[11] = 0xffff; r[25] = 0xffff; r[19] = 0x4000;
+        interleave.dspHardware->dataRam[0x80] = 0x8001;
+        interleave.dspHardware->dataRam[0x81] = 0x1234;
+        NativeDspSetAccumulator(interleave, 0, sample);
+        NativeDspSetAccumulator(interleave, 1, 0x1234);
+        NativeDspAdvanceTask(interleave);
+        Require(interleave.dspHardware->dataRam[0x40] == static_cast<uint16_t>(sample) &&
+                    interleave.dspHardware->dataRam[0x41] == 0x7fff &&
+                    r[1] == 0x42 && r[3] == 0x82 && NativeDspAccumulator(interleave, 0) == 65535 &&
+                    NativeDspAccumulator(interleave, 1) == INT64_C(0x112340000),
+                "DSP output interleave lost old values, truncation or unsigned pointer advancement.");
+    }
     auto unknown = stateFor({0xffff});
     unknown.executeDspTask = UnsupportedDspTask;
     Reject([&] { NativeDspAdvanceTask(unknown); }, "translation at word 0");
@@ -1822,6 +1898,37 @@ void TestCompiledDspTask() {
     Reject([&] { RecompileDspTask({0x0021}, 0, "Task();"); }, "Invalid");
     Reject([&] { RecompileDspTask({0x0080, 0, 0x0021}, 0, "Task", {1}); }, "overlapping");
     Reject([&] { RecompileDspTask({0x0060, 0, 0x0021}, 0, "Task"); }, "loop range");
+    Reject([&] { RecompileDspTask({0x8170, 0x0021}, 0, "Task"); }, "parallel accumulator write conflict");
+}
+
+void TestCompiledIntegerFloatStore() {
+    for (bool absolute : {false, true}) {
+        for (uint64_t bits : {UINT64_C(0), UINT64_C(0xfff8000000000001),
+                              UINT64_C(0x4330000080000000), UINT64_C(0xffffffffffffffff)}) {
+            PpcState state;
+            state.memory.assign(32, 0xa5);
+            state.fpr[3] = {bits, 0x123456789abcdef0};
+            state.gpr[4] = absolute ? UINT32_MAX : 4;
+            state.gpr[5] = absolute ? 8 : 4;
+            state.cr = 0x12345678; state.fpscr = 0x87654321;
+            const auto before = state;
+            if (absolute) ppc_0000B830(state); else ppc_0000B820(state);
+            Require(ppc_read_u32(state, 8) == static_cast<uint32_t>(bits) &&
+                        state.memory[7] == 0xa5 && state.memory[12] == 0xa5 &&
+                        state.fpr == before.fpr && state.cr == before.cr && state.fpscr == before.fpscr &&
+                        std::equal(std::begin(state.gpr), std::end(state.gpr), std::begin(before.gpr)),
+                    "stfiwx converted a raw integer payload or changed CPU state.");
+            for (uint32_t address : {9u, 32u}) {
+                auto bad = before;
+                bad.gpr[5] = address - (absolute ? 0 : bad.gpr[4]);
+                const auto memory = bad.memory;
+                Reject([&] { if (absolute) ppc_0000B830(bad); else ppc_0000B820(bad); }, "");
+                Require(bad.memory == memory && bad.fpr == before.fpr && bad.fpscr == before.fpscr,
+                        "Invalid stfiwx partially committed its transfer.");
+            }
+        }
+    }
+    Reject([&] { RecompileFunction(0, {(31u << 26) | (983u << 1) | 1}); }, "record form");
 }
 
 void TestCompiledDspInitialization() {
@@ -2392,6 +2499,7 @@ void TestExternalInterruptDelivery() {
     invalid.externalInterruptsEnabled = false;
     invalid.externalInterrupt->resume = 0x80001000u;
     invalid.externalInterrupt->savedMsr = 0x8032u;
+    invalid.externalInterrupt->suspended.resize(3);
     invalid.srr0 = 0x80001004u;
     invalid.srr1 = 0x8032u;
     Reject([&] { ppc_return_from_system_call(invalid); }, "cannot switch guest contexts");
@@ -2406,6 +2514,105 @@ void TestExternalInterruptDelivery() {
     Reject([&] { dispatcher.Register(1, invalid,
         {{0x80003004u, ppc_0000B5C0, {0x4c000064u}, 0x3000u, {0x60000000u}}}); },
         "code mismatch");
+}
+
+void TestNestedExternalInterruptDelivery() {
+    const auto create = [] {
+        PpcState state;
+        state.memoryMap = PpcMemoryMap::GameCubeRam;
+        state.memory.resize(0x4000);
+        state.externalInterrupt.emplace();
+        state.serialInterface.emplace();
+        state.serialInterface->communication = 0xc0000000u;
+        state.piInterruptMask = 8;
+        state.msr = 0x32;
+        state.externalInterruptsEnabled = true;
+        state.lr = 0xfffffffcu;
+        for (uint32_t address : {0x500u, 0x1000u, 0x2000u, 0x2100u}) {
+            ppc_write_u32(state, address, 0x60000000);
+        }
+        return state;
+    };
+    auto baseline = create();
+    NativeDispatcher dispatcher;
+    dispatcher.Register(0, baseline, {
+        {0x500, [](PpcState& state) {
+            const auto& interrupt = *state.externalInterrupt;
+            const bool nested = !interrupt.suspended.empty();
+            Require(interrupt.active && !interrupt.inHandler && !state.externalInterruptsEnabled &&
+                        state.srr0 == (nested ? 0x80002100u : 0x80001000u) &&
+                        state.srr1 == 0x8032u,
+                    "Nested interrupt did not preserve its actual interrupted PC/MSR.");
+            state.srr0 = 0x80002000; state.srr1 = 0x30;
+            ppc_return_from_system_call(state);
+        }, {0x60000000}},
+        {0x80002000, [](PpcState& state) {
+            ppc_write_u32(state, 0xcc006434, 0xc0000000);
+            ++state.gpr[30];
+            if (state.externalInterrupt->suspended.size() + 1 < state.gpr[29]) {
+                state.serialInterface->communication = 0xc0000000;
+                ppc_write_msr(state, 0x8032);
+            }
+            state.pc = 0x80002100;
+        }, {0x60000000}},
+        {0x80002100, [](PpcState& state) {
+            auto& interrupt = *state.externalInterrupt;
+            Require(interrupt.active && interrupt.inHandler &&
+                        interrupt.resume == (interrupt.suspended.empty() ? 0x80001000u : 0x80002100u) &&
+                        interrupt.savedMsr == 0x8032,
+                    "Nested interrupt return replaced the parent resume/MSR metadata.");
+            ppc_write_msr(state, 0x32);
+            ++state.gpr[28];
+            state.srr0 = interrupt.resume; state.srr1 = interrupt.savedMsr;
+            ppc_return_from_system_call(state);
+        }, {0x60000000}},
+        {0x80001000, [](PpcState& state) { ++state.gpr[31]; state.pc = state.lr; }, {0x60000000}}
+    });
+    for (unsigned levels : {1u, 2u, 4u}) {
+        auto state = create();
+        state.gpr[29] = levels;
+        dispatcher.Execute(state, 0x80001000);
+        Require(state.gpr[30] == levels && state.gpr[28] == levels && state.gpr[31] == 1 &&
+                    state.externalInterrupt->delivered == levels && state.externalInterrupt->returned == levels &&
+                    !state.externalInterrupt->active && state.externalInterrupt->suspended.empty() &&
+                    ppc_read_msr(state) == 0x8032 && state.pc == 0xfffffffcu &&
+                    !state.callException && !state.callGuest,
+                "Nested interrupt chain did not return through every frame exactly once.");
+    }
+    auto overflow = create();
+    overflow.gpr[29] = 5;
+    Reject([&] { dispatcher.Execute(overflow, 0x80001000); }, "guest interrupt delivery");
+    Require(overflow.externalInterrupt->delivered == 4 && overflow.externalInterrupt->returned == 0 &&
+                overflow.externalInterrupt->suspended.size() == 3 && !overflow.callException && !overflow.callGuest,
+            "Interrupt nesting overflow lost active frames or fabricated a return.");
+    for (bool syscall : {false, true}) {
+        auto invalid = create();
+        invalid.externalInterrupt->active = true;
+        invalid.externalInterrupt->inHandler = syscall;
+        invalid.systemCallActive = syscall;
+        invalid.callException = [](uint32_t, uint32_t, PpcState&) {
+            throw std::runtime_error("Invalid nested delivery reached its exception callback.");
+        };
+        const auto before = *invalid.externalInterrupt;
+        Reject([&] { ppc_deliver_external_interrupt(invalid); }, "guest interrupt delivery");
+        Require(invalid.externalInterrupt->delivered == before.delivered &&
+                    invalid.externalInterrupt->suspended.empty() && invalid.externalInterruptsEnabled,
+                "Unsupported vector/system-call nesting changed exception state.");
+    }
+    for (unsigned limit : {2u, 4u, 7u}) {
+        auto state = create();
+        state.gpr[29] = 4;
+        Reject([&] { dispatcher.Execute(state, 0x80001000, limit); }, "budget");
+        Require(!state.callException && !state.callGuest && state.externalInterrupt->returned == 0,
+                "Nested interrupt bypassed block limits or leaked callbacks.");
+    }
+    for (unsigned depth : {1u, 2u}) {
+        auto state = create();
+        state.gpr[29] = 4;
+        Reject([&] { dispatcher.Execute(state, 0x80001000, 100, depth); }, "call-depth limit");
+        Require(!state.callException && !state.callGuest && state.externalInterrupt->returned == 0,
+                "Nested interrupt bypassed call-depth limits or leaked callbacks.");
+    }
 }
 
 void TestCompiledSystemCall() {
@@ -4111,9 +4318,11 @@ int main() {
         TestCompiledInterruptRegisters();
         TestThreadContextReturn();
         TestExternalInterruptDelivery();
+        TestNestedExternalInterruptDelivery();
         TestDspResetAndAramDma();
         TestCompiledDspInitialization();
         TestCompiledDspTask();
+        TestCompiledIntegerFloatStore();
         TestNativeConsoleAndEmptyExi();
         TestRealModeRamConfiguration();
         TestNativeConsoleIntegers();

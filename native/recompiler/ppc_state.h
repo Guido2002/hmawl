@@ -110,12 +110,16 @@ struct PpcMemoryProtection {
 };
 
 struct PpcExternalInterrupt {
+    struct Frame {
+        uint32_t resume, savedMsr;
+    };
     bool active = false;
     bool inHandler = false;
     uint32_t resume = 0;
     uint32_t savedMsr = 0;
     uint32_t delivered = 0;
     uint32_t returned = 0;
+    std::vector<Frame> suspended;
 };
 
 struct PpcDiscInterface {
@@ -266,7 +270,9 @@ inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
     }
     if (enabled && ppc_external_interrupt_pending(state) &&
         (!state.externalInterrupt || !state.callException ||
-         state.externalInterrupt->active)) {
+         (state.externalInterrupt->active &&
+          (!state.externalInterrupt->inHandler || state.systemCallActive ||
+           state.externalInterrupt->suspended.size() >= 3)))) {
         throw std::runtime_error("Native external interrupt requires guest interrupt delivery.");
     }
     if (enabled && state.piInterruptMask.has_value() && (*state.piInterruptMask & 0x40u) != 0 &&
@@ -1297,11 +1303,13 @@ inline void ppc_return_from_system_call(PpcState& state) {
 inline void ppc_deliver_external_interrupt(PpcState& state) {
     if (!state.externalInterruptsEnabled || !ppc_external_interrupt_pending(state)) return;
     ppc_check_pending_interrupts(state, true);
-    if (!state.externalInterrupt || !state.callException || state.externalInterrupt->active ||
+    if (!state.externalInterrupt || !state.callException ||
         state.systemCallActive || (ppc_read_msr(state) & ~0xa032u) != 0) {
         throw std::runtime_error("Unsupported native external interrupt delivery context.");
     }
     auto& interrupt = *state.externalInterrupt;
+    const bool nested = interrupt.active;
+    if (nested) interrupt.suspended.push_back({interrupt.resume, interrupt.savedMsr});
     interrupt.resume = state.pc;
     interrupt.savedMsr = ppc_read_msr(state);
     interrupt.active = true;
@@ -1314,6 +1322,14 @@ inline void ppc_deliver_external_interrupt(PpcState& state) {
     state.callException(0x500u, interrupt.resume, state);
     if (interrupt.active || state.pc != interrupt.resume) {
         throw std::runtime_error("Native external interrupt handler returned without context-restoring rfi.");
+    }
+    if (nested) {
+        const auto parent = interrupt.suspended.back();
+        interrupt.suspended.pop_back();
+        interrupt.resume = parent.resume;
+        interrupt.savedMsr = parent.savedMsr;
+        interrupt.active = true;
+        interrupt.inHandler = true;
     }
 }
 

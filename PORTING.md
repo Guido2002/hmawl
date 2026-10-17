@@ -67,12 +67,16 @@ AIStartDMA, timed RAM-DMA reloads and original AI interrupt/buffer callbacks.
 Original ARAM/ARQ completion callbacks also execute with the live DSP task.
 The task now validates the real `0xBABE0024` header, consumes the separate command
 pointer, copies the command list into DRAM and uses its original IRAM dispatch table.
-Original initialization loops and subsequent parameter preparation execute; both
-mail words are consumed and the original CPU submission routine returns.
-Six actual DSP data DMAs transfer 2852 bytes. The current measured runner boundary
-is `PC=0x801EC098`, LR `0x801F0E2C`, DSP word `0x497`, on untranslated `ADDAX`.
-The following processing/mixing remains untranslated. The original initial PCM buffers
-contain zero samples; Windows buffer acceptance is not proof of audible game audio.
+Original initialization, additive sample loops, stereo interleave and output DMA
+execute through the task's own completion mail/IRQ and original CPU control reply.
+Bounded nested external interrupts let DSP completion interrupt the original audio
+handler and restore both contexts. The first game-system initialization now returns
+to main. The measured Windows runner boundary is the next unbound game-object
+constructor at `PC=0x80086044`, LR `0x8000AA94`; DSP PC `0x4A` waits for another list.
+A deterministic disc fixture completes four lists, 95 data DMAs/27292 bytes and
+four original PCM callbacks. Real Windows timing changes these totals.
+General voice mixing/ADPCM remains untranslated. The original PCM buffers contain
+zero samples; Windows buffer acceptance is not proof of audible game audio.
 Callers without a PCM backend still fail explicitly at original AIStartDMA.
 No task-ready message or completed audio task is synthesized.
 Pixel scanout, the main loop and a rendered game frame remain unfinished.
@@ -665,9 +669,23 @@ queue. Full runtime scheduling and device services are still needed.
   registers, CPU/RAM, clocks and transfer counts. Synthetic compiled tests cover
   full transport/table dispatch, both DMA directions, parallel old-value stores,
   zero/one/600-iteration loops, flags, integrity failures and bounded stack errors.
-  The actual Windows runner reaches DSP `0x497` (`ADDAX`), with CPU
-  `PC=0x801EC098`, LR `0x801F0E2C`. This is command initialization/transport,
+  At that milestone the Windows runner reached DSP `0x497` (`ADDAX`), with CPU
+  `PC=0x801EC098`, LR `0x801F0E2C`. That was command initialization/transport,
   not completion of the whole command list, task mixing or a game boot.
+- [x] Complete the connected initial DSP output/completion and CPU return chain.
+  Translate signed-32 AX addition/moves, unsigned low-word pointer addition,
+  shift-by-16 and simultaneous dual loads, including same-bank behavior and
+  pre-operation stores. Execute the original output DMA, completion mail/IRQ,
+  CPU handler and scheduler-control reply. Preserve up to four nested external
+  exception frames, shared dispatch budgets and reentrant-handler return semantics;
+  retain explicit failures for unsupported nesting and parallel write conflicts.
+  Bind the original audio-effect callback and raw-word `stfiwx`.
+  Nonzero/overflowing synthetic buffers verify actual sample results.
+  The real deterministic fixture completes four lists, 95 data DMAs/27292 bytes,
+  four PCM callbacks and 800 silent frames with no suspended exception left.
+  The Windows runner now returns from the first game-system initialization and
+  reaches the next unbound constructor `0x80086044`, LR `0x8000AA94`.
+  General voice mixing/ADPCM, a game frame and the main loop remain unfinished.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -880,12 +898,12 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue original DSP processing from word `0x497` (`ADDAX`) through the
-   following sample/parameter arithmetic, multiply/accumulate and command-list
-   completion paths as a connected extension. Command transport, original dispatch,
-   parameter DMA and initialization loops already execute in the Windows runner;
-   the first CPU command submission returns, but the entire DSP list has not
-   completed and output buffers still contain original zero samples.
+1. Continue the original game-object construction at `0x80086044` and its connected
+   dependencies toward the remaining game initialization and main loop. The first
+   game-system initialization now returns to main in the Windows runner; original
+   DSP lists reach their own output/completion and resume waiting for new work.
+   Output buffers still contain original zero samples, and general voice processing,
+   multiply/accumulate and ADPCM are not yet supported.
    Do not discard samples, fabricate callback completion or substitute a native
    mixer for the original task. OSInit, all 93 DOL constructors, Screen and DSP
    audio-task initialization already return in the production runner; the remaining

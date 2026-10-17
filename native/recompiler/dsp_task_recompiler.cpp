@@ -48,15 +48,38 @@ std::string RecompileDspTask(const std::vector<uint16_t>& words, uint16_t entry,
         const bool parallel = (instruction & 0xf700u) == 0x8100u ||
                               (instruction & 0xf700u) == 0xb100u ||
                               (instruction & 0xfe00u) == 0x7c00u ||
+                              (instruction & 0xfc00u) == 0x4800u ||
+                              (instruction & 0xfc00u) == 0x6800u ||
+                              (instruction & 0xfe00u) == 0xf000u ||
                               main == 0x8e00 || main == 0x8f00 || main == 0x8000;
         if (parallel && extension) {
             if ((extension & 0xc4u) == 0x40u) {
                 const unsigned ar = extension & 3, reg = 24 + ((extension >> 3) & 7);
+                const unsigned acc = (main == 0x8100 || main == 0x8900 || main == 0xb100 || main == 0xb900)
+                    ? ((instruction >> 11) & 1) : ((instruction >> 8) & 1);
+                if (reg >= 28 && (reg & 1) == acc && main != 0x8000 &&
+                    main != 0x8e00 && main != 0x8f00 && main != 0xb100 && main != 0xb900) {
+                    throw std::runtime_error("Native DSP parallel accumulator write conflict is unsupported.");
+                }
                 extensionBefore = "if (r[" + std::to_string(8 + ar) + "] != 0xffffu) "
                     "throw std::runtime_error(\"Native DSP parallel load requires linear addressing.\");\n"
                     "const auto parallelValue = NativeDspTaskRead(state, r[" + std::to_string(ar) + "]);\n";
                 extensionAfter = "NativeDspTaskWriteRegister(state, " + std::to_string(reg) +
                     ", parallelValue);\n++r[" + std::to_string(ar) + "];\n";
+                operation &= 0xff00u;
+            } else if ((extension & 0xccu) == 0xc0u && (extension & 3) != 3) {
+                const unsigned ar = extension & 3, reg0 = 24 + ((extension >> 5) & 1) * 2;
+                const unsigned reg1 = 25 + ((extension >> 4) & 1) * 2;
+                extensionBefore = "if (r[" + std::to_string(8 + ar) + "] != 0xffffu || r[11] != 0xffffu) "
+                    "throw std::runtime_error(\"Native DSP dual load requires linear addressing.\");\n"
+                    "if (r[" + std::to_string(ar) + "] >= dsp.dataRam.size() || r[3] >= dsp.dataRam.size()) "
+                    "throw std::runtime_error(\"Native DSP dual load requires data RAM.\");\n"
+                    "const auto parallel0 = dsp.dataRam[r[" + std::to_string(ar) + "]];\n"
+                    "const auto parallel1 = (r[" + std::to_string(ar) + "] >> 10) == (r[3] >> 10) "
+                    "? parallel0 : dsp.dataRam[r[3]];\n";
+                extensionAfter = "NativeDspTaskWriteRegister(state, " + std::to_string(reg0) + ", parallel0);\n"
+                    "NativeDspTaskWriteRegister(state, " + std::to_string(reg1) + ", parallel1);\n"
+                    "++r[" + std::to_string(ar) + "];\n++r[3];\n";
                 operation &= 0xff00u;
             } else if ((extension & 0xe4u) == 0x20u) {
                 const unsigned ar = extension & 3, reg = 28 + ((extension >> 3) & 3);
@@ -152,6 +175,30 @@ std::string RecompileDspTask(const std::vector<uint16_t>& words, uint16_t entry,
                  << "const auto shifted = value >= 0 ? value / 65536 : -((-value + 65535) / 65536);\n"
                  << "NativeDspSetAccumulator(state, " << acc << ", shifted);\n"
                  << "NativeDspArithmeticFlags(state, shifted, 0, false);\n";
+        } else if ((operation & 0xfeffu) == 0xf000u) {
+            const auto acc = (instruction >> 8) & 1;
+            body << "const auto bits = uint64_t(NativeDspAccumulator(state, " << acc << "));\n"
+                 << "NativeDspSetAccumulator(state, " << acc << ", static_cast<int64_t>((bits << 16) & "
+                    "UINT64_C(0xffffffffff)));\n"
+                 << "NativeDspArithmeticFlags(state, NativeDspAccumulator(state, " << acc << "), 0, false);\n";
+        } else if ((instruction & 0xfcffu) == 0x7000u) {
+            const auto acc = (instruction >> 8) & 1, ax = (instruction >> 9) & 1;
+            body << "const auto value = NativeDspAccumulator(state, " << acc << ");\n"
+                 << "const int64_t addend = r[" << 24 + ax << "];\n"
+                 << "NativeDspArithmeticFlags(state, value, addend, false);\n"
+                 << "NativeDspSetAccumulator(state, " << acc << ", value + addend);\n";
+        } else if ((operation & 0xfcffu) == 0x4800u || (operation & 0xfcffu) == 0x6800u) {
+            const auto acc = (instruction >> 8) & 1, ax = (instruction >> 9) & 1;
+            body << "const int64_t ax = int64_t(static_cast<int16_t>(r[" << 26 + ax
+                 << "])) * 65536 + r[" << 24 + ax << "];\n";
+            if ((operation & 0xfc00u) == 0x4800u) {
+                body << "const auto value = NativeDspAccumulator(state, " << acc << ");\n"
+                     << "NativeDspArithmeticFlags(state, value, ax, false);\n"
+                     << "NativeDspSetAccumulator(state, " << acc << ", value + ax);\n";
+            } else {
+                body << "NativeDspSetAccumulator(state, " << acc << ", ax);\n"
+                     << "NativeDspArithmeticFlags(state, ax, 0, false);\n";
+            }
         } else if (instruction == 0x4c00 || instruction == 0x4d00) {
             const auto acc = (instruction >> 8) & 1;
             body << "const auto left = NativeDspAccumulator(state, " << acc << ");\n"

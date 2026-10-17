@@ -853,6 +853,16 @@ std::string RecompileFunction(uint32_t address,
                 expression = "state.gpr[" + std::to_string(rt) + "] & " +
                     (extendedOpcode == 60 ? "~" : "") + right;
                 break;
+            case 983: {
+                if (record) throw std::runtime_error("Invalid stfiwx record form at " + Hex(pc) + ".");
+                const auto base = ra == 0 ? "0u" : "state.gpr[" + std::to_string(ra) + "]";
+                const auto ea = "ea_" + Hex(pc).substr(2);
+                output << "    const uint32_t " << ea << " = " << base << " + state.gpr[" << rb << "];\n"
+                       << "    if (" << ea << " & 3u) throw std::runtime_error(\"Unaligned stfiwx at " << Hex(pc) << ".\");\n"
+                       << "    ppc_write_u32(state, " << ea << ", static_cast<uint32_t>(state.fpr[" << rt << "].ps0));\n";
+                emitted = true;
+                break;
+            }
             case 535:
             case 567:
             case 599:

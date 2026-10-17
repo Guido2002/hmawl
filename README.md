@@ -122,13 +122,18 @@ ARAM/ARQ transfers also continue with the live compiled DSP task. The original a
 callback sends its first real DSP command, `0xBABE0024`. The task now validates
 that header, consumes the separate pointer, copies the actual command list into
 DRAM and dispatches through its original instruction-memory table. Original
-parameter transfers, buffer-initialization loops and subsequent preparation run;
-both CPU mail words are consumed and the original CPU submission routine returns.
-With an available output device, a verified runner execution stops with **exit code 3**
-at `PC=0x801EC098`, `LR=0x801F0E2C`, DSP word `0x497`: its next `ADDAX`
-and the following processing/mixing still need translation. Six actual DSP data
-DMAs transfer 2852 bytes before this boundary. Initial PCM buffers
-contain original zero samples, not intro music. Device/queue errors fail explicitly;
+parameter transfers, additive sample-buffer loops, output interleave and output
+DMA now execute. The task sends its own `0xDCD10002` completion mail/IRQ; the
+original CPU handler replies through the original scheduler-control table, leaving
+the task waiting for another list. Bounded nested external interrupts preserve the
+outer audio-handler context. **The first game-system initialization now returns
+to main in the Windows runner.** With an available output device, a verified run
+stops with **exit code 3** at the next game-object constructor,
+`PC=0x80086044`, `LR=0x8000AA94`, which has no native binding yet.
+A deterministic disc test completes four lists and 95 DSP data DMAs/27292 bytes.
+Windows timing changes these counts. Submitted PCM is still original zero samples,
+not intro music; general voice mixing/ADPCM remains unsupported.
+Device/queue errors fail explicitly;
 hosts or library callers without a PCM backend retain the AIStartDMA dependency error.
 No ROM bytes, task-ready mail, mixed samples or task completion are fabricated.
 Draws, unsupported copy modes and texture DMA still fail

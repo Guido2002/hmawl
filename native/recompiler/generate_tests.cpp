@@ -820,6 +820,22 @@ int main(int argc, char** argv) {
             for (auto word : loop) output << word << "u,";
             output << "};\n";
             output << RecompileDspTask({0x9900, 0xc100, 0x0021}, 0, "SyntheticDspArithmetic");
+            std::vector<uint16_t> buffers = {
+                0x0088, 0xffff, 0x008a, 0xffff, 0x008b, 0xffff,
+                0x0080, 0x100, 0x0083, 0x500, 0x0082, 0x900, 0x8f00, 0x1160, 0,
+                0x80f0, 0x80c0, 0x6a00, 0x4800, 0x6b22, 0x4932
+            };
+            buffers[14] = static_cast<uint16_t>(buffers.size() - 1);
+            buffers.insert(buffers.end(), {0x16ce, 0, 0x16cf, 0x40, 0x16cd, 0x900,
+                0x16c9, 1, 0x16cb, 384, 0x0021});
+            output << RecompileDspTask(buffers, 0, "SyntheticDspBuffers");
+            output << "static const std::vector<uint16_t> SyntheticBufferWords = {";
+            for (auto word : buffers) output << word << "u,";
+            output << "};\n";
+            output << RecompileDspTask({0x80f0, 0x80c0, 0x0021}, 0, "SyntheticDspDualLoad");
+            output << RecompileDspTask({0xf07b, 0x197d, 0xf131, 0x8139, 0x7200, 0x0021}, 0, "SyntheticDspInterleave");
+            Emit(output, 0xb820u, {31u << 26 | 3u << 21 | 4u << 16 | 5u << 11 | 983u << 1});
+            Emit(output, 0xb830u, {31u << 26 | 3u << 21 | 5u << 11 | 983u << 1});
             Emit(output, 0xb5e0u, {
                 (31u << 26) | (3u << 21) | (26u << 16) | (467u << 1),
                 (31u << 26) | (4u << 21) | (27u << 16) | (467u << 1)});

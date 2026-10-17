@@ -1067,10 +1067,8 @@ int main(int argc, char** argv) {
                     guest.writeConsole = [](const std::string&) {};
                     guest.submitPcm = [&frames](const std::vector<int16_t>& samples, uint32_t rate) {
                         Require(rate == 32028 && samples.size() == 320, "Original PCM buffer shape or DSP rate changed.");
-                        if (!frames) {
-                            Require(std::all_of(samples.begin(), samples.end(), [](int16_t sample) { return sample == 0; }),
-                                    "Original zero-initialized PCM buffer changed.");
-                        }
+                        Require(std::all_of(samples.begin(), samples.end(), [](int16_t sample) { return sample == 0; }),
+                                "Original silent DSP output contains unexpected samples.");
                         frames += samples.size() / 2;
                     };
                     guest.stopPcm = [] { throw std::runtime_error("Unexpected PCM stop in original first-command fixture."); };
@@ -1087,25 +1085,35 @@ int main(int argc, char** argv) {
                           << " periods=" << pcmState.pcm->completedBuffers << " handlers=" << pcmHandlers
                           << " callbacks=" << pcmCallbacks << " DSP PC=" << pcmState.dspHardware->instructionPc
                           << " DMA=" << pcmState.dspHardware->task->dataTransfers << "/"
-                          << pcmState.dspHardware->task->transferredBytes << " command returns=" << commandHandshakes << '\n';
+                          << pcmState.dspHardware->task->transferredBytes << " command returns=" << commandHandshakes
+                          << " CPU mail=" << pcmState.dspHardware->task->cpuMailSent << "/"
+                          << pcmState.dspHardware->task->cpuMailConsumed
+                          << " DSP mail=" << pcmState.dspHardware->sentMail << "/" << pcmState.dspHardware->consumedMail
+                          << " task IRQ=" << pcmState.dspHardware->task->interrupts
+                          << " active IRQ=" << pcmState.externalInterrupt->active
+                          << " suspended IRQ=" << pcmState.externalInterrupt->suspended.size() << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            pcmResult.pc == 0x801ec098 && pcmResult.lr == 0x801f0e2c &&
-                            pcmResult.reason == "Native DSP task needs a translation at word 1175 (instruction 18432)." &&
+                            pcmResult.pc == 0x80086044 && pcmResult.lr == 0x8000aa94 &&
+                            pcmResult.reason == "No native translation registered at 0x80086044." &&
                             pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
+                            pcmResult.gameInitializationReturned &&
                             pcmState.pcm->active && pcmState.pcm->starts == 1 &&
-                            pcmState.pcm->completedBuffers == 1 && pcmState.pcm->submittedFrames == submittedFrames &&
-                            submittedFrames == 320 && pcmHandlers == 1 && pcmCallbacks == 1 &&
-                            commandAddress != 0 && commandHandshakes == 1 &&
-                            pcmState.dspHardware->task->cpuMailSent == 12 &&
-                            pcmState.dspHardware->task->cpuMailConsumed == 12 &&
+                            pcmState.pcm->completedBuffers == 4 && pcmState.pcm->submittedFrames == submittedFrames &&
+                            submittedFrames == 800 && pcmHandlers == 4 && pcmCallbacks == 4 &&
+                            commandAddress != 0 && commandHandshakes == 4 &&
+                            pcmState.dspHardware->task->cpuMailSent == 22 &&
+                            pcmState.dspHardware->task->cpuMailConsumed == 22 &&
                             !(pcmState.dspHardware->toDspMailbox & 0x80000000u) &&
-                            pcmState.dspHardware->task->dataTransfers == 6 &&
-                            pcmState.dspHardware->task->transferredBytes == 2852 &&
-                            pcmState.dspHardware->instructionPc == 0x497 &&
+                            pcmState.dspHardware->task->dataTransfers == 95 &&
+                            pcmState.dspHardware->task->transferredBytes == 27292 &&
+                            pcmState.dspHardware->instructionPc == 0x4a &&
+                            pcmState.dspHardware->task->interrupts == 5 &&
+                            pcmState.dspHardware->sentMail == 7 && pcmState.dspHardware->consumedMail == 7 &&
+                            pcmState.dspHardware->task->mode == NativeDspTaskMode::Running &&
                             pcmState.dspHardware->completedPrograms == 1 &&
-                            !pcmState.systemCallActive && pcmState.externalInterrupt->active &&
-                            pcmState.externalInterrupt->inHandler,
-                        "Original command transport/DMA/initialization did not reach the real processing boundary.");
+                            !pcmState.systemCallActive && !pcmState.externalInterrupt->active &&
+                            pcmState.externalInterrupt->suspended.empty(),
+                        "Original DSP output/completion did not return game-system initialization to the next constructor.");
                 for (unsigned i = 0; i < 18; ++i) {
                     Require(pcmState.dspHardware->dataRam[0xc00 + i] == ppc_read_u16(pcmState, commandAddress + i * 2),
                             "DSP command-list DMA differs from original CPU RAM.");
@@ -1137,7 +1145,9 @@ int main(int argc, char** argv) {
                             plainPcm.dspHardware->task->returnAddresses == pcmState.dspHardware->task->returnAddresses &&
                             plainPcm.dspHardware->task->loops.size() == pcmState.dspHardware->task->loops.size() &&
                             plainPcm.externalInterrupt->delivered == pcmState.externalInterrupt->delivered &&
-                            plainPcm.externalInterrupt->returned == pcmState.externalInterrupt->returned,
+                            plainPcm.externalInterrupt->returned == pcmState.externalInterrupt->returned &&
+                            !plainPcm.externalInterrupt->active && plainPcm.externalInterrupt->suspended.empty() &&
+                            plainResult.gameInitializationReturned,
                         "PCM observation changed CPU/RAM, DMA timing, original interrupts or native DSP execution.");
             }
             auto damagedConstructor = CreateOriginalStartupState(image);

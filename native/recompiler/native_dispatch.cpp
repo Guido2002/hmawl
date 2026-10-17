@@ -128,7 +128,7 @@ bool NativeDispatcher::Contains(uint32_t address) const {
 
 void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAddress,
                            size_t& remaining, size_t depth, size_t maxDepth,
-                           const std::function<void(uint32_t)>& onBlock) {
+                           const std::function<void(uint32_t)>& onBlock, bool externalException) {
     if (depth > maxDepth) {
         throw std::runtime_error("Native guest call-depth limit exceeded.");
     }
@@ -162,7 +162,8 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
         --remaining;
         if (onBlock) onBlock(state.pc);
         entry->second.translation.function(state);
-    } while (state.pc != returnAddress);
+    } while (state.pc != returnAddress ||
+             (externalException && state.externalInterrupt && state.externalInterrupt->active));
 }
 
 void NativeDispatcher::Execute(PpcState& state, uint32_t address,
@@ -185,7 +186,7 @@ void NativeDispatcher::Execute(PpcState& state, uint32_t address,
             }
             ++depth;
             try {
-                Run(guest, target, resume, remaining, depth, maxCallDepth, onBlock);
+                Run(guest, target, resume, remaining, depth, maxCallDepth, onBlock, target == 0x500u);
             } catch (const PpcInterruptContextReturn&) {
                 if (target != 0x500u || !guest.externalInterrupt ||
                     guest.externalInterrupt->active || guest.pc != resume) {

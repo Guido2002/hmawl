@@ -51,7 +51,7 @@ private:
     void CheckCode(const PpcState& state, const NativeTranslation& translation) const;
     void Run(PpcState& state, uint32_t address, uint32_t returnAddress,
              size_t& remaining, size_t depth, size_t maxDepth,
-             const std::function<void(uint32_t)>& onBlock);
+             const std::function<void(uint32_t)>& onBlock, bool externalException = false);
     std::map<uint32_t, Entry> entries_;
     bool executing_ = false;
 };

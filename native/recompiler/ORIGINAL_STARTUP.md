@@ -146,11 +146,17 @@ mailbox overwrites fail explicitly.
 
 The original command header comparison, separate pointer consumption, command-list
 DMA and instruction-memory table dispatch now execute natively. The compiler accepts
-explicit build-time indirect roots from the original 19-entry command table, not a
-runtime instruction decoder. Instruction-data reads also check the compiled image.
+explicit build-time indirect roots from the original 19-entry command table and
+four-entry scheduler-control table, not a runtime instruction decoder.
+Instruction-data reads also check the compiled image.
 Signed-40 arithmetic/status, accumulator comparison/negation/shift, indexed and
 parallel transfers, native call/return and single/block loops execute the original
-initialization and subsequent parameter preparation. Loops preserve remaining counts
+initialization and subsequent parameter preparation. Signed-32 AX addition/moves,
+unsigned AX-low pointer addition, shift-by-16 and parallel dual loads now execute
+the additive sample loops and stereo output interleave. Dual loads preserve the
+same-1-Kiword-bank bus behavior; stores use pre-main-operation values.
+Unsupported conflicting parallel accumulator writes fail explicitly.
+Loops preserve remaining counts
 across the 256-instruction quantum. Calls/loops share a conservative combined
 four-entry bound; explicit stack-register manipulation, nonlinear addressing and
 control-flow instructions at loop endpoints fail explicitly.
@@ -160,8 +166,14 @@ word order and validates the whole even-byte range before copying. This profile
 is synchronous: control has no busy bit after the copy, and byte length reads zero.
 This is not a cycle-timed DMA engine. Instruction-RAM replacement and DSP ROM
 branches remain explicit dependencies. No DMA injects task mail or completion.
-The runner performs six data transfers/2852 bytes before DSP word `0x497` (`ADDAX`),
-where the following original processing/mixing still needs translation.
+Initial silent command lists now execute their output DMA and send their own
+`0xDCD10002` completion mail/IRQ. The original CPU handler responds with
+`0xCDD10003`; the task's scheduler-control dispatch returns to word `0x4A` to wait
+for another list, rather than halting or synthesizing completion. The deterministic
+disc fixture verifies four lists, 95 data transfers/27292 bytes, 22/22 CPU mails,
+7/7 DSP mails and five task IRQs (including task initialization). Production Windows
+counts vary with host time. This does not implement general voice mixing, multiply/
+accumulate or ADPCM; initial output buffers remain silent.
 
 ### Windows PCM output and DMA
 
@@ -189,10 +201,18 @@ Actual DMA periods enter the original AI DMA handler at `0x801C1BC0` and origina
 buffer callback at `0x801F2AB8`. Original ARAM/ARQ transfers also run alongside the
 compiled task, with real copies and original completion callbacks. The cache-sync
 `sc/rfi` inside the audio callback preserves the outer external-interrupt state;
-general nested external interrupts remain unsupported rather than dropped.
+external interrupts can also nest inside the original enabled handler, up to four
+active levels. Each level retains its actual resume/MSR metadata and original
+guest context restoration; handler reentry cannot be mistaken for a native return
+sentinel. Vector-phase, system-call-phase and excessive nesting fail explicitly,
+and all levels share the dispatch block/depth budgets. Arbitrary thread switching
+inside interrupts remains unsupported.
 Indexed single-float transfers and signed high multiplication execute the original
 audio parameter/command preparation. The resulting CPU mail is the actual
 `0xBABE0024` header, not an injected test command or synthesized DSP completion.
+The original audio effect callback now runs through raw-low-word `stfiwx` stores.
+The first game-system initialization returns to main at `0x8000AA6C`; the next
+unbound game-object constructor is `0x80086044`, called with LR `0x8000AA94`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -357,13 +377,16 @@ fabricated. This no-PCM library profile retains its independently checked bounda
 With the real Windows backend bound, original AIStartDMA returns. Actual timed
 reloads execute the original handler/callback and its cache-sync system call, then
 send `0xBABE0024` and the separate pointer. Both are now consumed; the original CPU
-submission returns while the DSP executes command initialization and preparation.
-A measured runner execution reaches `PC=0x801EC098`, LR `0x801F0E2C`,
-SP `0x8035CB88`, DSP PC `0x497`, where original `ADDAX` needs translation.
+submission returns while the DSP executes initialization, additive sample loops,
+output interleave/DMA and its own completion mail/IRQ. The original nested CPU
+handler replies through the task's scheduler-control table.
+A measured runner execution returns from the first game-system initialization
+and reaches `PC=0x80086044`, LR `0x8000AA94`, SP `0x8035CF78`, the next unbound
+game-object constructor; DSP PC `0x4A` waits for the next list.
 That run submits 1920 actual RAM frames at 32028 Hz, completes 11 DMA periods and
 enters the original handler/callback twice. These steady-clock counts depend on
-host elapsed time. Host timing can also expose other untranslated startup paths;
-the next scene constructor at `0x80086044` is not bound yet. No mixed or audible
+host elapsed time. Host timing can also expose other untranslated startup paths.
+No mixed or audible
 game audio, renderer, scanout or main loop is claimed.
 The inquiry result remains `0x8001` and the entire real FST is intact.
 The no-PCM deterministic regression uses 1000 ticks per clock sample when AI is stopped,
@@ -379,20 +402,23 @@ of its stack, SDA and nonvolatile integer/floating registers. Traced and untrace
 startup produce identical RAM, CPU state, AI/DSP/ARAM state, output and sampled time; damaged
 constructor words fail integrity validation without claiming later milestones.
 The separate deterministic PCM fixture uses 8 ticks while either AI sampling or PCM
-DMA is active. One actual timed DMA period submits the second 160-frame buffer and
-executes exactly one original handler/callback. It reaches the same real DSP command
-boundary with 320 submitted frames, twelve CPU mail words sent/twelve consumed, no
-completed task and no finished outer interrupt. Observed and unobserved executions
+DMA is active. Four actual timed DMA periods execute four original handlers/
+callbacks and four complete DSP lists. It reaches the same next-constructor boundary
+with 800 submitted silent frames, 22 CPU mail words sent/consumed, seven DSP mails
+sent/consumed and five task IRQs. The task is still running/waiting, not a completed
+program; no active or suspended CPU interrupt remains. Observed and unobserved executions
 match RAM/CPU state, DSP DRAM/registers, clock samples, DMA phase/counts and
-interrupt/DSP steps. Six DSP data DMAs transfer 2852 bytes; all 18 command-list
-words match the actual CPU RAM source. The original CPU submission handshake
-completes once; this does not imply completion of the entire DSP command list.
+interrupt/DSP steps. 95 DSP data DMAs transfer 27292 bytes; all 18 words of the
+last command list match the actual CPU RAM source. The original CPU submission
+handshake completes four times, and game-system initialization returns to main.
 The game main loop, GX renderer,
 general scheduled game-thread execution, input and saves have not run.
 
-The next connected audio milestone is original DSP processing/mixing and actual
-command-list completion beyond `0x497`, not a replacement mixer. The native loader,
-task startup, command transport/initialization and Windows PCM backend are present.
+The next connected startup milestone is the original game-object constructor at
+`0x80086044` and its dependencies toward the main loop. General voice processing/
+ADPCM remains an audio dependency, not a reason to substitute a replacement mixer.
+The native loader, task startup, initial command output/completion and Windows PCM
+backend are present.
 Completion of original game initialization, geometry/texture rendering and XFB pixel scanout
 are still required for a real displayed frame; Screen return alone does not establish one.
 Generated translation registration uses non-inlined batches
@@ -548,8 +574,9 @@ complete original task IRAM bytes and guards, host/DSP mailbox counts, actual
 task interrupt and CPU callback, running/waiting versus completed program state,
 and corrupt-task rejection before IRAM upload or init callback,
 original PCM start/remaining/reload/handler/buffer callback, real DSP header/pointer
-consumption, exact command-list copy, six data DMAs and original command preparation,
-system-call return inside the active interrupt and complete observed/unobserved
+consumption, exact command-list copy, 95 data DMAs, four original list completions,
+all-silent submitted samples, system-initialization return and next-constructor
+dependency, system-call/nested-interrupt returns and complete observed/unobserved
 PCM-path equivalence using an explicitly test-only output sink,
 original real-mode BAT/SRR state, five MI handler slots, exact native RAM metadata,
 complete poisoned arena clearing and its exclusive upper guard, integer kernel
