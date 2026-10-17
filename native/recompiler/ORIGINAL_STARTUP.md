@@ -62,8 +62,10 @@ semantics. All four controller ports are explicitly disconnected. A transaction
 sets the selected channel's NOREP error and COMERR/TCINT, without inventing reply
 bytes. Backend failures or invalid results cannot commit hardware completion.
 Automatic controller polling remains an explicit error. Completion interrupts
-remain pending while EE is disabled; enabling EE or dispatching with an unmasked,
-pending SI completion fails explicitly until guest interrupt delivery exists.
+remain pending while EE is disabled. With explicit external-interrupt support,
+unmasked SI completion enters the original installed vector, dispatcher and
+controller callback chain. Without that profile it still fails explicitly.
+PI cause reflects device interrupt flags independently of the PI mask.
 This deliberately limited platform profile is not complete GameCube hardware.
 
 DSP hardware is explicitly mapped with 16 MiB ARAM, halted reset/mailbox
@@ -120,8 +122,13 @@ disables IR/DR with EE clear and a physical RAM target; return requires the exac
 24 MiB RAM BAT profile and a cached RAM target. BAT writes are accepted only in
 that real-mode window, for the supported RAM entries/values. Original Config24MB
 executes from its physical alias with normal instruction-integrity checks.
-This is not an arbitrary MMU: other BAT mappings, protection regions, general
-interrupt delivery and context-switching rfi remain unsupported. Native MI setup
+The external vector separately verifies unpatched DOL source words at registration
+and exception-number-patched installed words at runtime. Its first rfi enters the
+original handler; original OSLoadContext's final rfi restores the interrupted
+context and abandons the handler's nested native call chain. Both exception
+stages retain shared dispatch budgets. Nested exceptions and thread switches fail
+explicitly. This is not an arbitrary MMU: other BAT mappings, protection regions,
+non-SI interrupt delivery and context-switching rfi remain unsupported. Native MI setup
 supports only all-readable/writable permissions, interrupt acknowledgement and
 the address-error interrupt mask; missing devices and other settings fail.
 The recompiler's
@@ -151,7 +158,7 @@ Original **__OSInitSram also returns**, with the exact native profile in its SRA
 control block, successful synchronization and released EXI/SRAM locks.
 Original **__OSThreadInit also returns**: default thread/context, active-thread
 list, stack guard/fill, 32 empty run queues and MSR RI/FP state are initialized.
-This does not implement scheduling, context switching or guest interrupt delivery.
+This does not implement runnable-thread scheduling or context switching.
 
 Original **__OSInitAudioSystem now executes** its RAM backup/DSP-payload copy,
 DCFlushRange and installed system-call exception vector, halted DSP reset,
@@ -166,10 +173,13 @@ MI setup, five handler registrations, reset registration, real-mode RAM BAT
 configuration (12 writes/two rfi transitions), interrupt mask and return.
 Original kernel reporting prints actual memory and arena bounds. With the
 explicit cold reset code, original ClearArena clears the complete arena.
-It stops inside **OSEnableInterrupts, PC `0x801B3A60`, LR `0x801B114C`**: the
-disconnected-controller completion remains pending and EE cannot be enabled
-without real guest interrupt delivery. EE stays disabled; no completion is
-discarded. DVDInit has not run and `OSInit` has **not** returned.
+Original **OSEnableInterrupts now succeeds**. The four real disconnected-controller
+transactions drain through the original external exception vector/dispatcher,
+SI handlers, type callbacks and OSLoadContext, with scheduler-disable/enable
+balance and complete interrupted CPU-context preservation. EE is enabled again
+after every exception return. It stops at the original **DVDInit entry,
+PC `0x801BADF0`, LR `0x801B115C`**. DVDInit has not run and
+`OSInit` has **not** returned.
 The game main loop, GX renderer,
 DVD startup, scheduled game threads, audio, input and saves have not run.
 
@@ -177,10 +187,12 @@ DVD startup, scheduled game threads, audio, input and saves have not run.
 
 With testing enabled, build `hmawl_original_startup_tests` and run CTest's
 `hmawl_original_startup_tests`. It uses the production library and real verified
-DOL, checking the exact interrupt-enable boundary, two original external EXI transaction
+DOL, checking the exact DVDInit boundary, two original external EXI transaction
 requests, cleared channel lock, both empty-slot probe results, exact console
-messages, the original SI command and three queued probes, sampling/handler state,
-pending no-response completion, missing SI backend/VI profile,
+messages, all four original queued SI commands and no-response callbacks,
+sampling/handler state, actual exception delivery/return counts, all interrupted
+CPU registers versus uninterrupted execution, damaged vector/template rejection,
+missing interrupt/SI backend/VI profile,
 exact original SRAM command/DMA bytes, SRAM locks/sync, default thread/context,
 active/run queues, stack guard and MSR state, missing DMA backend and preserved
 malformed profiles plus fresh-profile persistence/reload,

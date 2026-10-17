@@ -57,10 +57,16 @@ void NativeDispatcher::Register(
                  static_cast<uint64_t>(translation.installationSource) + 1u) / 4u)) {
             throw std::runtime_error("Invalid native translation installation source.");
         }
+        if (!translation.installationWords.empty() &&
+            (translation.installationSource == 0 ||
+             translation.installationWords.size() != translation.expectedWords.size())) {
+            throw std::runtime_error("Invalid native patched-vector installation words.");
+        }
         ppc_memory_offset(state, translation.address, translation.expectedWords.size() * 4u);
         if (translation.installationSource != 0) {
             auto source = translation;
             source.address = translation.installationSource;
+            if (!translation.installationWords.empty()) source.expectedWords = translation.installationWords;
             CheckCode(state, source);
         } else {
             CheckCode(state, translation);
@@ -128,6 +134,9 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
     state.pc = address;
     do {
         ppc_check_pending_interrupts(state, state.externalInterruptsEnabled);
+        while (state.externalInterruptsEnabled && ppc_si_interrupt_pending(state)) {
+            ppc_deliver_external_interrupt(state);
+        }
         if (remaining == 0) {
             throw std::runtime_error("Native function-entry budget exceeded at " + Address(state.pc) + ".");
         }
@@ -161,6 +170,12 @@ void NativeDispatcher::Execute(PpcState& state, uint32_t address,
             ++depth;
             try {
                 Run(guest, target, resume, remaining, depth, maxCallDepth);
+            } catch (const PpcInterruptContextReturn&) {
+                if (target != 0x500u || !guest.externalInterrupt ||
+                    guest.externalInterrupt->active || guest.pc != resume) {
+                    --depth;
+                    throw std::runtime_error("Invalid native interrupt context-return signal.");
+                }
             } catch (...) {
                 --depth;
                 throw;

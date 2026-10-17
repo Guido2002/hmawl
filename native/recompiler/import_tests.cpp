@@ -432,6 +432,8 @@ void TestNativeDvdQueue() {
         guest.performanceMonitor.fill(0);
         guest.srr0 = 0;
         guest.srr1 = 0;
+        guest.sprg0 = 0;
+        guest.externalInterrupt.reset();
         guest.systemCallActive = true;
         guest.ramBats.reset();
         ppc_write_u32(guest, 0xcc003004u, 0xf0u);
@@ -465,6 +467,9 @@ void TestNativeDvdQueue() {
     state.performanceMonitor.fill(0x12345678u);
     state.srr0 = 0x80001234u;
     state.srr1 = 0x32u;
+    state.sprg0 = 0x12345678u;
+    state.externalInterrupt.emplace();
+    state.externalInterrupt->returned = 4;
     state.ramBats.emplace();
     state.ramBats->writes = 11;
     state.piInterruptMask = 0;
@@ -518,7 +523,9 @@ void TestNativeDvdQueue() {
                     state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
                     state.hid0 == 0xc200u && state.l2cr == 0x80000000u &&
                     state.performanceMonitor == monitor && state.srr0 == 0x80001234u &&
-                    state.srr1 == 0x32u && !state.systemCallActive && state.ramBats &&
+                    state.srr1 == 0x32u && state.sprg0 == 0x12345678u &&
+                    state.externalInterrupt && state.externalInterrupt->returned == 4 &&
+                    !state.externalInterrupt->active && !state.systemCallActive && state.ramBats &&
                     state.ramBats->writes == 11 && !state.ramBats->realModeActive &&
                     state.piInterruptMask == 0xf0u &&
                     state.miInterruptMask == 0 && state.dspControl == 0x6acu &&
@@ -616,6 +623,9 @@ void TestNativeDvdQueue() {
         guest.performanceMonitor.fill(UINT32_MAX);
         guest.srr0 = UINT32_MAX;
         guest.srr1 = UINT32_MAX;
+        guest.sprg0 = UINT32_MAX;
+        guest.externalInterrupt->active = true;
+        guest.externalInterrupt->returned = UINT32_MAX;
         guest.systemCallActive = true;
         guest.ramBats.reset();
         ppc_write_u32(guest, 0xcc003004u, 0xf0u);
@@ -645,7 +655,9 @@ void TestNativeDvdQueue() {
                 state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
                 state.hid0 == 0xc200u && state.l2cr == 0x80000000u &&
                 state.performanceMonitor == monitor && state.srr0 == 0x80001234u &&
-                state.srr1 == 0x32u && !state.systemCallActive && state.ramBats &&
+                state.srr1 == 0x32u && state.sprg0 == 0x12345678u &&
+                state.externalInterrupt && state.externalInterrupt->returned == 4 &&
+                !state.externalInterrupt->active && !state.systemCallActive && state.ramBats &&
                 state.ramBats->writes == 11 && !state.ramBats->realModeActive &&
                 state.piInterruptMask == 0xf0u &&
                 state.miInterruptMask == 0 && state.dspControl == 0x6acu &&

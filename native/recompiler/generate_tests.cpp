@@ -376,6 +376,12 @@ int main(int argc, char** argv) {
             Emit(output, 0xb5b0u, {0x44000002u}, {true, true});
             Emit(output, 0xb5c0u, {0x4c000064u}, {true, true});
             Emit(output, 0xb5d0u, {0x44000002u, 0x38630001u});
+            Emit(output, 0xb600u, {XForm(3, 0, 0, 19)});
+            Emit(output, 0xb610u, {(31u << 26) | (3u << 21) | (0x5au << 12) | (144u << 1)});
+            Emit(output, 0xb620u, {XForm(3, 4, 0, 202, true)});
+            Emit(output, 0xb630u, {XForm(3, 26, 0, 467), XForm(4, 26, 0, 339)});
+            Emit(output, 0xb640u, {XForm(3, 27, 0, 467), XForm(4, 27, 0, 339)});
+            Emit(output, 0xb650u, {XForm(3, 16, 8, 467), XForm(4, 16, 8, 339)});
             for (unsigned opcode : {24u, 28u, 444u, 536u}) {
                 Emit(output, 0x1000u + opcode * 4u,
                      {XForm(3, 4, 5, opcode, true)});

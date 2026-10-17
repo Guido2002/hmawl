@@ -92,6 +92,17 @@ struct PpcMemoryProtection {
     uint32_t acknowledgements = 0;
 };
 
+struct PpcExternalInterrupt {
+    bool active = false;
+    bool inHandler = false;
+    uint32_t resume = 0;
+    uint32_t savedMsr = 0;
+    uint32_t delivered = 0;
+    uint32_t returned = 0;
+};
+
+struct PpcInterruptContextReturn {};
+
 struct PpcState {
     uint32_t gpr[32] = {};
     // Raw IEEE-754 bits keep NaN payloads and the independent paired lane intact.
@@ -111,6 +122,8 @@ struct PpcState {
     uint32_t srr0 = 0;
     uint32_t srr1 = 0;
     bool systemCallActive = false;
+    uint32_t sprg0 = 0;
+    std::optional<PpcExternalInterrupt> externalInterrupt;
     std::optional<PpcRamBatState> ramBats;
     std::optional<PpcMemoryProtection> memoryProtection;
     std::vector<uint8_t> memory;
@@ -169,10 +182,26 @@ inline void ppc_reset_performance_monitor(PpcState& state, unsigned index, uint3
     state.performanceMonitor[index] = 0;
 }
 
+inline uint32_t ppc_pi_interrupt_cause(const PpcState& state) {
+    uint32_t cause = 0;
+    if (state.serialInterface &&
+        (state.serialInterface->communication & 0xc0000000u) == 0xc0000000u) cause |= 8u;
+    if (state.dspHardware && state.dspControl) {
+        const auto control = *state.dspControl;
+        if ((control & 0x180u) == 0x180u || (control & 0x60u) == 0x60u ||
+            (control & 0x18u) == 0x18u) cause |= 0x80u;
+    }
+    return cause;
+}
+
+inline bool ppc_si_interrupt_pending(const PpcState& state) {
+    return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & 8u) != 0;
+}
+
 inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
-    if (enabled && state.piInterruptMask.has_value() && (*state.piInterruptMask & 8u) != 0 &&
-        state.serialInterface.has_value() &&
-        (state.serialInterface->communication & 0xc0000000u) == 0xc0000000u) {
+    if (enabled && ppc_si_interrupt_pending(state) &&
+        (!state.externalInterrupt || !state.callException ||
+         state.externalInterrupt->active)) {
         throw std::runtime_error("Native SI completion interrupt requires guest interrupt delivery.");
     }
     if (enabled && state.piInterruptMask.has_value() && (*state.piInterruptMask & 0x80u) != 0 &&
@@ -272,6 +301,8 @@ inline void ppc_write_ram_bat(PpcState& state, unsigned spr, uint32_t value) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003000u &&
+        state.externalInterrupt) return ppc_pi_interrupt_cause(state);
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003024u &&
         state.piResetCode) return *state.piResetCode;
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
@@ -511,7 +542,7 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
             if ((serial.communication & 1u) != 0) {
                 throw std::runtime_error("Cannot change SI transfer parameters while a transfer is pending.");
             }
-            if ((value & ~0xc87f7f07u) != 0) {
+            if ((value & ~0xe87f7f07u) != 0) {
                 throw std::runtime_error("Unsupported SI communication control write.");
             }
             if ((value & 1u) != 0) {
@@ -920,6 +951,7 @@ inline void ppc_call_guest(PpcState& state, uint32_t address) {
 inline void ppc_system_call(PpcState& state, uint32_t next) {
     if (state.memoryMap != PpcMemoryMap::GameCubeRam || state.systemCallActive ||
         (state.ramBats && state.ramBats->realModeActive) ||
+        (state.externalInterrupt && state.externalInterrupt->active) ||
         !state.callException || (ppc_read_msr(state) & ~0xa032u) != 0) {
         throw std::runtime_error("Unsupported or nested native PowerPC system-call context.");
     }
@@ -935,6 +967,36 @@ inline void ppc_system_call(PpcState& state, uint32_t next) {
 }
 
 inline void ppc_return_from_system_call(PpcState& state) {
+    if (state.externalInterrupt && state.externalInterrupt->active) {
+        auto& interrupt = *state.externalInterrupt;
+        if (state.systemCallActive || (state.srr0 & 3u) != 0 ||
+            (state.srr1 & ~0xa032u) != 0) {
+            throw std::runtime_error("Unsupported external interrupt rfi state.");
+        }
+        if (!interrupt.inHandler) {
+            if (ppc_read_msr(state) != 0 || state.srr1 != 0x30u ||
+                state.srr0 < 0x80000000u || state.srr0 >= 0x80000000u + kGameCubeRamSize) {
+                throw std::runtime_error("External interrupt vector requires a translated RAM handler.");
+            }
+            interrupt.inHandler = true;
+        } else {
+            if (state.srr0 != interrupt.resume || state.srr1 != interrupt.savedMsr ||
+                state.externalInterruptsEnabled) {
+                throw std::runtime_error("Native interrupt return cannot switch guest contexts.");
+            }
+            interrupt.active = false;
+            interrupt.inHandler = false;
+            ++interrupt.returned;
+            state.msr = state.srr1 & ~0x8000u;
+            state.externalInterruptsEnabled = (state.srr1 & 0x8000u) != 0;
+            state.pc = state.srr0;
+            // OSLoadContext abandons the handler's guest call chain, not just one C++ frame.
+            throw PpcInterruptContextReturn{};
+        }
+        state.msr = state.srr1;
+        state.pc = state.srr0;
+        return;
+    }
     if ((!state.systemCallActive && !state.ramBats) || (state.srr0 & 3u) != 0 ||
         (state.srr1 & ~0xa032u) != 0) {
         throw std::runtime_error("Native rfi requires a supported active system-call context.");
@@ -967,6 +1029,29 @@ inline void ppc_return_from_system_call(PpcState& state) {
     state.externalInterruptsEnabled = (state.srr1 & 0x8000u) != 0;
     state.pc = state.srr0;
     state.systemCallActive = false;
+}
+
+inline void ppc_deliver_external_interrupt(PpcState& state) {
+    if (!state.externalInterruptsEnabled || !ppc_si_interrupt_pending(state)) return;
+    ppc_check_pending_interrupts(state, true);
+    if (!state.externalInterrupt || !state.callException || state.externalInterrupt->active ||
+        state.systemCallActive || (ppc_read_msr(state) & ~0xa032u) != 0) {
+        throw std::runtime_error("Unsupported native external interrupt delivery context.");
+    }
+    auto& interrupt = *state.externalInterrupt;
+    interrupt.resume = state.pc;
+    interrupt.savedMsr = ppc_read_msr(state);
+    interrupt.active = true;
+    interrupt.inHandler = false;
+    ++interrupt.delivered;
+    state.srr0 = interrupt.resume;
+    state.srr1 = interrupt.savedMsr;
+    state.msr = 0;
+    state.externalInterruptsEnabled = false;
+    state.callException(0x500u, interrupt.resume, state);
+    if (interrupt.active || state.pc != interrupt.resume) {
+        throw std::runtime_error("Native external interrupt handler returned without context-restoring rfi.");
+    }
 }
 
 inline uint64_t ppc_read_time_base(const PpcState& state) {

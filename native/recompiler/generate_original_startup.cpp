@@ -61,6 +61,13 @@ int main(int argc, char** argv) {
             instructions.emplace(0xc00u + static_cast<uint32_t>(i * 4), systemCallWords[i]);
         }
         leaders.insert(0xc00u);
+        const auto interruptVector = image.ReadWords(0x801b1490u, 0x98u);
+        for (size_t i = 0; i < interruptVector.size(); ++i) {
+            auto word = interruptVector[i];
+            if (i == (0x801b14f8u - 0x801b1490u) / 4u) word |= 4u;
+            instructions.emplace(0x500u + static_cast<uint32_t>(i * 4), word);
+        }
+        leaders.insert(0x500u);
         const auto ramConfiguration = image.ReadWords(0x801b4f54u, 0x80u);
         for (size_t i = 0; i < ramConfiguration.size(); ++i) {
             instructions.emplace(0x001b4f54u + static_cast<uint32_t>(i * 4), ramConfiguration[i]);
@@ -114,6 +121,13 @@ int main(int argc, char** argv) {
             bindings << "}";
             if (address >= 0xc00u && address < 0xc1cu) {
                 bindings << ",0x" << Hex(0x801b6968u + address - 0xc00u) << "u";
+            } else if (address >= 0x500u && address < 0x598u) {
+                const auto source = 0x801b1490u + address - 0x500u;
+                bindings << ",0x" << Hex(source) << "u,{";
+                for (auto word : image.ReadWords(source, static_cast<uint32_t>(words.size() * 4u))) {
+                    bindings << "0x" << Hex(word) << "u,";
+                }
+                bindings << "}";
             }
             bindings << "},\n";
         }

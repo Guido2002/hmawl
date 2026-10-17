@@ -629,6 +629,26 @@ std::string RecompileFunction(uint32_t address,
             uint32_t destination = rt;
             bool record = (instruction & 1u) != 0;
             switch (extendedOpcode) {
+            case 19:
+                if (record || ra != 0 || rb != 0) {
+                    throw std::runtime_error("Invalid mfcr instruction at " + Hex(pc) + ".");
+                }
+                expression = "state.cr";
+                break;
+            case 144: {
+                if (record || (instruction & 0x00100800u) != 0) {
+                    throw std::runtime_error("Invalid mtcrf instruction at " + Hex(pc) + ".");
+                }
+                const auto fields = (instruction >> 12) & 0xffu;
+                uint32_t mask = 0;
+                for (unsigned field = 0; field < 8; ++field) {
+                    if ((fields & (0x80u >> field)) != 0) mask |= 0xf0000000u >> (field * 4u);
+                }
+                output << "    state.cr = (state.cr & ~" << Hex(mask) << "u) | (state.gpr["
+                       << rt << "] & " << Hex(mask) << "u);\n";
+                emitted = true;
+                break;
+            }
             case 86:
             case 470:
             case 982:
@@ -693,6 +713,10 @@ std::string RecompileFunction(uint32_t address,
             case 138:
                 expression = "ppc_add_carry(state, " + left + ", " + right +
                              (extendedOpcode == 138 ? ", true)" : ")");
+                break;
+            case 202:
+                if (rb != 0) throw std::runtime_error("Invalid addze instruction at " + Hex(pc) + ".");
+                expression = "ppc_add_carry(state, " + left + ", 0u, true)";
                 break;
             case 0:
             case 32: {
@@ -873,7 +897,8 @@ std::string RecompileFunction(uint32_t address,
                 break;
             case 339: {
                 const uint32_t spr = ra | (rb << 5);
-                if (record || (spr != 1 && spr != 8 && spr != 9 && spr != 1008 && spr != 1017 &&
+                if (record || (spr != 1 && spr != 8 && spr != 9 && spr != 26 && spr != 27 &&
+                               spr != 272 && spr != 1008 && spr != 1017 &&
                                (spr < 912 || spr > 920))) {
                     throw std::runtime_error("Unsupported mfspr instruction " +
                                              Hex(instruction) + " at " +
@@ -882,6 +907,7 @@ std::string RecompileFunction(uint32_t address,
                 expression = spr == 1017 ? "state.l2cr" :
                     spr == 1008 ? "state.hid0" : spr == 920 ? "state.hid2" :
                     spr >= 912 ? "state.gqr[" + std::to_string(spr - 912) + "]" :
+                    spr == 26 ? "state.srr0" : spr == 27 ? "state.srr1" : spr == 272 ? "state.sprg0" :
                     spr == 1 ? "state.xer" : spr == 8 ? "state.lr" : "state.ctr";
                 record = false;
                 break;
@@ -898,9 +924,11 @@ std::string RecompileFunction(uint32_t address,
             }
             case 467: {
                 const uint32_t spr = ra | (rb << 5);
-                if ((spr >= 528 && spr <= 543) || spr == 26 || spr == 27) {
+                if ((spr >= 528 && spr <= 543) || spr == 26 || spr == 27 || spr == 272) {
                     if (record) throw std::runtime_error("Invalid BAT/SRR transfer at " + Hex(pc) + ".");
-                    if (spr == 26 || spr == 27) {
+                    if (spr == 272) {
+                        output << "    state.sprg0 = state.gpr[" << rt << "];\n";
+                    } else if (spr == 26 || spr == 27) {
                         output << "    state.srr" << (spr - 26) << " = state.gpr[" << rt << "];\n";
                     } else {
                         output << "    ppc_write_ram_bat(state, " << spr << "u, state.gpr[" << rt << "]);\n";

@@ -1624,6 +1624,135 @@ void TestNativeSramAndDma() {
             "Compiled dcbi changed coherent RAM or CPU flags.");
 }
 
+void TestCompiledInterruptRegisters() {
+    PpcState state;
+    state.cr = 0x12345678u;
+    ppc_0000B600(state);
+    Require(state.gpr[3] == state.cr, "Compiled mfcr did not read every CR field.");
+    state.gpr[3] = 0xabcdef01u;
+    ppc_0000B610(state);
+    Require(state.cr == 0x1b3de608u, "Compiled mtcrf did not preserve unselected fields.");
+    for (uint32_t value : {0u, 0x7fffffffu, UINT32_MAX}) {
+        for (uint32_t carry : {0u, 0x20000000u}) {
+            state.gpr[4] = value;
+            state.xer = 0xc0000000u | carry;
+            ppc_0000B620(state);
+            const uint64_t expected = static_cast<uint64_t>(value) + (carry != 0 ? 1u : 0u);
+            Require(state.gpr[3] == static_cast<uint32_t>(expected) &&
+                        state.xer == (0xc0000000u | (expected > UINT32_MAX ? 0x20000000u : 0u)) &&
+                        (state.cr >> 28) == (state.gpr[3] == 0 ? 3u :
+                                            (state.gpr[3] & 0x80000000u) != 0 ? 9u : 5u),
+                    "Compiled addze lost carry, signed CR0 or XER SO/OV.");
+        }
+    }
+    for (auto function : {ppc_0000B630, ppc_0000B640, ppc_0000B650}) {
+        state.gpr[3] = 0x82345678u;
+        state.gpr[4] = 0;
+        function(state);
+        Require(state.gpr[4] == state.gpr[3], "Compiled exception SPR round trip differs.");
+    }
+    Require(state.srr0 == 0x82345678u && state.srr1 == 0x82345678u &&
+                state.sprg0 == 0x82345678u, "Compiled exception SPR targets differ.");
+}
+
+void TestExternalInterruptDelivery() {
+    const auto create = [] {
+        PpcState state;
+        state.memoryMap = PpcMemoryMap::GameCubeRam;
+        state.memory.resize(0x4000);
+        state.externalInterrupt.emplace();
+        state.serialInterface.emplace();
+        state.serialInterface->communication = 0xc0000000u;
+        state.piInterruptMask = 8;
+        state.msr = 0x32u;
+        state.externalInterruptsEnabled = true;
+        state.lr = 0xfffffffcu;
+        for (uint32_t address : {0x500u, 0x1000u, 0x2000u, 0x2100u, 0x3000u}) {
+            ppc_write_u32(state, address, 0x60000000u);
+        }
+        return state;
+    };
+    auto initial = create();
+    NativeDispatcher dispatcher;
+    dispatcher.Register(0, initial, {
+        {0x500u, [](PpcState& state) {
+            Require(state.externalInterrupt->active && !state.externalInterrupt->inHandler &&
+                        !state.externalInterruptsEnabled && state.srr0 == 0x80001000u &&
+                        state.srr1 == 0x8032u && state.lr == 0xfffffffcu,
+                    "External interrupt did not capture the actual guest PC/MSR or changed LR.");
+            state.srr0 = 0x80002000u;
+            state.srr1 = 0x30u;
+            ppc_return_from_system_call(state);
+        }, {0x60000000u}, 0x3000u, {0x60000000u}},
+        {0x80002000u, [](PpcState& state) {
+            state.lr = 0x80002004u;
+            state.callGuest(0x80002100u, state);
+            ++state.gpr[30];
+        }, {0x60000000u}},
+        {0x80002100u, [](PpcState& state) {
+            ppc_write_u32(state, 0xcc006434u, 0xc0000000u);
+            state.srr0 = state.externalInterrupt->resume;
+            state.srr1 = state.externalInterrupt->savedMsr;
+            state.lr = 0xfffffffcu;
+            ppc_return_from_system_call(state);
+        }, {0x60000000u}},
+        {0x80001000u, [](PpcState& state) { ++state.gpr[31]; state.pc = state.lr; },
+         {0x60000000u}}
+    });
+    dispatcher.Execute(initial, 0x80001000u);
+    Require(initial.gpr[31] == 1 && initial.gpr[30] == 0 && initial.externalInterrupt->delivered == 1 &&
+                initial.externalInterrupt->returned == 1 && !initial.externalInterrupt->active &&
+                ppc_read_msr(initial) == 0x8032u && initial.pc == 0xfffffffcu &&
+                !initial.callGuest && !initial.callException,
+            "Interrupt rfi did not unwind nested guest calls or restore dispatcher ownership.");
+    for (unsigned limit : {1u, 2u}) {
+        auto limited = create();
+        Reject([&] { dispatcher.Execute(limited, 0x80001000u, limit); }, "budget exceeded");
+        Require(!limited.callGuest && !limited.callException && limited.externalInterrupt->returned == 0,
+                "Exception budget failure leaked callbacks or fabricated context restoration.");
+    }
+    for (unsigned depth : {1u, 2u}) {
+        auto shallow = create();
+        Reject([&] { dispatcher.Execute(shallow, 0x80001000u, 100, depth); }, "call-depth");
+        Require(!shallow.callGuest && !shallow.callException,
+                "External exception bypassed the shared call-depth limit.");
+    }
+    auto damaged = create();
+    ppc_write_u32(damaged, 0x500u, 0);
+    Reject([&] { dispatcher.Execute(damaged, 0x80001000u); }, "code mismatch");
+    auto missing = create();
+    missing.externalInterrupt.reset();
+    Reject([&] { dispatcher.Execute(missing, 0x80001000u); }, "guest interrupt delivery");
+    auto masked = create();
+    masked.piInterruptMask = 0;
+    Require(ppc_read_u32(masked, 0xcc003000u) == 8 && !ppc_si_interrupt_pending(masked),
+            "PI source cause incorrectly depends on the PI interrupt mask.");
+    dispatcher.Execute(masked, 0x80001000u);
+    Require(masked.externalInterrupt->delivered == 0 &&
+                masked.serialInterface->communication == 0xc0000000u,
+            "Masked SI source was delivered or silently cleared.");
+    auto invalid = create();
+    invalid.externalInterrupt->active = true;
+    invalid.externalInterrupt->inHandler = true;
+    invalid.externalInterruptsEnabled = false;
+    invalid.externalInterrupt->resume = 0x80001000u;
+    invalid.externalInterrupt->savedMsr = 0x8032u;
+    invalid.srr0 = 0x80001004u;
+    invalid.srr1 = 0x8032u;
+    Reject([&] { ppc_return_from_system_call(invalid); }, "cannot switch guest contexts");
+    Reject([&] { ppc_write_msr(invalid, 0x8032u); }, "guest interrupt delivery");
+    Reject([&] { dispatcher.Register(1, invalid,
+        {{0x80003004u, ppc_0000B5C0, {0x4c000064u}, 0, {0x60000000u}}}); },
+        "installation words");
+    Reject([&] { dispatcher.Register(1, invalid,
+        {{0x80003004u, ppc_0000B5C0, {0x4c000064u}, 0x3000u,
+          {0x60000000u, 0x60000000u}}}); }, "installation words");
+    ppc_write_u32(invalid, 0x3000u, 0);
+    Reject([&] { dispatcher.Register(1, invalid,
+        {{0x80003004u, ppc_0000B5C0, {0x4c000064u}, 0x3000u, {0x60000000u}}}); },
+        "code mismatch");
+}
+
 void TestCompiledSystemCall() {
     for (uint32_t mode : {0u, 0x30u, 0x32u, 0x2032u, 0xa032u}) {
         PpcState state;
@@ -3225,6 +3354,8 @@ int main() {
         TestSiTransactionsAndPendingInterrupt();
         TestNativeSramAndDma();
         TestCompiledSystemCall();
+        TestCompiledInterruptRegisters();
+        TestExternalInterruptDelivery();
         TestDspResetAndAramDma();
         TestCompiledDspInitialization();
         TestNativeConsoleAndEmptyExi();

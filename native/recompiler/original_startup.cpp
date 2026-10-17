@@ -40,6 +40,7 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.miInterruptMask = 0;
     state.memoryProtection.emplace();
     state.ramBats.emplace();
+    state.externalInterrupt.emplace();
     state.dspControl = 0;
     state.dspHardware.emplace();
     state.dspHardware->aram.resize(16u * 1024u * 1024u);

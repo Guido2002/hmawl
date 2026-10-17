@@ -56,7 +56,8 @@ native console output of both SDK versions. Original SI code configures sampling
 registers its interrupt handler, submits a controller type query and queues the
 remaining three probes. Controllers are explicitly disconnected: the transaction
 reports a hardware no-response error, not invented input. Its completion interrupt
-remains pending while EE is disabled; interrupt delivery is not yet implemented.
+remains pending while EE is disabled and is now delivered through the original
+installed external-exception vector once EE is enabled.
 Original SRAM initialization also returns after a real 64-byte EXI DMA read from
 a local native console profile. Original default-thread/context and scheduler
 queue initialization then returns. Original audio initialization now installs its
@@ -71,9 +72,12 @@ overwrite are eliminated, never replaced by fabricated ROM data.
 Original memory-protection initialization now returns too, executing both real-mode
 `rfi` transitions and the original 24 MiB RAM BAT configuration. Original kernel
 reports print `Memory 24 MB` and the real arena bounds; original `ClearArena`
-clears that arena before startup reaches `OSEnableInterrupts`.
-The runner stops at `PC=0x801B3A60`, `LR=0x801B114C`: pending SI completion
-requires real guest interrupt delivery, which is not yet implemented.
+clears that arena before startup reaches `OSEnableInterrupts`. The original
+external interrupt dispatcher, SI completion/type callbacks, scheduler-disable/
+enable pair and `OSLoadContext` now drain all four disconnected-controller probes.
+Original context restoration preserves the interrupted registers and unwinds the
+handler's nested native calls; arbitrary thread switches remain unsupported.
+The runner stops at the original `DVDInit` entry, `PC=0x801BADF0`, `LR=0x801B115C`.
 General DSP tasks, audio playback and full OSInit remain unfinished.
 This is an **explicit dependency stop (exit code 3)**, not successful OSInit,
 game initialization or rendering. RTC/ROM, SRAM writes, AD16 and connected EXI devices

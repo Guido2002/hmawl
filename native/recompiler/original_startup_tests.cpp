@@ -153,9 +153,9 @@ int main(int argc, char** argv) {
         std::string console;
         unsigned siTransfers = 0;
         state.transferSi = [&](const SiTransferRequest& request) {
-            Require(request.channel == 0 && request.output == std::vector<uint8_t>{0} &&
-                        request.inputLength == 3 && siTransfers++ == 0,
-                    "Original SI controller type query differs or an unserviced queue was bypassed.");
+            Require(request.channel == siTransfers && request.output == std::vector<uint8_t>{0} &&
+                        request.inputLength == 3 && siTransfers++ < 4,
+                    "Original queued SI controller type query differs.");
             return TransferDisconnectedSi(request);
         };
         state.writeConsole = [&](const std::string& text) { console += text; };
@@ -169,8 +169,11 @@ int main(int argc, char** argv) {
             ReadGuestConsoleString(state, ppc_read_u32(state, 0x80348cd8u)) + '\n';
         const auto result = RunOriginalStartup(dispatcher, state);
         std::cout << DescribeOriginalStartupStop(result) << '\n';
-        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801b3a60u &&
-                    result.lr == 0x801b114cu && transfers == 2 && siTransfers == 1 &&
+        std::cout << "SI transfers=" << siTransfers << " interrupts=" << state.externalInterrupt->delivered
+                  << " restored=" << state.externalInterrupt->returned << " SRR0=0x" << std::hex
+                  << state.srr0 << " SRR1=0x" << state.srr1 << std::dec << '\n';
+        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801badf0u &&
+                    result.lr == 0x801b115cu && transfers == 2 && siTransfers == 4 &&
                     sramCommands == 1 && sramDmas == 1 &&
                     console.find(expectedVersion) == 0 &&
                     console.find("Memory 24 MB\n") != std::string::npos &&
@@ -180,12 +183,14 @@ int main(int argc, char** argv) {
                     ppc_read_u32(state, 0x80340c6cu) == 0 &&
                     ppc_read_u32(state, 0x800030c0u) == 0 &&
                     ppc_read_u32(state, 0x800030c4u) == 0 &&
-                    result.reason.find("SI completion interrupt requires guest interrupt delivery") != std::string::npos &&
+                    result.reason.find("No native translation registered") != std::string::npos &&
                     ppc_read_u32(state, 0x80349ad0u) == 0,
                 "Production startup stopped at an unexpected boundary.");
-        Require(state.srr0 == 0x801b5144u && state.srr1 == 0x32u &&
+        Require(state.externalInterrupt && state.externalInterrupt->delivered == 4 &&
+                    state.externalInterrupt->returned == 4 && !state.externalInterrupt->active &&
+                    state.srr0 == state.externalInterrupt->resume && state.srr1 == 0x8032u &&
                     !state.systemCallActive && !state.callException && state.hid0 == 0xc200u,
-                "Original real-mode configuration did not return through its saved SRR state.");
+                "Original SI exceptions did not return through the original context restore.");
         const PpcRamBatState expectedBats;
         Require(state.ramBats->values == expectedBats.values &&
                     state.ramBats->writes == 12 && state.ramBats->transitions == 2 &&
@@ -295,7 +300,7 @@ int main(int argc, char** argv) {
                     ppc_read_u32(state, thread + 0x304u) == 0x8035cfa0u &&
                     ppc_read_u32(state, thread + 0x308u) == 0x8034cfa0u &&
                     ppc_read_u32(state, 0x8034cfa0u) == 0xdeadbabeu &&
-                    ppc_read_msr(state) == 0x32u,
+                    ppc_read_msr(state) == 0x8032u,
                 "Original default thread, active queue, context ownership, stack guard or RI/FP state differs.");
         for (unsigned index = 0; index < 64; ++index) {
             Require(ppc_read_u32(state, 0x80317b58u + index * 4u) == 0,
@@ -330,21 +335,69 @@ int main(int argc, char** argv) {
         const uint32_t expectedPolling =
             (uint32_t{ppc_read_u16(state, 0x802e60b8u)} << 16) |
             (uint32_t{ppc_read_u8(state, 0x802e60bau)} << 8);
+        std::cout << "SI CSR=0x" << std::hex << state.serialInterface->communication
+                  << " status=0x" << state.serialInterface->status << " active=0x"
+                  << ppc_read_u32(state, 0x802e5fe4u) << std::dec << '\n';
         Require(state.piInterruptMask == 0xf8u &&
                     ppc_read_u32(state, 0x80003040u + 20u * 4u) == 0x801f4d58u &&
                     state.serialInterface->polling == expectedPolling &&
-                    state.serialInterface->communication == 0xe0010300u &&
-                    state.serialInterface->status == 0x08000000u &&
-                    ppc_read_u32(state, 0x802e5fe4u) == 0 &&
+                    state.serialInterface->communication == 0x60010306u &&
+                    state.serialInterface->status == 0 &&
+                    ppc_read_u32(state, 0x802e5fe4u) == UINT32_MAX &&
                     ppc_read_u32(state, 0x80340a60u) == UINT32_MAX,
                 "Original SI sampling/interrupt setup differs or a controller completion was fabricated.");
-        for (uint32_t channel = 1; channel < 4; ++channel) {
-            Require(ppc_read_u32(state, 0x80340a60u + channel * 0x20u) == channel &&
-                        ppc_read_u32(state, 0x80340a68u + channel * 0x20u) == 1 &&
-                        ppc_read_u32(state, 0x80340a70u + channel * 0x20u) == 3 &&
-                        ppc_read_u32(state, 0x80340a74u + channel * 0x20u) == 0x801f5b58u,
-                    "Original SI queues did not retain the remaining controller probes.");
+        for (uint32_t channel = 0; channel < 4; ++channel) {
+            Require(ppc_read_u32(state, 0x80340a60u + channel * 0x20u) == UINT32_MAX &&
+                        (ppc_read_u32(state, 0x802e5ff8u + channel * 4u) & 8u) != 0,
+                    "Original SI queues did not drain or retain disconnected-controller results.");
         }
+        auto noInterruptDelivery = CreateOriginalStartupState(image);
+        noInterruptDelivery.externalInterrupt.reset();
+        const auto interruptFailure = RunOriginalStartup(dispatcher, noInterruptDelivery);
+        Require(interruptFailure.pc == 0x801b3a60u &&
+                    interruptFailure.reason.find("requires guest interrupt delivery") != std::string::npos &&
+                    !noInterruptDelivery.externalInterruptsEnabled,
+                "Missing interrupt backend discarded a real pending SI completion.");
+        auto resumedInterrupts = noInterruptDelivery;
+        resumedInterrupts.externalInterrupt.emplace();
+        resumedInterrupts.externalInterruptsEnabled = true;
+        resumedInterrupts.lr = 0xfffffffcu;
+        resumedInterrupts.cr = 0x12345678u;
+        resumedInterrupts.xer = 0xe0000000u;
+        resumedInterrupts.ctr = 0x87654321u;
+        for (unsigned reg = 0; reg < 32; ++reg) {
+            if (reg != 1 && reg != 2 && reg != 13) {
+                resumedInterrupts.gpr[reg] = 0xa5000000u + reg;
+            }
+        }
+        auto uninterrupted = resumedInterrupts;
+        uninterrupted.piInterruptMask = 0;
+        dispatcher.Execute(uninterrupted, 0x801b3a58u);
+        dispatcher.Execute(resumedInterrupts, 0x801b3a58u);
+        Require(std::equal(std::begin(uninterrupted.gpr), std::end(uninterrupted.gpr),
+                           std::begin(resumedInterrupts.gpr)) &&
+                    uninterrupted.cr == resumedInterrupts.cr && uninterrupted.xer == resumedInterrupts.xer &&
+                    uninterrupted.ctr == resumedInterrupts.ctr && uninterrupted.lr == resumedInterrupts.lr &&
+                    uninterrupted.gqr == resumedInterrupts.gqr && uninterrupted.fpr == resumedInterrupts.fpr &&
+                    uninterrupted.fpscr == resumedInterrupts.fpscr &&
+                    ppc_read_msr(uninterrupted) == ppc_read_msr(resumedInterrupts) &&
+                    resumedInterrupts.externalInterrupt->returned == 4,
+                "Original exception vector/OSLoadContext did not preserve every interrupted CPU register.");
+        auto corruptedVector = noInterruptDelivery;
+        corruptedVector.externalInterrupt.emplace();
+        corruptedVector.externalInterruptsEnabled = true;
+        corruptedVector.lr = 0xfffffffcu;
+        ppc_write_u32(corruptedVector, 0x568u, 0x38600005u);
+        RequireFailure([&] { dispatcher.Execute(corruptedVector, 0x801b3a58u); },
+                       "Execution accepted an incorrectly patched original external interrupt vector.");
+        Require(corruptedVector.externalInterrupt->returned == 0 &&
+                    !corruptedVector.callGuest && !corruptedVector.callException,
+                "Vector integrity failure fabricated return or leaked dispatcher callbacks.");
+        auto corruptedTemplate = CreateOriginalStartupState(image);
+        ppc_write_u32(corruptedTemplate, 0x801b14f8u, 0x38600004u);
+        NativeDispatcher corruptSource;
+        RequireFailure([&] { RegisterOriginalStartup(corruptSource, corruptedTemplate); },
+                       "Patched-vector registration did not verify the unpatched DOL source.");
         auto missingSiBackend = CreateOriginalStartupState(image);
         missingSiBackend.transferSi = {};
         const auto siFailure = RunOriginalStartup(dispatcher, missingSiBackend);
@@ -366,7 +419,7 @@ int main(int argc, char** argv) {
                     consoleFailure.reason.find("requires a native console sink") != std::string::npos,
                 "Original version logging silently ignored a missing native console.");
         Require(!state.callGuest && state.hid0 == 0xc200u && state.hid2 == 0xa0000000u &&
-                    state.l2cr == 0x80000000u && !state.externalInterruptsEnabled &&
+                    state.l2cr == 0x80000000u && state.externalInterruptsEnabled &&
                     ppc_read_u32(state, 0x80349904u) == 1u &&
                     ppc_read_u32(state, 0x80003010u) == 0x801b4260u &&
                     ppc_read_u32(state, 0x8000301cu) == 0x801b3274u,

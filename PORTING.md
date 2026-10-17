@@ -36,8 +36,9 @@ original DSP-init program now executes as compiled C++ through an explicit
 BIOS-free native bootstrap, clears DSP RAM and sends its actual compiled stores.
 Original audio initialization consumes its message, resets and returns. The
 runner completes original memory protection, kernel reports and arena clearing,
-then stops at `OSEnableInterrupts` (`0x801B3A60`) because pending SI completion
-requires guest interrupt delivery; full OSInit,
+then delivers real SI completions through the original external exception vector,
+dispatcher, callbacks and context restoration. It stops at original `DVDInit`
+(`0x801BADF0`, LR `0x801B115C`); full OSInit,
 game initialization, the main loop and a rendered game frame remain unachieved.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
@@ -479,9 +480,21 @@ queue. Full runtime scheduling and device services are still needed.
   Original ClearArena clears its entire poisoned arena and preserves the upper
   guard. Tests verify 12 actual BAT writes, both rfi transitions, all five MI
   handlers, exact 64 KiB console thresholds, missing profiles and CPU restoration.
-  The runner reaches OSEnableInterrupts at `0x801B3A60`, LR `0x801B114C`, with
-  pending SI completion still intact. Enabling EE fails explicitly until real
-  guest interrupt delivery is implemented; DVDInit and full OSInit have not run.
+  This initially reached OSEnableInterrupts with pending SI completion intact.
+- [x] Deliver SI external interrupts through the installed original vector at
+  physical `0x500`, original external handler/priority dispatcher, SI completion/
+  type callbacks and original `OSLoadContext`. Derive PI cause from device flags
+  independently of the PI mask. Accept read-only COMERR writeback without
+  changing its hardware status. Drain all four queued disconnected-controller
+  probes through four real exception returns. Original scheduler-disable/enable
+  calls balance; no runnable-thread switch is synthesized. Context-restoring
+  rfi unwinds nested native guest calls and shares block/depth limits. Check
+  unpatched source words at registration and patched installed words on every
+  vector block entry. Tests compare every interrupted GPR, CR/XER/CTR/LR, GQR,
+  FPR/FPSCR and MSR against uninterrupted execution; reject damaged vectors,
+  missing delivery, context switches and nested exceptions. Preserve exception
+  CPU state in native DVD callbacks. The runner now reaches original DVDInit,
+  `PC=0x801BADF0`, LR `0x801B115C`; full OSInit remains incomplete.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
