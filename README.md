@@ -47,7 +47,7 @@ blocks only, not a PowerPC interpreter or replacement OSInit.
 ```powershell
 cmake -S . -B build\native "-DHMAWL_ORIGINAL_US_DOL:FILEPATH=$PWD\build\game-us-r0\main.dol"
 cmake --build build\native --config Release --target hmawl_original_startup hmawl_original_startup_tests
-.\build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup .\build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz" --max-blocks 10000000
+.\build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup .\build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz" --max-blocks 50000000
 ```
 
 Keep the extracted, verified `wlp1.rel` beside the DOL; its scene translations are
@@ -87,7 +87,7 @@ The explicit native virtual drive identifies itself as revision 1 with no consol
 firmware/date; its checked inquiry/read DMA does not claim physical-drive identity.
 **Original OSInit now returns in the runner to `PC=LR=0x80003268`.**
 Without `--rvz`, missing DI hardware remains an explicit dependency failure.
-Expired decrementer delivery, general DSP mixing and audio playback remain unfinished.
+Original decrementer/alarm delivery now runs; general DSP mixing and audible game audio remain unfinished.
 All **93 original DOL C++ constructors now return**, followed by `__init_user`;
 the original game `main` is entered in the Windows runner. Tests verify constructor
 order, nonvolatile registers and exact observer/non-observer execution equivalence.
@@ -137,14 +137,17 @@ and a real 128-byte resource read through original SDK/game DVD completion callb
 update-mask calculation, resource-manager preparation and audio-update calls return.
 The original SystemTask transition now loads `wlp1.rel` and original `OSLink`
 relocates its sections, entries and available imports and clears its allocated BSS.
-**The relocated module prolog now executes all 28 original C++ constructors and
-enters mode-41 scene initialization**, including two additional real DVD reads.
+**The relocated module prolog now executes all 28 original C++ constructors,
+loads mode-41 scene assets and returns to SystemTask.**
 The static native bindings follow the actual allocation instead of requiring a fixed REL address.
-With `--max-blocks 10000000`, it stops with **exit code 3** at scene-manager
-initialization, `PC=0x80154604`, `LR=0x80154B94`, which has no native binding yet.
+With `--max-blocks 50000000`, the next untranslated SystemTask phase is
+`PC=0x80177D30`, `LR=0x8017760C` (**exit code 3**, not a successful game boot).
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
-imports), four real reads totaling 744192 bytes, 133 lists and 4223 DSP data DMAs/1280140 bytes.
+imports), 31 real reads totaling 8819232 bytes, original archive initialization,
+52 original loader-worker exits and a fully drained resource queue.
+It verifies a real decrementer/alarm exception and 54 original thread-context
+returns, with identical CPU/RAM and hardware state with and without observation.
 Alternate module/BSS allocations verify constructor order, ABI preservation and relocation guards.
 Windows timing changes these counts. Submitted PCM is still original zero samples,
 not intro music; general voice mixing/ADPCM remains unsupported.
@@ -473,8 +476,9 @@ reset node. Tests verify exact RAM changes, an existing reset-list entry,
 both interrupt states and idempotent re-entry without losing queued alarms.
 Original `OSRegisterResetFunction` is separately tested for empty/head/middle/
 tail insertion, stable equal priorities and unsigned maximum priority.
-This installs data and handler pointers only: alarm scheduling, decrementer
-interrupt delivery and execution of reset callbacks are not yet implemented.
+Registration alone does not execute a callback. The scene-load milestone now
+also executes the original decrementer vector, alarm handler and callback;
+reset-callback execution is a separate dependency.
 
 Original `__OSModuleInit` clears exactly the three low-memory module words at
 `0x800030c8`, `0x800030cc` and `0x800030d0`. Tests cover zero/poisoned values,

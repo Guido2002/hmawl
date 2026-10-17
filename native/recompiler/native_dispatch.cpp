@@ -147,10 +147,11 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
             if (!state.readTimeBase) throw std::runtime_error("Native VI requires a time-base backend.");
             NativeViAdvance(*state.video, state.readTimeBase());
         }
-        ppc_check_pending_interrupts(state, state.externalInterruptsEnabled);
+        const bool timerPending = ppc_check_pending_interrupts(state, state.externalInterruptsEnabled);
         while (state.externalInterruptsEnabled && ppc_external_interrupt_pending(state)) {
             ppc_deliver_external_interrupt(state);
         }
+        if (timerPending) ppc_deliver_decrementer_interrupt(state);
         if (remaining == 0) {
             throw std::runtime_error("Native function-entry budget exceeded at " + Address(state.pc) + ".");
         }
@@ -201,9 +202,10 @@ void NativeDispatcher::Execute(PpcState& state, uint32_t address,
             }
             ++depth;
             try {
-                Run(guest, target, resume, remaining, depth, maxCallDepth, onBlock, target == 0x500u);
+                Run(guest, target, resume, remaining, depth, maxCallDepth, onBlock,
+                    target == 0x500u || target == 0x900u);
             } catch (const PpcInterruptContextReturn&) {
-                if (target != 0x500u || !guest.externalInterrupt ||
+                if ((target != 0x500u && target != 0x900u) || !guest.externalInterrupt ||
                     guest.externalInterrupt->active || guest.pc != resume) {
                     --depth;
                     throw std::runtime_error("Invalid native interrupt context-return signal.");

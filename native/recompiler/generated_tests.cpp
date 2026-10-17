@@ -1212,14 +1212,15 @@ void TestHardwareControlRegisters() {
             ppc_00009300(state);
             Require(state.gpr[3] == (initial | (interrupts ? 0x8000u : 0u)),
                     "mfmsr does not reflect the native interrupt mask.");
-            for (uint32_t mode : {0u, 2u, 0x2000u, 0x2002u, 0x8000u, 0x8002u, 0xa000u, 0xa002u}) {
-                const uint32_t desired = mode | (initial & ~0xa002u);
+            for (uint32_t mode : {0u, 2u, 0x1000u, 0x2000u, 0x2002u, 0x8000u,
+                                  0x8002u, 0x9002u, 0xa000u, 0xa002u, 0xb002u}) {
+                const uint32_t desired = mode | (initial & ~0xb002u);
                 state.gpr[3] = desired;
                 ppc_00009310(state);
                 ppc_00009300(state);
                 Require(state.gpr[3] == desired && state.msr == (desired & ~0x8000u) &&
                             state.externalInterruptsEnabled == ((desired & 0x8000u) != 0),
-                        "Compiled MSR transfer did not preserve FP/EE/RI state.");
+                        "Compiled MSR transfer did not preserve FP/ME/EE/RI state.");
             }
         }
     }
@@ -1238,7 +1239,7 @@ void TestHardwareControlRegisters() {
     for (unsigned bit = 0; bit < 32; ++bit) {
         const uint32_t flag = 1u << bit;
         for (bool msr : {false, true}) {
-            const uint32_t allowed = msr ? 0xa002u : 0xa0000000u;
+            const uint32_t allowed = msr ? 0xb002u : 0xa0000000u;
             if ((flag & allowed) != 0) continue;
             for (bool clearing : {false, true}) {
                 state.msr = clearing ? flag : 0u;
@@ -2236,19 +2237,21 @@ void TestDiscDmaAndDeadline() {
     Reject([&] { ppc_write_decrementer(state, 10); }, "missing timer profile");
     state.decrementer.emplace();
     ppc_write_decrementer(state, 10);
-    Require(state.decrementer->deadline == 110 && state.decrementer->writes == 1,
+    Require(state.decrementer->deadline == 111 && state.decrementer->writes == 1,
             "DEC did not use the actual time-base clock.");
-    ticks = 109;
-    ppc_check_pending_interrupts(state, true);
     ticks = 110;
+    ppc_check_pending_interrupts(state, true);
+    ticks = 111;
     ppc_check_pending_interrupts(state, false);
     Reject([&] { ppc_check_pending_interrupts(state, true); }, "timer exception delivery");
     ppc_write_decrementer(state, 0);
+    ppc_check_pending_interrupts(state, true);
+    ++ticks;
     Reject([&] { ppc_check_pending_interrupts(state, true); }, "timer exception delivery");
     Reject([&] { ppc_write_decrementer(state, 0x80000000u); }, "Unsupported native decrementer");
     ticks = UINT64_MAX;
     Reject([&] { ppc_write_decrementer(state, 1); }, "deadline overflow");
-    Require(state.decrementer->deadline == 110 && state.decrementer->writes == 2,
+    Require(state.decrementer->deadline == 112 && state.decrementer->writes == 2,
             "Rejected DEC write changed its existing deadline.");
 }
 
@@ -2431,7 +2434,7 @@ void TestThreadContextReturn() {
         {0x80002100u, [](PpcState& guest) { ppc_0000B5C0(guest); }, {0x60000000u}},
         {0x80003000u, [](PpcState& guest) {
             Require(guest.lr == 0x80002004u && guest.gpr[1] == 0x80003f00u &&
-                        ppc_read_msr(guest) == 0x8032u,
+                        ppc_read_msr(guest) == guest.srr1,
                     "Thread context return corrupted saved CPU state.");
             ++guest.gpr[31];
             guest.pc = 0xfffffffcu;
@@ -2441,6 +2444,37 @@ void TestThreadContextReturn() {
     Require(state.threadContextReturns == 1 && state.gpr[30] == 0 && state.gpr[31] == 1 &&
                 !state.callGuest && !state.callException && state.pc == 0xfffffffcu,
             "Compiled thread rfi did not abandon the guest call chain and resume the original context.");
+    for (uint32_t vector : {0x500u, 0x900u}) {
+        for (uint32_t mode : {0x8032u, 0x9032u}) {
+            auto interrupted = create();
+            interrupted.srr1 = mode;
+            ppc_write_u32(interrupted, 0x80003810u + 0x19c, mode);
+            interrupted.externalInterrupt.emplace();
+            auto& interrupt = *interrupted.externalInterrupt;
+            interrupt.active = true;
+            interrupt.inHandler = true;
+            interrupt.resume = 0x80001000u;
+            interrupt.savedMsr = 0x8032u;
+            interrupt.vector = vector;
+            if (vector == 0x900u) {
+                auto missingTimer = interrupted;
+                Reject([&] { dispatcher.Execute(missingTimer, 0x80001000u); },
+                       "Missing active decrementer context");
+                Require(missingTimer.externalInterrupt->active && missingTimer.externalInterrupt->inHandler &&
+                            missingTimer.threadContextReturns == 0 && ppc_read_msr(missingTimer) == 0x30 &&
+                            !missingTimer.callGuest && !missingTimer.callException,
+                        "Missing DEC state fabricated a completed interrupt/thread return.");
+                interrupted.decrementer.emplace();
+            }
+            dispatcher.Execute(interrupted, 0x80001000u);
+            Require(interrupted.threadContextReturns == 1 && interrupted.gpr[30] == 0 &&
+                        interrupted.gpr[31] == 1 && !interrupt.active &&
+                        (vector == 0x900u ? interrupted.decrementer->returned : interrupt.returned) == 1 &&
+                        ppc_read_msr(interrupted) == mode &&
+                        !interrupted.callGuest && !interrupted.callException,
+                    "Interrupt scheduler return did not unwind to the validated new thread.");
+        }
+    }
     auto limited = create();
     Reject([&] { dispatcher.Execute(limited, 0x80001000u, 3); }, "budget exceeded");
     Require(limited.threadContextReturns == 1 && limited.gpr[31] == 0 &&
@@ -2453,6 +2487,15 @@ void TestThreadContextReturn() {
         Require(invalid.threadContextReturns == 0 && ppc_read_msr(invalid) == 0x30 &&
                     !invalid.callGuest && !invalid.callException,
                 "Rejected thread context mutated MSR, counted success or leaked dispatcher ownership.");
+        invalid.externalInterrupt.emplace();
+        invalid.externalInterrupt->active = true;
+        invalid.externalInterrupt->inHandler = true;
+        invalid.externalInterrupt->resume = 0x80001000u;
+        invalid.externalInterrupt->savedMsr = 0x8032u;
+        Reject([&] { dispatcher.Execute(invalid, 0x80001000u); }, "original current OS context");
+        Require(invalid.externalInterrupt->returned == 0 && invalid.threadContextReturns == 0 &&
+                    ppc_read_msr(invalid) == 0x30 && !invalid.callGuest && !invalid.callException,
+                "Invalid interrupt thread context fabricated a return or changed MSR.");
     }
     auto changed = create();
     ppc_write_u32(changed, 0x80003000u, 0);
@@ -2546,7 +2589,7 @@ void TestExternalInterruptDelivery() {
     invalid.externalInterrupt->suspended.resize(3);
     invalid.srr0 = 0x80001004u;
     invalid.srr1 = 0x8032u;
-    Reject([&] { ppc_return_from_system_call(invalid); }, "cannot switch guest contexts");
+    Reject([&] { ppc_return_from_system_call(invalid); }, "unnested translated context");
     Reject([&] { ppc_write_msr(invalid, 0x8032u); }, "guest interrupt delivery");
     Reject([&] { dispatcher.Register(1, invalid,
         {{0x80003004u, ppc_0000B5C0, {0x4c000064u}, 0, {0x60000000u}}}); },
@@ -2659,8 +2702,146 @@ void TestNestedExternalInterruptDelivery() {
     }
 }
 
+void TestDecrementerDelivery() {
+    uint64_t ticks = 100;
+    const auto create = [&] {
+        PpcState state;
+        state.memoryMap = PpcMemoryMap::GameCubeRam;
+        state.memory.resize(0x4000);
+        state.externalInterrupt.emplace();
+        state.decrementer.emplace();
+        state.serialInterface.emplace();
+        state.piInterruptMask = 8;
+        state.readTimeBase = [&] { return ticks; };
+        state.msr = 0x1032;
+        state.externalInterruptsEnabled = true;
+        state.lr = 0xfffffffcu;
+        for (uint32_t address : {0x500u, 0x900u, 0x1000u, 0x2000u, 0x2100u, 0x2200u}) {
+            ppc_write_u32(state, address, 0x60000000u);
+        }
+        return state;
+    };
+    auto initial = create();
+    NativeDispatcher dispatcher;
+    dispatcher.Register(0, initial, {
+        {0x900u, [](PpcState& state) {
+            Require(state.externalInterrupt->vector == 0x900u &&
+                        state.srr0 == 0x80001000u && state.srr1 == 0x9032u &&
+                        !state.externalInterruptsEnabled && state.lr == 0xfffffffcu,
+                    "DEC exception did not preserve PC, ME/MSR and LR.");
+            state.srr0 = 0x80002000u; state.srr1 = 0x30;
+            ppc_0000B5C0(state);
+        }, {0x60000000u}},
+        {0x80002000u, [](PpcState& state) {
+            ++state.gpr[28];
+            if (state.gpr[29]) {
+                state.serialInterface->communication = 0xc0000000u;
+                ppc_write_msr(state, 0x9032);
+            }
+            state.pc = 0x80002100u;
+        }, {0x60000000u}},
+        {0x500u, [](PpcState& state) {
+            Require(state.externalInterrupt->vector == 0x500u &&
+                        state.externalInterrupt->suspended.size() == 1 &&
+                        state.externalInterrupt->suspended.back().vector == 0x900u,
+                    "External IRQ did not retain its suspended decrementer parent.");
+            state.srr0 = 0x80002200u; state.srr1 = 0x30;
+            ppc_0000B5C0(state);
+        }, {0x60000000u}},
+        {0x80002200u, [](PpcState& state) {
+            ppc_write_u32(state, 0xcc006434u, 0xc0000000u);
+            state.srr0 = state.externalInterrupt->resume;
+            state.srr1 = state.externalInterrupt->savedMsr;
+            ppc_0000B5C0(state);
+        }, {0x60000000u}},
+        {0x80002100u, [](PpcState& state) {
+            Require(state.externalInterrupt->vector == 0x900u &&
+                        state.externalInterrupt->suspended.size() == state.gpr[27],
+                    "Nested IRQ lost the active decrementer vector.");
+            ppc_write_msr(state, 0x1032);
+            state.srr0 = state.externalInterrupt->resume;
+            state.srr1 = state.externalInterrupt->savedMsr;
+            ppc_0000B5C0(state);
+        }, {0x60000000u}},
+        {0x80001000u, [](PpcState& state) { ++state.gpr[31]; state.pc = state.lr; },
+         {0x60000000u}}
+    });
+    for (bool nested : {false, true}) {
+        ticks = 100;
+        auto state = create();
+        state.gpr[29] = nested;
+        ppc_write_decrementer(state, 0);
+        dispatcher.Execute(state, 0x80001000u);
+        Require(state.decrementer->delivered == 0 && state.gpr[31] == 1,
+                "DEC zero triggered before its nonnegative-to-negative transition.");
+        state.externalInterruptsEnabled = false;
+        ticks = 101;
+        dispatcher.Execute(state, 0x80001000u);
+        Require(state.decrementer->delivered == 0 && state.decrementer->deadline == 101,
+                "Masked decrementer expiry was discarded or delivered.");
+        Reject([&] { ppc_write_msr(state, 0x9032); }, "timer exception delivery");
+        state.externalInterruptsEnabled = true;
+        dispatcher.Execute(state, 0x80001000u);
+        Require(state.decrementer->delivered == 1 && state.decrementer->returned == 1 &&
+                    state.decrementer->deadline == 101 + (uint64_t{1} << 32) &&
+                    state.externalInterrupt->delivered == unsigned(nested) &&
+                    state.externalInterrupt->returned == unsigned(nested) &&
+                    !state.externalInterrupt->active && state.externalInterrupt->suspended.empty() &&
+                    state.gpr[28] == 1 && state.gpr[31] == 3 &&
+                    ppc_read_msr(state) == 0x9032 && !state.callGuest && !state.callException,
+                "DEC delivery, periodic wrap, nested IRQ or original continuation differs.");
+        ticks += 3 * (uint64_t{1} << 32);
+        dispatcher.Execute(state, 0x80001000u);
+        Require(state.decrementer->delivered == 2 && state.decrementer->returned == 2 &&
+                    state.decrementer->deadline > ticks && state.gpr[28] == 2,
+                "Late DEC wraps were not coalesced into one pending exception.");
+    }
+    for (unsigned budget : {1u, 2u}) {
+        ticks = 100;
+        auto state = create();
+        ppc_write_decrementer(state, 0);
+        ticks = 101;
+        Reject([&] { dispatcher.Execute(state, 0x80001000u, budget); }, "budget");
+        Require(state.decrementer->delivered == 1 && state.decrementer->returned == 0 &&
+                    !state.callGuest && !state.callException,
+                "DEC delivery bypassed budgets or fabricated context restoration.");
+    }
+    ticks = 100;
+    auto nestedTimer = create();
+    nestedTimer.gpr[27] = 1;
+    nestedTimer.externalInterrupt->active = true;
+    nestedTimer.externalInterrupt->inHandler = true;
+    nestedTimer.externalInterrupt->resume = 0x80003000u;
+    nestedTimer.externalInterrupt->savedMsr = 0x8032u;
+    ppc_write_decrementer(nestedTimer, 0);
+    ticks = 101;
+    dispatcher.Execute(nestedTimer, 0x80001000u);
+    Require(nestedTimer.decrementer->delivered == 1 && nestedTimer.decrementer->returned == 1 &&
+                nestedTimer.externalInterrupt->active && nestedTimer.externalInterrupt->inHandler &&
+                nestedTimer.externalInterrupt->vector == 0x500u &&
+                nestedTimer.externalInterrupt->resume == 0x80003000u &&
+                nestedTimer.externalInterrupt->savedMsr == 0x8032u &&
+                nestedTimer.externalInterrupt->suspended.empty(),
+            "A decrementer nested inside an external handler lost its suspended parent.");
+    ticks = 100;
+    auto shallow = create();
+    ppc_write_decrementer(shallow, 0);
+    ticks = 101;
+    Reject([&] { dispatcher.Execute(shallow, 0x80001000u, 100, 1); }, "call-depth");
+    Require(!shallow.callGuest && !shallow.callException && shallow.decrementer->returned == 0,
+            "DEC delivery bypassed call-depth limits or leaked callbacks.");
+    ticks = 100;
+    auto changed = create();
+    ppc_write_decrementer(changed, 0);
+    ticks = 101;
+    ppc_write_u32(changed, 0x900u, 0);
+    Reject([&] { dispatcher.Execute(changed, 0x80001000u); }, "code mismatch");
+    Require(changed.decrementer->returned == 0 && !changed.callGuest && !changed.callException,
+            "DEC vector integrity failure fabricated a return or leaked dispatcher ownership.");
+}
+
 void TestCompiledSystemCall() {
-    for (uint32_t mode : {0u, 0x30u, 0x32u, 0x2032u, 0xa032u}) {
+    for (uint32_t mode : {0u, 0x30u, 0x32u, 0x2032u, 0x9032u, 0xa032u, 0xb032u}) {
         PpcState state;
         state.memoryMap = PpcMemoryMap::GameCubeRam;
         state.memory.resize(0x10000);
@@ -4385,6 +4566,7 @@ int main() {
         TestThreadContextReturn();
         TestExternalInterruptDelivery();
         TestNestedExternalInterruptDelivery();
+        TestDecrementerDelivery();
         TestDspResetAndAramDma();
         TestCompiledDspInitialization();
         TestCompiledDspTask();

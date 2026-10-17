@@ -111,12 +111,13 @@ struct PpcMemoryProtection {
 
 struct PpcExternalInterrupt {
     struct Frame {
-        uint32_t resume, savedMsr;
+        uint32_t resume, savedMsr, vector;
     };
     bool active = false;
     bool inHandler = false;
     uint32_t resume = 0;
     uint32_t savedMsr = 0;
+    uint32_t vector = 0x500u;
     uint32_t delivered = 0;
     uint32_t returned = 0;
     std::vector<Frame> suspended;
@@ -136,6 +137,8 @@ struct PpcDecrementer {
     uint64_t deadline = 0;
     bool armed = false;
     uint32_t writes = 0;
+    uint32_t delivered = 0;
+    uint32_t returned = 0;
 };
 
 struct PpcInterruptContextReturn {};
@@ -261,10 +264,16 @@ inline bool ppc_external_interrupt_pending(const PpcState& state) {
     return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & supported) != 0;
 }
 
-inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
+inline bool ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
+    bool timerPending = false;
     if (enabled && state.decrementer && state.decrementer->armed) {
         if (!state.readTimeBase) throw std::runtime_error("Native decrementer requires a time-base backend.");
-        if (state.readTimeBase() >= state.decrementer->deadline) {
+        timerPending = state.readTimeBase() >= state.decrementer->deadline;
+        if (timerPending &&
+            (!state.externalInterrupt || !state.callException ||
+             (state.externalInterrupt->active &&
+              (!state.externalInterrupt->inHandler || state.systemCallActive ||
+               state.externalInterrupt->suspended.size() >= 3)))) {
             throw std::runtime_error("Expired PowerPC decrementer requires timer exception delivery.");
         }
     }
@@ -284,6 +293,7 @@ inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
             throw std::runtime_error("Native DSP interrupt requires guest interrupt delivery.");
         }
     }
+    return timerPending;
 }
 
 inline void ppc_write_decrementer(PpcState& state, uint32_t value) {
@@ -291,15 +301,16 @@ inline void ppc_write_decrementer(PpcState& state, uint32_t value) {
         throw std::runtime_error("Unsupported native decrementer write or missing timer profile.");
     }
     const auto now = state.readTimeBase();
-    if (now > UINT64_MAX - value) throw std::runtime_error("Native decrementer deadline overflow.");
-    state.decrementer->deadline = now + value;
+    const auto delay = uint64_t(value) + 1;
+    if (now > UINT64_MAX - delay) throw std::runtime_error("Native decrementer deadline overflow.");
+    state.decrementer->deadline = now + delay;
     state.decrementer->armed = true;
     ++state.decrementer->writes;
 }
 
 inline void ppc_write_msr(PpcState& state, uint32_t value) {
-    if (((ppc_read_msr(state) ^ value) & ~0xa002u) != 0) {
-        throw std::runtime_error("Unsupported PowerPC MSR mode change (only FP/EE/RI supported).");
+    if (((ppc_read_msr(state) ^ value) & ~0xb002u) != 0) {
+        throw std::runtime_error("Unsupported PowerPC MSR mode change (only FP/ME/EE/RI supported).");
     }
     ppc_check_pending_interrupts(state, (value & 0x8000u) != 0);
     state.msr = value & ~0x8000u;
@@ -1200,7 +1211,7 @@ inline void ppc_system_call(PpcState& state, uint32_t next) {
     if (state.memoryMap != PpcMemoryMap::GameCubeRam || state.systemCallActive ||
         (state.ramBats && state.ramBats->realModeActive) ||
         (state.externalInterrupt && state.externalInterrupt->active && !state.externalInterrupt->inHandler) ||
-        !state.callException || (ppc_read_msr(state) & ~0xa032u) != 0) {
+        !state.callException || (ppc_read_msr(state) & ~0xb032u) != 0) {
         throw std::runtime_error("Unsupported or nested native PowerPC system-call context.");
     }
     state.srr0 = next;
@@ -1214,11 +1225,27 @@ inline void ppc_system_call(PpcState& state, uint32_t next) {
     }
 }
 
+inline void ppc_validate_thread_context_return(const PpcState& state) {
+    if (state.memoryMap != PpcMemoryMap::GameCubeRam || !state.ramBats ||
+        state.ramBats->realModeActive) {
+        throw std::runtime_error("Native thread rfi requires translated GameCube RAM.");
+    }
+    const auto context = ppc_read_u32(state, 0x800000d4u);
+    ppc_memory_offset(state, context, 0x2c8);
+    if ((context & 3u) != 0 || ppc_read_u32(state, context + 0x198) != state.srr0 ||
+        ppc_read_u32(state, context + 0x19c) != state.srr1 ||
+        ppc_read_u32(state, context + 4) != state.gpr[1]) {
+        throw std::runtime_error("Native thread rfi requires the original current OS context.");
+    }
+    ppc_memory_offset(state, state.srr0, 4);
+    ppc_memory_offset(state, state.gpr[1], 4);
+}
+
 inline void ppc_return_from_system_call(PpcState& state) {
     if (state.externalInterrupt && state.externalInterrupt->active && !state.systemCallActive) {
         auto& interrupt = *state.externalInterrupt;
         if ((state.srr0 & 3u) != 0 ||
-            (state.srr1 & ~0xa032u) != 0) {
+            (state.srr1 & ~0xb032u) != 0) {
             throw std::runtime_error("Unsupported external interrupt rfi state.");
         }
         if (!interrupt.inHandler) {
@@ -1228,16 +1255,32 @@ inline void ppc_return_from_system_call(PpcState& state) {
             }
             interrupt.inHandler = true;
         } else {
-            if (state.srr0 != interrupt.resume || state.srr1 != interrupt.savedMsr ||
-                state.externalInterruptsEnabled) {
+            if (state.externalInterruptsEnabled) {
                 throw std::runtime_error("Native interrupt return cannot switch guest contexts.");
+            }
+            const bool threadSwitch = state.srr0 != interrupt.resume || state.srr1 != interrupt.savedMsr;
+            if (threadSwitch) {
+                if (!interrupt.suspended.empty() || (state.srr1 & 0x30u) != 0x30u) {
+                    throw std::runtime_error("Native interrupt thread switch requires an unnested translated context.");
+                }
+                ppc_validate_thread_context_return(state);
+            }
+            if (interrupt.vector == 0x900u && !state.decrementer) {
+                throw std::runtime_error("Missing active decrementer context.");
             }
             interrupt.active = false;
             interrupt.inHandler = false;
-            ++interrupt.returned;
+            if (interrupt.vector == 0x900u) {
+                ++state.decrementer->returned;
+            }
+            else ++interrupt.returned;
             state.msr = state.srr1 & ~0x8000u;
             state.externalInterruptsEnabled = (state.srr1 & 0x8000u) != 0;
             state.pc = state.srr0;
+            if (threadSwitch) {
+                ++state.threadContextReturns;
+                throw PpcThreadContextReturn{};
+            }
             // OSLoadContext abandons the handler's guest call chain, not just one C++ frame.
             throw PpcInterruptContextReturn{};
         }
@@ -1246,7 +1289,7 @@ inline void ppc_return_from_system_call(PpcState& state) {
         return;
     }
     if ((!state.systemCallActive && !state.ramBats) || (state.srr0 & 3u) != 0 ||
-        (state.srr1 & ~0xa032u) != 0) {
+        (state.srr1 & ~0xb032u) != 0) {
         throw std::runtime_error("Native rfi requires a supported active system-call context.");
     }
     if (!state.systemCallActive) {
@@ -1254,19 +1297,7 @@ inline void ppc_return_from_system_call(PpcState& state) {
         if (state.memoryMap == PpcMemoryMap::GameCubeRam &&
             (current & 0x8030u) == 0x30u && (state.srr1 & 0x30u) == 0x30u &&
             !state.ramBats->realModeActive) {
-            const auto context = ppc_read_u32(state, 0x800000d4u);
-            ppc_memory_offset(state, context, 0x2c8);
-            if ((context & 3u) != 0 || ppc_read_u32(state, context + 0x198) != state.srr0 ||
-                ppc_read_u32(state, context + 0x19c) != state.srr1 ||
-                ppc_read_u32(state, context + 4) != state.gpr[1]) {
-                throw std::runtime_error("Native thread rfi requires the original current OS context: context=" +
-                    std::to_string(context) + " saved PC=" + std::to_string(ppc_read_u32(state, context + 0x198)) +
-                    " saved MSR=" + std::to_string(ppc_read_u32(state, context + 0x19c)) +
-                    " saved SP=" + std::to_string(ppc_read_u32(state, context + 4)) +
-                    " actual SP=" + std::to_string(state.gpr[1]) + ".");
-            }
-            ppc_memory_offset(state, state.srr0, 4);
-            ppc_memory_offset(state, state.gpr[1], 4);
+            ppc_validate_thread_context_return(state);
             ppc_write_msr(state, state.srr1);
             state.pc = state.srr0;
             ++state.threadContextReturns;
@@ -1300,37 +1331,72 @@ inline void ppc_return_from_system_call(PpcState& state) {
     state.systemCallActive = false;
 }
 
-inline void ppc_deliver_external_interrupt(PpcState& state) {
-    if (!state.externalInterruptsEnabled || !ppc_external_interrupt_pending(state)) return;
+inline void ppc_deliver_interrupt(PpcState& state, uint32_t vector) {
+    if ((vector != 0x500u && vector != 0x900u) ||
+        (vector == 0x900u && !state.decrementer)) {
+        throw std::runtime_error("Unsupported native interrupt vector.");
+    }
     ppc_check_pending_interrupts(state, true);
-    if (!state.externalInterrupt || !state.callException ||
-        state.systemCallActive || (ppc_read_msr(state) & ~0xa032u) != 0) {
-        throw std::runtime_error("Unsupported native external interrupt delivery context.");
+    if (!state.externalInterrupt || !state.callException || !state.externalInterruptsEnabled ||
+        state.systemCallActive || (ppc_read_msr(state) & ~0xb032u) != 0 ||
+        (state.externalInterrupt->active &&
+         (!state.externalInterrupt->inHandler || state.externalInterrupt->suspended.size() >= 3))) {
+        throw std::runtime_error("Unsupported native interrupt delivery context.");
+    }
+    if (vector == 0x900u) {
+        if (!state.readTimeBase) throw std::runtime_error("Native decrementer requires a time-base backend.");
+        const auto now = state.readTimeBase();
+        auto& timer = *state.decrementer;
+        if (!timer.armed || now < timer.deadline) {
+            throw std::runtime_error("Native decrementer interrupt requires an expired timer.");
+        }
+        const uint64_t period = uint64_t{1} << 32;
+        const auto cycles = (now - timer.deadline) / period + 1;
+        if (cycles > (UINT64_MAX - timer.deadline) / period) {
+            throw std::runtime_error("Native decrementer wrap deadline overflow.");
+        }
+        timer.deadline += cycles * period;
     }
     auto& interrupt = *state.externalInterrupt;
     const bool nested = interrupt.active;
-    if (nested) interrupt.suspended.push_back({interrupt.resume, interrupt.savedMsr});
+    if (nested) interrupt.suspended.push_back({interrupt.resume, interrupt.savedMsr, interrupt.vector});
     interrupt.resume = state.pc;
     interrupt.savedMsr = ppc_read_msr(state);
+    interrupt.vector = vector;
     interrupt.active = true;
     interrupt.inHandler = false;
-    ++interrupt.delivered;
+    if (vector == 0x900u) ++state.decrementer->delivered;
+    else ++interrupt.delivered;
     state.srr0 = interrupt.resume;
     state.srr1 = interrupt.savedMsr;
     state.msr = 0;
     state.externalInterruptsEnabled = false;
-    state.callException(0x500u, interrupt.resume, state);
+    state.callException(vector, interrupt.resume, state);
     if (interrupt.active || state.pc != interrupt.resume) {
-        throw std::runtime_error("Native external interrupt handler returned without context-restoring rfi.");
+        throw std::runtime_error("Native interrupt handler returned without context-restoring rfi.");
     }
     if (nested) {
         const auto parent = interrupt.suspended.back();
         interrupt.suspended.pop_back();
         interrupt.resume = parent.resume;
         interrupt.savedMsr = parent.savedMsr;
+        interrupt.vector = parent.vector;
         interrupt.active = true;
         interrupt.inHandler = true;
     }
+}
+
+inline void ppc_deliver_external_interrupt(PpcState& state) {
+    if (!state.externalInterruptsEnabled || !ppc_external_interrupt_pending(state)) return;
+    ppc_deliver_interrupt(state, 0x500u);
+}
+
+inline void ppc_deliver_decrementer_interrupt(PpcState& state) {
+    if (!state.externalInterruptsEnabled || !state.decrementer || !state.decrementer->armed) return;
+    if (!state.readTimeBase) throw std::runtime_error("Native decrementer requires a time-base backend.");
+    const auto now = state.readTimeBase();
+    if (now < state.decrementer->deadline) return;
+    ppc_deliver_interrupt(state, 0x900u);
 }
 
 inline uint64_t ppc_read_time_base(const PpcState& state) {

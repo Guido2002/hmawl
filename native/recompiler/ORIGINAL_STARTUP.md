@@ -15,7 +15,7 @@ First extract your own supported RVZ with the existing `hmawl_recompiler
 ```powershell
 cmake -S . -B build\native -DHMAWL_ORIGINAL_US_DOL:FILEPATH="$PWD\build\game-us-r0\main.dol"
 cmake --build build\native --config Release --target hmawl_original_startup
-build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz" --max-blocks 10000000
+build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz" --max-blocks 50000000
 ```
 
 The extracted `wlp1.rel` must be beside the DOL. The scene generator verifies its
@@ -209,7 +209,8 @@ active levels. Each level retains its actual resume/MSR metadata and original
 guest context restoration; handler reentry cannot be mistaken for a native return
 sentinel. Vector-phase, system-call-phase and excessive nesting fail explicitly,
 and all levels share the dispatch block/depth budgets. Arbitrary thread switching
-inside interrupts remains unsupported.
+inside nested interrupts remains unsupported. Unnested IRQ returns can resume
+the original SDK-selected thread after validating its saved OS context.
 Indexed single-float transfers and signed high multiplication execute the original
 audio parameter/command preparation. The resulting CPU mail is the actual
 `0xBABE0024` header, not an injected test command or synthesized DSP completion.
@@ -219,7 +220,8 @@ eleven original startup objects and a real DVD resource read. The original loop
 enters at `0x8000AC34`; preparation returns through `0x8000AC64` before the
 SystemTask transition at `0x8017755C`. It now loads and links the original scene REL,
 executes all 28 module constructors and enters mode-41 scene initialization.
-The next dependency is manager initialization at `0x80154604`, LR `0x80154B94`.
+Manager initialization and resource loading now return; the next dependency is
+SystemTask at `0x80177D30`, LR `0x8017760C`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -318,8 +320,8 @@ after every exception return. With the verified RVZ, original **DVDInit returns*
 The original inquiry command queues, performs a checked 32-byte DMA, arms its
 actual timeout alarm and completes through the original DI interrupt and
 InquiryCallback. DEC retains a deadline derived from the native time base;
-an expired timer fails explicitly because timer-exception delivery is not yet
-implemented. Original completion cancels the DVD alarm; no timeout is ignored.
+expiry enters the original DEC vector and SDK alarm handler.
+Original completion cancels the DVD alarm; no timeout is ignored.
 **OSInit returns to its original caller at PC=LR `0x80003268`, SP `0x8035CF98`.**
 The original post-OSInit entry continues through all **93 DOL C++ constructors**,
 `__init_user` returns, and original game `main` is entered. Static build-time
@@ -388,12 +390,12 @@ submission returns while the DSP executes initialization, additive sample loops,
 output interleave/DMA and its own completion mail/IRQ. The original nested CPU
 handler replies through the task's scheduler-control table.
 A measured runner execution returns from the first game-system initialization
-and, with `--max-blocks 10000000`, executes eleven post-system-init constructors
+and, with `--max-blocks 50000000`, executes eleven post-system-init constructors
 and a real 128-byte resource read. Its original main loop enters the first iteration;
 reset dispatch, update-mask calculation and resource/audio preparation return.
 SystemTask now loads and links `wlp1.rel` through the original SDK `OSLink`.
-The relocated prolog executes its 28 constructors and enters scene initialization.
-It reaches `PC=0x80154604`, LR `0x80154B94`, the unbound scene-manager initialization;
+The relocated prolog executes its 28 constructors, loads scene assets and returns.
+The next untranslated phase is `PC=0x80177D30`, LR `0x8017760C`;
 DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier.
 Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
@@ -471,13 +473,27 @@ data copies, atomic rejection of damaged code and post-binding operand guards.
 Synthetic compiled tests cover relocated addi/addis, logical and shifted logical
 forms (including correct high-half `andis.`), integer loads/stores and single-float
 transfers at two bases with zero, signed-boundary and all-ones operands.
-Original mode-41 scene/asset construction also executes; four DVD reads totaling
-744192 bytes complete, each checked against actual RVZ bytes in guest RAM.
-The next connected milestone is completing the manager initialization beginning
-at `0x80154604`. Unrestricted recursion from this manager exceeds the existing
-code-discovery bound; retain that bound and compile its connected dependencies
-with scoped ranges. The module prolog has not returned, and neither a complete
-scene nor a completed loop iteration is verified. No runtime PPC decoder or
+Original mode-41 scene/asset construction and resource loading now return.
+All 31 DVD reads (8819232 bytes) are checked against actual RVZ bytes in guest RAM.
+Original integer formatting prepares resource paths; original queue workers,
+DVD/ARAM completions and ARCInitHandle publish a real archive/file table.
+Tests verify the state-24 scene, 52 original loader-worker exits and a drained
+queue. Bounded function ranges and checked original switch tables keep the
+existing code-discovery limit unchanged.
+
+DEC expiry enters original vector `0x900`, the SDK handler and alarm callback.
+Writing zero expires after one tick; pending masked expiry is retained and
+missed 32-bit wraps coalesce. Tests cover both directions of timer/external
+nesting, budgets, damaged vectors and invalid thread contexts. MSR ME is retained
+as context state, not implemented machine-check delivery. An unnested interrupt
+can restore the exact original SDK-selected thread context and unwind the native
+call chain without resetting its execution budget.
+The deterministic full run verifies one timer exception/return and 54 thread
+context returns. Observed/unobserved runs must match CPU/RAM, timer deadlines,
+interrupts, PCM and DSP state. The module prolog returns at `0x80177C88`, followed
+by the original post-load Memory check. The next dependency is SystemTask
+`0x80177D30`, LR `0x8017760C`; no completed loop iteration or rendered scene
+is verified. No runtime PPC decoder or
 replacement linker is involved in the original startup path.
 An independent `BUILD_TESTING=OFF` Windows build reaches the same dependency;
 production execution does not depend on the test generator or fixture bindings.

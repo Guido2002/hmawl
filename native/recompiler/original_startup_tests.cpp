@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -20,6 +21,16 @@ namespace {
 
 void Require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+// Keep large state temporaries out of the main Windows test stack.
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+std::unique_ptr<PpcState> StartupFixture(const DolImage& image) {
+    return std::make_unique<PpcState>(CreateOriginalStartupState(image));
 }
 
 uint32_t VerifyOriginalSceneLink(const PpcState& state, const std::vector<uint8_t>& bytes,
@@ -260,14 +271,16 @@ int main(int argc, char** argv) {
         const auto mutatedPath = fixtures.Write("mutated.dol", mutated);
         RequireFailure([&] { LoadOriginalUsDol(mutatedPath); },
                        "Production DOL loader accepted a mutated on-disk DOL.");
-        auto unboundState = CreateOriginalStartupState(image);
+        auto unboundStorage = StartupFixture(image);
+        auto& unboundState = *unboundStorage;
         NativeDispatcher unbound;
         const auto noBinding = RunOriginalStartup(unbound, unboundState);
         Require(noBinding.stop == OriginalStartupStop::Dependency &&
                     noBinding.pc == image.entryPoint() && !unboundState.callGuest &&
                     noBinding.reason.find("No native translation registered") != std::string::npos,
                 "Unbound production dispatcher did not report its exact missing entry.");
-        auto state = CreateOriginalStartupState(image);
+        auto stateStorage = StartupFixture(image);
+        auto& state = *stateStorage;
         uint64_t deterministicTicks = 1000000;
         state.readTimeBase = [&] { return deterministicTicks += 10000; };
         Require(state.pc == image.entryPoint() && ppc_read_msr(state) == 0x30u &&
@@ -284,7 +297,8 @@ int main(int argc, char** argv) {
         Require(dispatcher.Contains(image.entryPoint()) && dispatcher.Contains(0x80003264u) &&
                     dispatcher.Contains(0x801b0de0u) && dispatcher.Contains(0x801b0f88u),
                 "Production bindings omit the original entry-to-OSInit chain.");
-        auto missingPeripheral = CreateOriginalStartupState(image);
+        auto peripheralStorage = StartupFixture(image);
+        auto& missingPeripheral = *peripheralStorage;
         missingPeripheral.transferExiImmediate = {};
         const auto missingTransfer = RunOriginalStartup(dispatcher, missingPeripheral);
         Require(missingTransfer.pc == 0x801f6518u &&
@@ -411,12 +425,14 @@ int main(int argc, char** argv) {
                         (index < 32 ? ppc_read_u8(state, 0x802e0228u + index) : 0),
                     "Original audio ARAM DMA payload or full ARAM guard differs.");
         }
-        auto noDspHardware = CreateOriginalStartupState(image);
+        auto noDspHardwareStorage = StartupFixture(image);
+        auto& noDspHardware = *noDspHardwareStorage;
         noDspHardware.dspHardware.reset();
         const auto dspFailure = RunOriginalStartup(dispatcher, noDspHardware);
         Require(dspFailure.pc == 0x801b2144u && dspFailure.reason.find("not mapped") != std::string::npos,
                 "Missing DSP hardware profile was silently substituted.");
-        auto noDspExecution = CreateOriginalStartupState(image);
+        auto noDspExecutionStorage = StartupFixture(image);
+        auto& noDspExecution = *noDspExecutionStorage;
         noDspExecution.executeDspInitialization = {};
         const auto noDspResult = RunOriginalStartup(dispatcher, noDspExecution);
         Require(noDspResult.pc == 0x801b223cu &&
@@ -424,7 +440,8 @@ int main(int argc, char** argv) {
                     noDspExecution.dspHardware->sentMail == 0 &&
                     noDspExecution.dspHardware->completedPrograms == 0,
                 "Absent DSP compiler backend was silently replaced by a ready response.");
-        auto damagedDspCode = CreateOriginalStartupState(image);
+        auto damagedDspCodeStorage = StartupFixture(image);
+        auto& damagedDspCode = *damagedDspCodeStorage;
         ppc_write_u16(damagedDspCode, 0x802e0228u, 0);
         const auto damagedDspResult = RunOriginalStartup(dispatcher, damagedDspCode);
         Require(damagedDspResult.pc == 0x801b223cu &&
@@ -432,17 +449,20 @@ int main(int argc, char** argv) {
                     damagedDspCode.dspHardware->executedInstructions == 0 &&
                     damagedDspCode.dspHardware->sentMail == 0,
                 "Modified DSP payload ran a stale compiled program or fabricated mail.");
-        auto noMemoryProtection = CreateOriginalStartupState(image);
+        auto noMemoryProtectionStorage = StartupFixture(image);
+        auto& noMemoryProtection = *noMemoryProtectionStorage;
         noMemoryProtection.memoryProtection.reset();
         const auto noMemoryResult = RunOriginalStartup(dispatcher, noMemoryProtection);
         Require(noMemoryResult.pc == 0x801b5094u && noMemoryResult.reason.find("not mapped") != std::string::npos,
                 "Missing memory-protection profile was silently substituted.");
-        auto noRamBats = CreateOriginalStartupState(image);
+        auto noRamBatsStorage = StartupFixture(image);
+        auto& noRamBats = *noRamBatsStorage;
         noRamBats.ramBats.reset();
         const auto noBatsResult = RunOriginalStartup(dispatcher, noRamBats);
         Require(noBatsResult.pc == 0x801b5068u && noBatsResult.reason.find("active system-call") != std::string::npos,
                 "Missing RAM BAT profile silently skipped original real-mode configuration.");
-        auto noColdReset = CreateOriginalStartupState(image);
+        auto noColdResetStorage = StartupFixture(image);
+        auto& noColdReset = *noColdResetStorage;
         noColdReset.piResetCode.reset();
         const auto noResetResult = RunOriginalStartup(dispatcher, noColdReset);
         Require(noResetResult.pc == 0x801b5964u && noResetResult.reason.find("not mapped") != std::string::npos,
@@ -474,7 +494,8 @@ int main(int argc, char** argv) {
             Require(ppc_read_u32(state, 0x80317b58u + index * 4u) == 0,
                     "Original scheduler run queues were not initialized empty.");
         }
-        auto missingDma = CreateOriginalStartupState(image);
+        auto missingDmaStorage = StartupFixture(image);
+        auto& missingDma = *missingDmaStorage;
         missingDma.transferExiDma = {};
         const auto dmaFailure = RunOriginalStartup(dispatcher, missingDma);
         Require(dmaFailure.pc == 0x801f66b0u &&
@@ -519,7 +540,8 @@ int main(int argc, char** argv) {
                         (ppc_read_u32(state, 0x802e5ff8u + channel * 4u) & 8u) != 0,
                     "Original SI queues did not drain or retain disconnected-controller results.");
         }
-        auto noInterruptDelivery = CreateOriginalStartupState(image);
+        auto noInterruptDeliveryStorage = StartupFixture(image);
+        auto& noInterruptDelivery = *noInterruptDeliveryStorage;
         noInterruptDelivery.externalInterrupt.reset();
         const auto interruptFailure = RunOriginalStartup(dispatcher, noInterruptDelivery);
         Require(interruptFailure.pc == 0x801b3a60u &&
@@ -647,7 +669,8 @@ int main(int argc, char** argv) {
                             missingGraphics.piInterruptMask == 0xfcu,
                         "Missing graphics backend did not retain the explicit original CP-enable boundary.");
             }
-            auto discState = CreateOriginalStartupState(image);
+            auto discStorage = StartupFixture(image);
+            auto& discState = *discStorage;
             const auto originalMemory = discState.memory;
             InstallOriginalStartupDisc(discState, disc);
             const auto fstAddress = ppc_read_u32(discState, 0x80000038u);
@@ -822,7 +845,8 @@ int main(int argc, char** argv) {
                         ticks < discState.decrementer->deadline,
                     "Original DVD alarm did not program an actual future decrementer deadline.");
 
-            auto traced = CreateOriginalStartupState(image);
+            auto tracedStorage = StartupFixture(image);
+            auto& traced = *tracedStorage;
             InstallOriginalStartupDisc(traced, disc);
             uint64_t tracedTicks = 1000000;
             traced.readTimeBase = [&] {
@@ -1119,7 +1143,8 @@ int main(int argc, char** argv) {
             {
                 Require(peSource.has_value(), "Missing pre-VI original GX return snapshot.");
                 const auto& interrupted = *peSource;
-                auto pe = interrupted;
+                auto peStorage = std::make_unique<PpcState>(interrupted);
+                auto& pe = *peStorage;
                 uint64_t peTicks = peSourceTicks;
                 pe.readTimeBase = [&] { return peTicks += 1000; };
                 const auto padding = 32 - pe.graphics->gathered.size();
@@ -1159,7 +1184,8 @@ int main(int argc, char** argv) {
                              "and original exception/context return. Production startup issues no such requests.\n";
             }
             {
-                auto interrupted = discState;
+                auto interruptedStorage = std::make_unique<PpcState>(discState);
+                auto& interrupted = *interruptedStorage;
                 uint64_t aiTicks = ticks;
                 interrupted.readTimeBase = [&] { return aiTicks += 8; };
                 interrupted.piInterruptMask = 0x20;
@@ -1218,7 +1244,8 @@ int main(int argc, char** argv) {
                              "this library fixture deliberately has no PCM backend.\n";
             }
             {
-                auto pcmState = CreateOriginalStartupState(image);
+                auto pcmStorage = StartupFixture(image);
+                auto& pcmState = *pcmStorage;
                 InstallOriginalStartupDisc(pcmState, disc);
                 pcmState.pcm.emplace();
                 uint64_t pcmTicks = 1000000;
@@ -1241,6 +1268,9 @@ int main(int argc, char** argv) {
                 std::vector<uint8_t> pendingRead;
                 std::vector<uint8_t> sceneBytes;
                 uint32_t sceneModule = 0, sceneBss = 0, sceneProlog = 0;
+                uint32_t systemTask = 0;
+                unsigned managerReturns = 0, loaderWorkers = 0, loaderExits = 0, alarmHandlers = 0;
+                unsigned archiveHandles = 0;
                 SceneConstructors sceneConstructors;
                 const auto transfer = pcmState.transferDisc;
                 pcmState.transferDisc = [&](const std::array<uint32_t, 3>& command, uint32_t length) {
@@ -1271,7 +1301,21 @@ int main(int argc, char** argv) {
                     guest.stopPcm = [] { throw std::runtime_error("Unexpected PCM stop in original first-command fixture."); };
                 };
                 bindPcmTest(pcmState, pcmTicks, submittedFrames);
-                const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 10000000, 128, [&](uint32_t pc) {
+                const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 50000000, 128, [&](uint32_t pc) {
+                    if (pc == 0x8015468cu) ++managerReturns;
+                    if (pc == 0x80199dd4u) ++loaderWorkers;
+                    if (pc == 0x801b72bcu) ++loaderExits;
+                    if (pc == 0x801b1c84u) ++alarmHandlers;
+                    if (pc == 0x8019a0b8u) {
+                        const auto archive = pcmState.gpr[31];
+                        const auto handle = pcmState.gpr[30];
+                        Require(pcmState.gpr[3] == 1 && ppc_read_u32(pcmState, archive) == 0x55aa382du &&
+                                    ppc_read_u32(pcmState, handle) == archive &&
+                                    ppc_read_u32(pcmState, handle + 4) ==
+                                        archive + ppc_read_u32(pcmState, archive + 4),
+                                "Original ARCInitHandle did not publish the loaded archive and its file table.");
+                        ++archiveHandles;
+                    }
                     if (pc == 0x801b4860u) {
                         sceneModule = pcmState.gpr[3];
                         sceneBss = pcmState.gpr[4];
@@ -1280,6 +1324,7 @@ int main(int argc, char** argv) {
                     }
                     if (pc == 0x80177c6cu) {
                         Require(pcmState.gpr[3] == 1, "Original OSLink rejected the scene module.");
+                        systemTask = pcmState.gpr[31];
                         sceneProlog = VerifyOriginalSceneLink(pcmState, sceneBytes, sceneModule, sceneBss);
                         sceneConstructors.module = sceneModule;
                     }
@@ -1297,7 +1342,7 @@ int main(int argc, char** argv) {
                         returnedObjects.push_back(pcmState.gpr[3]);
                     }
                     if (pc == 0x8017acf0u) ++fileCallbacks;
-                    if (pc == 0x80176754u) ++arrayConstructors;
+                    if (pc == 0x80176754u && !sceneModule) ++arrayConstructors;
                     if (std::find(loopReturns.begin(), loopReturns.end(), pc) != loopReturns.end()) {
                         Require(loopSteps < loopReturns.size() && pc == loopReturns[loopSteps],
                                 "Original first-loop preparation did not execute in main's call order.");
@@ -1325,13 +1370,21 @@ int main(int argc, char** argv) {
                           << " task IRQ=" << pcmState.dspHardware->task->interrupts
                           << " active IRQ=" << pcmState.externalInterrupt->active
                           << " suspended IRQ=" << pcmState.externalInterrupt->suspended.size()
+                          << " SRR=" << std::hex << pcmState.srr0 << "/" << pcmState.srr1
+                          << " resume=" << pcmState.externalInterrupt->resume << std::dec
                           << " objects=" << returnedObjects.size()
                           << " reads=" << resourceReads << "/" << resourceBytes
                           << " file callbacks=" << fileCallbacks << "/" << readNotifications << '\n';
+                std::cout << "Scene manager returns=" << managerReturns
+                          << " loader workers/exits=" << loaderWorkers << "/" << loaderExits
+                          << " alarm handlers/delivered/returned=" << alarmHandlers << "/"
+                          << pcmState.decrementer->delivered << "/" << pcmState.decrementer->returned
+                          << " thread context returns=" << pcmState.threadContextReturns
+                          << " archive handles=" << archiveHandles << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            sceneProlog != 0 && pcmResult.pc == 0x80154604u && pcmResult.lr == 0x80154b94u &&
+                            sceneProlog != 0 && pcmResult.pc == 0x80177d30u && pcmResult.lr == 0x8017760cu &&
                             pcmResult.sceneModuleLinked && pcmResult.scenePrologEntered &&
-                            pcmResult.sceneInitializationEntered && !pcmResult.scenePrologReturned &&
+                            pcmResult.sceneInitializationEntered && pcmResult.scenePrologReturned &&
                             pcmResult.sceneConstructorsReturned == 28 &&
                             sceneConstructors.returned == 28 && !sceneConstructors.active &&
                             !dispatcher.Contains(sceneProlog) &&
@@ -1339,29 +1392,40 @@ int main(int argc, char** argv) {
                             pcmResult.gameInitializationReturned && pcmResult.gameLoopEntered &&
                             pcmResult.firstLoopPreparationReturned &&
                             pcmState.pcm->active && pcmState.pcm->starts == 1 &&
-                            pcmState.pcm->completedBuffers == 133 && pcmState.pcm->submittedFrames == submittedFrames &&
-                            submittedFrames == 21440 && pcmHandlers == 133 && pcmCallbacks == 133 &&
-                            commandAddress != 0 && commandHandshakes == 133 &&
-                            pcmState.dspHardware->task->cpuMailSent == 409 &&
-                            pcmState.dspHardware->task->cpuMailConsumed == 409 &&
+                            pcmState.pcm->completedBuffers == 4209 && pcmState.pcm->submittedFrames == submittedFrames &&
+                            submittedFrames == 673600 && pcmHandlers == 4206 && pcmCallbacks == 4203 &&
+                            commandAddress != 0 && commandHandshakes == 4203 &&
+                            pcmState.dspHardware->task->cpuMailSent == 12619 &&
+                            pcmState.dspHardware->task->cpuMailConsumed == 12619 &&
                             !(pcmState.dspHardware->toDspMailbox & 0x80000000u) &&
-                            pcmState.dspHardware->task->dataTransfers == 4223 &&
-                            pcmState.dspHardware->task->transferredBytes == 1280140 &&
+                            pcmState.dspHardware->task->dataTransfers == 134463 &&
+                            pcmState.dspHardware->task->transferredBytes == 40807980 &&
                             pcmState.dspHardware->instructionPc == 0x4a &&
-                            pcmState.dspHardware->task->interrupts == 134 &&
-                            pcmState.dspHardware->sentMail == 136 && pcmState.dspHardware->consumedMail == 136 &&
+                            pcmState.dspHardware->task->interrupts == 4204 &&
+                            pcmState.dspHardware->sentMail == 4206 && pcmState.dspHardware->consumedMail == 4206 &&
                             pcmState.dspHardware->task->mode == NativeDspTaskMode::Running &&
                             pcmState.dspHardware->completedPrograms == 1 &&
                             !pcmState.systemCallActive && !pcmState.externalInterrupt->active &&
                             pcmState.externalInterrupt->suspended.empty(),
-                        "Original startup did not execute the scene constructors and enter original scene initialization.");
+                        "Original scene prolog did not finish through the real loader-thread and interrupt chain.");
                 Require(returnedObjects.size() == objectReturns.size() &&
                             loopSteps == loopReturns.size() && arrayConstructors == 2 &&
                             pcmResult.startupObjectsReturned == objectReturns.size() &&
-                            pcmResult.resourceReadNotifications == readNotifications &&
-                            resourceReads == 4 && resourceBytes == 744192 &&
-                            fileCallbacks == resourceReads && readNotifications == resourceReads && pendingRead.empty(),
+                            pcmResult.resourceReadNotifications == fileCallbacks &&
+                            resourceReads == 31 && resourceBytes == 8819232 &&
+                            fileCallbacks == 21 && readNotifications == 4 && pendingRead.empty(),
                         "Original startup resource reads did not complete through the real DVD callback chain.");
+                const auto scene = ppc_read_u32(pcmState, systemTask + 0x4c);
+                const auto loader = ppc_read_u32(pcmState, 0x80349174u);
+                Require(managerReturns == 1 && loaderWorkers == 52 && loaderExits == loaderWorkers &&
+                            alarmHandlers == 1 && pcmState.decrementer->delivered == alarmHandlers &&
+                            pcmState.decrementer->returned == alarmHandlers &&
+                            pcmState.threadContextReturns == 54 && archiveHandles > 0 &&
+                            scene != 0 && ppc_read_u32(pcmState, scene + 0x14) == sceneModule + 0x47da4u &&
+                            ppc_read_u32(pcmState, scene + 0x18) != 0 &&
+                            ppc_read_u32(pcmState, scene + 0x34) == 24 &&
+                            ppc_read_u32(pcmState, loader + 0xcc) == ppc_read_u32(pcmState, loader + 0xd0),
+                        "Original scene was not published with state-24 assets and a fully drained loader queue.");
                 TestScenePlacements(image, sceneBytes);
                 const auto camera = returnedObjects.front();
                 Require(ppc_read_u32(pcmState, 0x80349228u) == camera &&
@@ -1401,12 +1465,13 @@ int main(int argc, char** argv) {
                     Require(pcmState.dspHardware->dataRam[0xc00 + i] == ppc_read_u16(pcmState, commandAddress + i * 2),
                             "DSP command-list DMA differs from original CPU RAM.");
                 }
-                auto plainPcm = CreateOriginalStartupState(image);
+                auto plainStorage = StartupFixture(image);
+                auto& plainPcm = *plainStorage;
                 InstallOriginalStartupDisc(plainPcm, disc);
                 plainPcm.pcm.emplace();
                 uint64_t plainTicks = 1000000, plainFrames = 0;
                 bindPcmTest(plainPcm, plainTicks, plainFrames);
-                const auto plainResult = RunOriginalStartup(dispatcher, plainPcm, 10000000);
+                const auto plainResult = RunOriginalStartup(dispatcher, plainPcm, 50000000);
                 Require(plainResult.pc == pcmResult.pc && plainResult.lr == pcmResult.lr &&
                             plainResult.reason == pcmResult.reason && plainTicks == pcmTicks &&
                             plainFrames == submittedFrames && plainPcm.memory == pcmState.memory &&
@@ -1429,12 +1494,22 @@ int main(int argc, char** argv) {
                             plainPcm.dspHardware->task->loops.size() == pcmState.dspHardware->task->loops.size() &&
                             plainPcm.externalInterrupt->delivered == pcmState.externalInterrupt->delivered &&
                             plainPcm.externalInterrupt->returned == pcmState.externalInterrupt->returned &&
+                            plainPcm.decrementer->deadline == pcmState.decrementer->deadline &&
+                            plainPcm.decrementer->armed == pcmState.decrementer->armed &&
+                            plainPcm.decrementer->writes == pcmState.decrementer->writes &&
+                            plainPcm.decrementer->delivered == pcmState.decrementer->delivered &&
+                            plainPcm.decrementer->returned == pcmState.decrementer->returned &&
+                            plainPcm.threadContextReturns == pcmState.threadContextReturns &&
+                            plainPcm.externalInterrupt->vector == pcmState.externalInterrupt->vector &&
+                            plainPcm.externalInterrupt->resume == pcmState.externalInterrupt->resume &&
+                            plainPcm.externalInterrupt->savedMsr == pcmState.externalInterrupt->savedMsr &&
+                            !plainPcm.externalInterrupt->inHandler &&
                             !plainPcm.externalInterrupt->active && plainPcm.externalInterrupt->suspended.empty() &&
                             plainResult.gameInitializationReturned &&
                             plainResult.gameLoopEntered && plainResult.firstLoopPreparationReturned &&
                             plainResult.sceneModuleLinked &&
                             plainResult.scenePrologEntered && plainResult.sceneInitializationEntered &&
-                            !plainResult.scenePrologReturned && plainResult.sceneConstructorsReturned == 28 &&
+                            plainResult.scenePrologReturned && plainResult.sceneConstructorsReturned == 28 &&
                             !dispatcher.Contains(sceneProlog) &&
                             plainResult.startupObjectsReturned == pcmResult.startupObjectsReturned &&
                             plainResult.resourceReadNotifications == pcmResult.resourceReadNotifications &&

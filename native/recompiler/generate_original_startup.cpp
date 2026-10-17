@@ -107,7 +107,16 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
                             0x8017bd04u, 0x8017d3e8u, 0x8019b560u,
                             0x800126ecu, 0x800126fcu, 0x8017a398u, 0x801b4860u,
                             0x801906a4u, 0x8017cd5cu, 0x801811a8u, 0x800e1988u,
-                            0x800e21bcu, 0x800e1388u, 0x80154b30u, 0x80154b38u}) {
+                            0x800e21bcu, 0x800e1388u, 0x80154b30u, 0x80154b38u,
+                            0x80199508u, 0x80199458u, 0x80199928u,
+                            0x80190bb8u, 0x801987e4u,
+                            0x80198a68u, 0x80198980u,
+                            0x80239cc0u, 0x80239aa0u, 0x8023843cu,
+                            0x8023a458u, 0x8023a1c4u, 0x801b1c84u,
+                            0x80190008u, 0x801900c0u,
+                            0x8019018cu, 0x801901ccu, 0x80199240u, 0x80199dd4u,
+                            0x801b72bcu, 0x8019a070u, 0x80198f0cu, 0x80190fc0u,
+                            0x80178768u}) {
         leaders.insert(target);
         pending.push_back(target);
     }
@@ -195,8 +204,12 @@ int main(int argc, char** argv) {
             auto word = interruptVector[i];
             if (i == (0x801b14f8u - 0x801b1490u) / 4u) word |= 4u;
             instructions.emplace(0x500u + static_cast<uint32_t>(i * 4), word);
+            auto timerWord = interruptVector[i];
+            if (i == (0x801b14f8u - 0x801b1490u) / 4u) timerWord |= 8u;
+            instructions.emplace(0x900u + static_cast<uint32_t>(i * 4), timerWord);
         }
         leaders.insert(0x500u);
+        leaders.insert(0x900u);
         const auto ramConfiguration = image.ReadWords(0x801b4f54u, 0x80u);
         for (size_t i = 0; i < ramConfiguration.size(); ++i) {
             instructions.emplace(0x001b4f54u + static_cast<uint32_t>(i * 4), ramConfiguration[i]);
@@ -206,13 +219,21 @@ int main(int argc, char** argv) {
         AddOriginalDependencies(image, jumpTableState, instructions, leaders);
         leaders.insert(0x80003268u);
         leaders.insert(0x800032a0u);
-        for (uint32_t offset = 0; offset < 16u * 4u; offset += 4) {
-            const auto target = ppc_read_u32(jumpTableState, 0x802e0ed8u + offset);
-            if (target < 0x801bc080u || target >= 0x801bc3a0u || (target & 3u) != 0) {
-                throw std::runtime_error("Original DVD command table target is outside its compiled function.");
+        const auto addSwitchTable = [&](uint32_t table, uint32_t count,
+                                        uint32_t begin, uint32_t end) {
+            for (uint32_t index = 0; index < count; ++index) {
+                const auto target = ppc_read_u32(jumpTableState, table + index * 4u);
+                if (target < begin || target >= end || (target & 3u) != 0 ||
+                    instructions.count(target) == 0) {
+                    throw std::runtime_error("Original switch table target is outside its compiled function.");
+                }
+                leaders.insert(target);
             }
-            leaders.insert(target);
-        }
+        };
+        addSwitchTable(0x802e8cd8u, 56, 0x80239cc0u, 0x8023a1c4u);
+        addSwitchTable(0x802e8c54u, 33, 0x80239aa0u, 0x80239cc0u);
+        addSwitchTable(0x802e0ed8u, 16, 0x801bc080u, 0x801bc3a0u);
+        addSwitchTable(0x802cb198u, 8, 0x80199000u, 0x80199240u);
         for (const auto& instruction : instructions) {
             if (IsBranch(instruction.second)) {
                 leaders.insert(instruction.first + 4);
@@ -288,8 +309,10 @@ int main(int argc, char** argv) {
             bindings << "}";
             if (address >= 0xc00u && address < 0xc1cu) {
                 bindings << ",0x" << Hex(0x801b6968u + address - 0xc00u) << "u";
-            } else if (address >= 0x500u && address < 0x598u) {
-                const auto source = 0x801b1490u + address - 0x500u;
+            } else if ((address >= 0x500u && address < 0x598u) ||
+                       (address >= 0x900u && address < 0x998u)) {
+                const auto vector = address < 0x900u ? 0x500u : 0x900u;
+                const auto source = 0x801b1490u + address - vector;
                 bindings << ",0x" << Hex(source) << "u,{";
                 for (auto word : image.ReadWords(source, static_cast<uint32_t>(words.size() * 4u))) {
                     bindings << "0x" << Hex(word) << "u,";

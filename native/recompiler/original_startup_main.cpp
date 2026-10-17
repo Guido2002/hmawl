@@ -82,7 +82,7 @@ int RunCli(int argc, Character** argv) {
         if (disc) {
             std::cout << "Verified native disc boot metadata: " << rvzPath.u8string() << '\n'
                       << "Drive: native RVZ virtual drive, revision 1, no console firmware/date; "
-                         "checked read/inquiry DMA, original DVD interrupts; expired timer exceptions unsupported.\n";
+                         "checked read/inquiry DMA, original DVD interrupts and DEC/alarm delivery.\n";
         }
         uint64_t pcmHandlers = 0, pcmCallbacks = 0;
         const auto result = RunOriginalStartup(dispatcher, state, blocks, depth, [&](uint32_t pc) {
@@ -121,6 +121,12 @@ int RunCli(int argc, Character** argv) {
                       << pcm.completedBuffers << ", remaining blocks=" << pcm.remainingBlocks
                       << ", original handler/callback entries=" << pcmHandlers << "/" << pcmCallbacks
                       << ". Submitted RAM data, not proof of DSP mixing or audible game audio.\n";
+        }
+        if (state.decrementer) {
+            const auto& timer = *state.decrementer;
+            std::cerr << "Native DEC: writes=" << timer.writes << ", delivered/returned="
+                      << timer.delivered << "/" << timer.returned << ", thread context returns="
+                      << state.threadContextReturns << ". Original SDK handlers and saved contexts.\n";
         }
         if (state.graphics) {
             const auto& gx = *state.graphics;

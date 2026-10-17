@@ -74,17 +74,17 @@ handler and restore both contexts. The first game-system initialization now retu
 to main. Eleven subsequent original startup objects now return, and an actual
 128-byte resource read completes through original SDK/game DVD callbacks.
 Original SystemTask now loads `wlp1.rel` and original `OSLink` returns success.
-Its relocatable native prolog executes all 28 original C++ constructors and enters
-mode-41 scene initialization, including two additional DVD reads.
-With `--max-blocks 10000000`, the measured Windows runner reaches the unbound
-scene-manager initialization at `PC=0x80154604`, LR `0x80154B94`;
-DSP PC `0x4A` waits for another list. The module prolog has not returned yet.
+Its relocatable native prolog executes all 28 original C++ constructors, loads
+mode-41 scene assets and returns to SystemTask at `0x80177C88`.
+With `--max-blocks 50000000`, the next untranslated SystemTask phase is
+`PC=0x80177D30`, LR `0x8017760C`.
 The original main loop enters its first iteration and its reset/update/resource/
 audio preparation returns, but no complete iteration or rendered frame is verified.
 The default one-million-block limit can expire earlier.
 A deterministic disc fixture verifies all 15170 relocation records, section addresses,
-BSS clearing and deferred imports; four DVD reads transfer 744192 bytes. It completes
-133 lists, 4223 DSP data DMAs/1280140 bytes and 133 original PCM callbacks.
+BSS clearing and deferred imports; 31 DVD reads transfer 8819232 bytes.
+It verifies original archive initialization, 52 loader-worker exits, a drained
+resource queue, one original DEC/alarm exception and 54 thread-context returns.
 Real Windows timing changes these totals.
 General voice mixing/ADPCM remains untranslated. The original PCM buffers contain
 zero samples; Windows buffer acceptance is not proof of audible game audio.
@@ -326,8 +326,8 @@ queue. Full runtime scheduling and device services are still needed.
   list and idempotent already-installed/repeated initialization. Separately
   check stable reset-list priority ordering, head/middle/tail insertion and
   unsigned maximum priorities. Continue entry-derived OSInit to `0x801b0f68`.
-  Alarm scheduling, decrementer delivery and reset-callback execution remain
-  unsupported; registration is not execution.
+  Registration is not execution. The later scene-load milestone exercises
+  original alarm scheduling/delivery; reset callbacks remain a separate dependency.
 - [x] Execute original `__OSModuleInit` and continue entry-derived OSInit to
   `0x801b0f6c`. Verify exact clearing of low-memory words `0x800030c8/cc/d0`,
   poisoned/zero values, repeated initialization, both interrupt states and
@@ -554,7 +554,7 @@ queue. Full runtime scheduling and device services are still needed.
   DI masks/W1C, checked command words, bounded DMA and IRQ cause reflect actual
   transfer results; missing/throwing/invalid backends cannot fabricate completion.
   Read commands use actual RVZ bytes. DEC writes retain real time-base deadlines;
-  expired timer delivery is not implemented and fails explicitly, never silently
+  expiry now enters the original DEC vector and SDK handler, never silently
   dropping an alarm. Runner and real-RVZ tests reach `PC=LR=0x80003268`, SP
   `0x8035CF98`, with all five external exceptions restored, original inquiry
   command status zero and version callback result `0x8001`. All FST bytes survive.
@@ -739,10 +739,20 @@ queue. Full runtime scheduling and device services are still needed.
   boundary and remove run-scoped bindings on stop/failure. Verify two alternate
   module/BSS placements through original SDK OSLink, constructor order/ABI,
   actual constructor data copies and modified code/operand rejection.
-  Four real DVD reads now complete (744192 bytes). Both the deterministic test
-  and Windows PCM runner reach `0x80154604`, LR `0x80154B94`, inside original
-  scene-manager initialization. The prolog has not returned; no scene frame
-  or complete main-loop iteration is claimed.
+  This originally reached manager initialization at `0x80154604`; the following
+  milestone completes that connected dependency.
+- [x] Return from the original scene prolog with real loaded assets.
+  Compile bounded original manager/resource preparation, integer path formatting,
+  loader workers and their SDK thread exits. Preserve the discovery safety bound.
+  Deliver real decrementer expiry through the original vector/alarm handler;
+  preserve interrupt masking, 32-bit wraps and nested external/timer contexts.
+  Restore SDK-selected thread contexts from unnested interrupts with exact
+  current-OS-context validation. Verify 31 DVD reads/8819232 bytes, archive file
+  tables, state-24 scene publication, 52 worker exits, one alarm exception,
+  54 thread-context returns and a drained queue. Observed/unobserved full runs
+  must have identical CPU/RAM, timer, PCM and DSP state. The prolog returns at
+  `0x80177C88`; the next untranslated phase is `0x80177D30`, LR `0x8017760C`.
+  No rendered frame or complete main-loop iteration is claimed.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -955,11 +965,11 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Complete original mode-41 scene-manager initialization from `0x80154604`
-   toward the first scene and completed main-loop iteration.
+1. Continue original SystemTask from `0x80177D30`
+   toward the first scene update and completed main-loop iteration.
    The genuine relocated `wlp1.rel` prolog now executes all 28 constructors,
-   followed by original scene/asset construction and four completed DVD reads.
-   The prolog has not returned yet. Scope discovery to the actual transition and
+   followed by original scene/asset loading and 31 completed DVD reads.
+   Its prolog now returns with the loader queue drained. Scope discovery to the actual transition and
    indirect targets instead of lifting the existing compiler safety bound. The first
    game-system initialization now returns to main in the Windows runner; original
    DSP lists reach their own output/completion and resume waiting for new work.
