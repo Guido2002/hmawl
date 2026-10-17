@@ -293,6 +293,16 @@ queue. Full runtime scheduling and device services are still needed.
   (`0x801b3bfc`, `0xcc00500a`), with both interrupt states and exact RAM/stack
   guards; also verify entry-derived continuation. No interrupt delivery or
   complete MI/DSP backend; OSInit still has not returned.
+- [x] Add opt-in DSP control readback and startup-only interrupt-disable writes
+  at `0xcc00500a` (16-bit). Preserve pending write-one-to-clear status, halt,
+  DMA status and init-code state while clearing all three interrupt enables.
+  Reject control commands, acknowledgements, reserved state, enable writes and
+  unsupported widths/addresses/aliases before mutation. Verify all 512 supported
+  initial bit combinations, repeated writes, halfword truncation, status/RAM
+  guards and device persistence through DVD callbacks. Original interrupt setup
+  now reaches the unsupported AI control read (`0x801b3c4c`, `0xcc006c00`);
+  verify independently and from entry-derived state. No DSP/audio/DMA execution
+  or interrupt delivery; OSInit remains incomplete.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic

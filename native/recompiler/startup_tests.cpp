@@ -1142,10 +1142,15 @@ void RunInterruptPiSetupToDevice(PpcState& state) {
         rejected = std::string(error.what()).find("not mapped to GameCube RAM") != std::string::npos;
     }
     const bool miEnabled = state.miInterruptMask.has_value();
-    Require(rejected && calls == (miEnabled ? 6u : 5u) && state.piInterruptMask == 0xf0u &&
+    const bool dspEnabled = state.dspControl.has_value();
+    Require(rejected && calls == (dspEnabled ? 7u : miEnabled ? 6u : 5u) &&
+                state.piInterruptMask == 0xf0u &&
                 ppc_read_u32(state, 0x800000c4u) == 0xffffffe0u &&
                 ppc_read_u32(state, 0x800000c8u) == 0 &&
-                (miEnabled ? state.miInterruptMask == 0 &&
+                (!dspEnabled || state.dspControl == (*expected.dspControl & ~0x0150u)) &&
+                (dspEnabled ? state.miInterruptMask == 0 &&
+                    state.gpr[4] == 0xcc000000u && state.gpr[0] == 0x00800000u :
+                 miEnabled ? state.miInterruptMask == 0 &&
                     state.gpr[5] == 0xcc00500au && state.gpr[0] == 0x04000000u :
                     state.gpr[4] == 0xcc004000u && state.gpr[0] == 0) &&
                 !state.externalInterruptsEnabled &&
@@ -1174,6 +1179,12 @@ void TestOriginalInterruptPiSetup(const DolImage& image) {
             state.miInterruptMask = mask;
             RunInterruptPiSetupToDevice(state);
         }
+        for (uint16_t control : {uint16_t{0}, uint16_t{4}, uint16_t{0x154}, uint16_t{0x7fc}}) {
+            state = before;
+            state.miInterruptMask = 0x1fu;
+            state.dspControl = control;
+            RunInterruptPiSetupToDevice(state);
+        }
     }
     std::cout << "Opt-in PI mask register accepts original 0xf0 startup write; original "
                  "__OSMaskInterrupts/SetInterruptMask then reject MI write at 0x801b3be0 "
@@ -1181,6 +1192,9 @@ void TestOriginalInterruptPiSetup(const DolImage& image) {
     std::cout << "With opt-in MI mask state, original masking clears MI enables and reaches "
                  "unsupported DSP control read at 0x801b3bfc (0xcc00500a). "
                  "Interrupt initialization has not returned.\n";
+    std::cout << "With opt-in DSP control, original interrupt masking disables DSP enables "
+                 "without clearing pending status; next unsupported access is AI control "
+                 "at 0x801b3c4c (0xcc006c00).\n";
 }
 
 void TestOriginalInterruptHandlerAccessors(const DolImage& image) {
@@ -1462,6 +1476,14 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     RunInterruptPiSetupToDevice(state);
     std::cout << "With opt-in PI/MI state, entry-derived setup reaches unsupported DSP "
                  "control read at 0x801b3bfc; OSInit remains incomplete.\n";
+    state = firstTime;
+    state.lr = 0x801b0f70u;
+    state.piInterruptMask = 0;
+    state.miInterruptMask = 0x1fu;
+    state.dspControl = 0x7fcu;
+    RunInterruptPiSetupToDevice(state);
+    std::cout << "With opt-in PI/MI/DSP state, entry-derived setup reaches unsupported AI "
+                 "control read at 0x801b3c4c; OSInit remains incomplete.\n";
 }
 
 void TestOriginalArenaAccessors(const DolImage& image) {

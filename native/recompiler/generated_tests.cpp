@@ -892,6 +892,101 @@ void TestAndComplement() {
     }
 }
 
+void TestDspControl() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    state.gpr[4] = 0xcc00500au;
+    const auto ram = state.memory;
+    const auto rejectAccess = [&](auto operation) {
+        const auto previous = state.dspControl;
+        bool rejected = false;
+        try {
+            operation();
+        } catch (const std::out_of_range&) {
+            rejected = true;
+        }
+        Require(rejected && state.dspControl == previous && state.memory == ram,
+                "Unsupported DSP access mutated device state or RAM.");
+    };
+    rejectAccess([&] { ppc_0000B220(state); });
+    rejectAccess([&] { ppc_0000B230(state); });
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    state.fpscr = 4;
+    for (unsigned initial = 0; initial <= 0x7fc; initial += 4) {
+        state.dspControl = static_cast<uint16_t>(initial);
+        ppc_0000B220(state);
+        Require(state.gpr[3] == initial && state.pc == 0xb224u,
+                "Compiled DSP readback differs.");
+        for (unsigned repeat = 0; repeat < 2; ++repeat) {
+            state.gpr[3] = 0xffff0000u | (initial & 0x604u);
+            ppc_0000B230(state);
+            Require(state.dspControl == (initial & 0x6acu) && state.pc == 0xb234u,
+                    "DSP startup masking changed pending status or unrelated control bits.");
+            ppc_0000B220(state);
+            Require(state.gpr[3] == (initial & 0x6acu) &&
+                        state.cr == 0x12345678u && state.xer == 0xe0000000u &&
+                        state.fpscr == 4 && state.memory == ram,
+                    "DSP readback or masking changed RAM or CPU status.");
+        }
+    }
+    const auto rejectWrite = [&](uint16_t previous, uint16_t value) {
+        state.dspControl = previous;
+        state.gpr[3] = value;
+        state.pc = 0xb230u;
+        bool rejected = false;
+        try {
+            ppc_0000B230(state);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("only startup interrupt masking") != std::string::npos;
+        }
+        Require(rejected && state.dspControl == previous && state.pc == 0xb230u &&
+                    state.gpr[3] == value && state.memory == ram,
+                "Unsupported DSP command, acknowledgement or control change was accepted.");
+    };
+    for (unsigned bit = 0; bit < 16; ++bit) {
+        rejectWrite(0x7fc, static_cast<uint16_t>(0x604u ^ (1u << bit)));
+        if ((0xf803u & (1u << bit)) != 0) {
+            const auto initial = static_cast<uint16_t>(4u | (1u << bit));
+            rejectWrite(initial, initial);
+        }
+    }
+    state.dspControl = 0x7fc;
+    for (uint32_t address : {0xcc005008u, 0xcc005009u, 0xcc00500bu, 0xcc00500cu,
+                             0x0c00500au, 0xcc006c00u}) {
+        state.gpr[4] = address;
+        rejectAccess([&] { ppc_0000B220(state); });
+        rejectAccess([&] { ppc_0000B230(state); });
+    }
+    for (unsigned width : {1u, 4u, 8u}) {
+        rejectAccess([&] {
+            if (width == 1) (void)ppc_read_u8(state, 0xcc00500au);
+            else if (width == 4) (void)ppc_read_u32(state, 0xcc00500au);
+            else (void)ppc_read_u64(state, 0xcc00500au);
+        });
+        rejectAccess([&] {
+            if (width == 1) ppc_write_u8(state, 0xcc00500au, 0);
+            else if (width == 4) ppc_write_u32(state, 0xcc00500au, 0);
+            else ppc_write_u64(state, 0xcc00500au, 0);
+        });
+    }
+    state.dspControl.reset();
+    rejectAccess([&] { (void)ppc_read_u16(state, 0xcc00500au); });
+    state.dspControl = 0x7fc;
+    state.gpr[4] = 0xc0001000u;
+    state.gpr[3] = 0x1234;
+    ppc_0000B230(state);
+    ppc_0000B220(state);
+    Require(state.gpr[3] == 0x1234 && state.dspControl == 0x7fc,
+            "DSP control support changed RAM halfword access.");
+    state.memoryMap = PpcMemoryMap::Flat;
+    state.dspControl = 0x7fc;
+    ppc_write_u16(state, 4, 0x1234);
+    Require(ppc_read_u16(state, 4) == 0x1234 && state.dspControl == 0x7fc,
+            "DSP option changed flat-memory semantics.");
+}
+
 void TestMiInterruptMask() {
     PpcState state;
     state.memoryMap = PpcMemoryMap::GameCubeRam;
@@ -1798,6 +1893,7 @@ int main() {
         TestCacheControlRegisters();
         TestPiInterruptMask();
         TestMiInterruptMask();
+        TestDspControl();
         TestAndComplement();
         TestCacheBlockInstructions();
         TestL2ControlRegisters();

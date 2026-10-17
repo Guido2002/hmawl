@@ -48,6 +48,7 @@ struct PpcState {
     // Device state is opt-in and is not restored with DVD callback CPU context.
     std::optional<uint32_t> piInterruptMask;
     std::optional<uint16_t> miInterruptMask;
+    std::optional<uint16_t> dspControl;
     bool externalInterruptsEnabled = true;
 };
 
@@ -182,6 +183,10 @@ inline void ppc_write_u64(PpcState& state, uint32_t address, uint64_t value) {
 }
 
 inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00500au &&
+        state.dspControl.has_value()) {
+        return *state.dspControl;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00401cu &&
         state.miInterruptMask.has_value()) {
         return *state.miInterruptMask;
@@ -209,6 +214,16 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
 }
 
 inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00500au &&
+        state.dspControl.has_value()) {
+        const uint16_t previous = *state.dspControl;
+        if ((previous & 0xf803u) != 0 || value != (previous & ~0x01f8u)) {
+            throw std::runtime_error("Unsupported DSP control write (only startup interrupt masking supported).");
+        }
+        // Status bits 0xa8 are write-one-to-clear: the startup's zero writes retain them.
+        *state.dspControl = static_cast<uint16_t>(previous & ~0x0150u);
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00401cu &&
         state.miInterruptMask.has_value()) {
         if (value != 0) {

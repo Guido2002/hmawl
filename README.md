@@ -383,6 +383,20 @@ state and reaches the next unsupported DSP control read at `0x801b3bfc`
 exact RAM/stack writes and continuation from the saved entry-derived state.
 The interrupt call has not returned; the completed OSInit prefix is unchanged.
 
+Optional DSP control state supports 16-bit readback at `0xcc00500a` and the
+original startup's interrupt-disable write. It clears only the three enable
+bits (`0x150`); pending status (`0xa8`) is retained because the original code
+writes zero to those write-one-to-clear fields. Halt, DMA status and init-code
+status are preserved. Reset/assert/init commands, reserved state, acknowledgements,
+enabling interrupts and other control changes remain explicitly unsupported.
+The option is disabled by default and rejects other widths/addresses/aliases.
+Tests cover all 512 combinations of the supported initial register bits, repeats,
+halfword truncation, rejected changes and persistence through DVD callbacks.
+With PI/MI/DSP state enabled, original interrupt setup now reaches the unsupported
+AI control read at `0x801b3c4c` (`0xcc006c00`), independently and from entry-derived
+state with exact RAM/stack guards. This is not DSP execution, DMA, audio output
+or interrupt delivery; interrupt initialization and OSInit still do not return.
+
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings
 and do not suppress dispatch code-word checks. Original `DCFlushRangeNoSync`
