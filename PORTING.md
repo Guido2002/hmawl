@@ -26,7 +26,10 @@ not copy its implementation.
 An optional native console runner now executes the verified original DOL entry
 continuously, without test-only guest callbacks. Original EXIInit now returns
 after actual immediate transactions against explicitly empty external slots
-and native console reporting. It reaches SIInit at `0x801F52F4`; full OSInit,
+and native console reporting. Original SIInit also returns after sampling and
+interrupt setup, a real no-response transaction under an explicit disconnected-
+controller profile and queuing the other probes. It reaches __OSInitSram at
+`0x801B5E98`; full OSInit,
 game initialization, the main loop and a rendered game frame remain unachieved.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
@@ -388,6 +391,21 @@ queue. Full runtime scheduling and device services are still needed.
   Empty-device transfer semantics were checked against the public
   [Dolphin EXI interface behavior](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/Core/HW/EXI/EXI_Device.cpp);
   no emulator code is copied or executed.
+- [x] Complete original SIInit in the production runner: compile its sampling,
+  VI format, interrupt unmasking, type-query and transfer/queue dependency chain.
+  Map read-only analog VI cable status and explicit 162 MHz bus/486 MHz CPU loader
+  metadata; retain the existing real 40.5 MHz time base. Implement disabled-polling
+  timing, 128-byte communication RAM, channel error W1C and checked SI transactions.
+  An explicitly disconnected controller reports NOREP/COMERR/TCINT without
+  inventing response bytes. Missing/throwing/invalid backends cannot commit
+  completion. Retain the completion interrupt and stop explicitly if EE/PI would
+  require its unimplemented guest delivery. Original SIInit returns, with three
+  controller probes still in the original queue, and calls __OSInitSram at
+  `0x801B5E98`, LR `0x801B0F94`. Cover all four channels, boundary/128-byte lengths,
+  error flags, byte order, partial-buffer preservation, exact original queries,
+  pending interrupts and compiled sraw/srawi/xor/subfc semantics.
+  This is not working controller input, guest interrupt delivery or full OSInit.
+  Register semantics: [YAGCD SI hardware registers](https://gc-forever.com/yagcd/chap5.html#sec5.8).
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

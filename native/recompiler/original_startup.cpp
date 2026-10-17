@@ -1,6 +1,7 @@
 #include "original_startup.h"
 #include "native_time_base.h"
 #include "native_exi_bus.h"
+#include "native_si_bus.h"
 #include "original_startup_manifest.h"
 #include "sha1.h"
 #include "generated_original_startup.h"
@@ -38,6 +39,11 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.dspControl = 0;
     state.aiControl = 0;
     state.diConfiguration = 1;
+    state.viDtvStatus = 0;
+    state.serialInterface.emplace();
+    state.transferSi = TransferDisconnectedSi;
+    ppc_write_u32(state, 0x800000f8u, 162000000u);
+    ppc_write_u32(state, 0x800000fcu, 486000000u);
     state.exiStatus = {0u, 0u, 0u};
     state.exiTransferControl = {0u, 0u, 0u};
     state.exiInitializationEnabled = true;

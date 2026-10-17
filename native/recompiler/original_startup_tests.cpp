@@ -1,6 +1,7 @@
 #include "original_startup.h"
 #include "native_console.h"
 #include "native_exi_bus.h"
+#include "native_si_bus.h"
 
 #include <chrono>
 #include <fstream>
@@ -97,11 +98,16 @@ int main(int argc, char** argv) {
                     noBinding.reason.find("No native translation registered") != std::string::npos,
                 "Unbound production dispatcher did not report its exact missing entry.");
         auto state = CreateOriginalStartupState(image);
+        uint64_t deterministicTicks = 1000000;
+        state.readTimeBase = [&] { return deterministicTicks += 10000; };
         Require(state.pc == image.entryPoint() && ppc_read_msr(state) == 0x30u &&
                     !state.callGuest && state.readTimeBase && state.piInterruptMask == 0 &&
                     state.miInterruptMask == 0 && state.dspControl == 0 &&
                     state.aiControl == 0 && state.exiStatus[0] == 0 &&
-                    state.exiTransferControl[0] == 0 && state.exiInitializationEnabled,
+                    state.exiTransferControl[0] == 0 && state.exiInitializationEnabled &&
+                    state.serialInterface.has_value() && state.viDtvStatus == 0 &&
+                    ppc_read_u32(state, 0x800000f8u) == 162000000u &&
+                    ppc_read_u32(state, 0x800000fcu) == 486000000u,
                 "Loader profile is not explicit or installs guest service replacements.");
         NativeDispatcher dispatcher;
         RegisterOriginalStartup(dispatcher, state);
@@ -127,12 +133,20 @@ int main(int argc, char** argv) {
             return TransferEmptyExternalExi(request);
         };
         std::string console;
+        unsigned siTransfers = 0;
+        state.transferSi = [&](const SiTransferRequest& request) {
+            Require(request.channel == 0 && request.output == std::vector<uint8_t>{0} &&
+                        request.inputLength == 3 && siTransfers++ == 0,
+                    "Original SI controller type query differs or an unserviced queue was bypassed.");
+            return TransferDisconnectedSi(request);
+        };
         state.writeConsole = [&](const std::string& text) { console += text; };
-        const auto expectedVersion = ReadGuestConsoleString(state, 0x802e6150u) + '\n';
+        const auto expectedVersion = ReadGuestConsoleString(state, 0x802e6150u) + '\n' +
+            ReadGuestConsoleString(state, ppc_read_u32(state, 0x80348cd8u)) + '\n';
         const auto result = RunOriginalStartup(dispatcher, state);
         std::cout << DescribeOriginalStartupStop(result) << '\n';
-        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801f52f4u &&
-                    result.lr == 0x801b0f90u && transfers == 2 &&
+        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801b5e98u &&
+                    result.lr == 0x801b0f94u && transfers == 2 && siTransfers == 1 &&
                     console == expectedVersion && state.exiStatus[0] == 0x2008u &&
                     state.exiTransferControl[0] == 0x30u &&
                     ppc_read_u32(state, 0x80340c6cu) == 0 &&
@@ -141,6 +155,38 @@ int main(int argc, char** argv) {
                     result.reason.find("No native translation registered") != std::string::npos &&
                     ppc_read_u32(state, 0x80349ad0u) == 0,
                 "Production startup stopped at an unexpected boundary.");
+        const uint32_t expectedPolling =
+            (uint32_t{ppc_read_u16(state, 0x802e60b8u)} << 16) |
+            (uint32_t{ppc_read_u8(state, 0x802e60bau)} << 8);
+        Require(state.piInterruptMask == 0xf8u &&
+                    ppc_read_u32(state, 0x80003040u + 20u * 4u) == 0x801f4d58u &&
+                    state.serialInterface->polling == expectedPolling &&
+                    state.serialInterface->communication == 0xe0010300u &&
+                    state.serialInterface->status == 0x08000000u &&
+                    ppc_read_u32(state, 0x802e5fe4u) == 0 &&
+                    ppc_read_u32(state, 0x80340a60u) == UINT32_MAX,
+                "Original SI sampling/interrupt setup differs or a controller completion was fabricated.");
+        for (uint32_t channel = 1; channel < 4; ++channel) {
+            Require(ppc_read_u32(state, 0x80340a60u + channel * 0x20u) == channel &&
+                        ppc_read_u32(state, 0x80340a68u + channel * 0x20u) == 1 &&
+                        ppc_read_u32(state, 0x80340a70u + channel * 0x20u) == 3 &&
+                        ppc_read_u32(state, 0x80340a74u + channel * 0x20u) == 0x801f5b58u,
+                    "Original SI queues did not retain the remaining controller probes.");
+        }
+        auto missingSiBackend = CreateOriginalStartupState(image);
+        missingSiBackend.transferSi = {};
+        const auto siFailure = RunOriginalStartup(dispatcher, missingSiBackend);
+        Require(siFailure.pc == 0x801f5578u &&
+                    siFailure.reason.find("controller transaction/completion backend") != std::string::npos &&
+                    missingSiBackend.serialInterface->communication == 0 &&
+                    missingSiBackend.serialInterface->status == 0,
+                "Missing SI backend fabricated a response or completion.");
+        auto missingDtv = CreateOriginalStartupState(image);
+        missingDtv.viDtvStatus.reset();
+        const auto dtvFailure = RunOriginalStartup(dispatcher, missingDtv);
+        Require(dtvFailure.pc == 0x801f6180u &&
+                    dtvFailure.reason.find("not mapped") != std::string::npos,
+                "SI sampling silently substituted a missing VI cable-status profile.");
         auto noConsole = CreateOriginalStartupState(image);
         noConsole.writeConsole = {};
         const auto consoleFailure = RunOriginalStartup(dispatcher, noConsole);

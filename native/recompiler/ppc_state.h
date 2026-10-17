@@ -23,6 +23,24 @@ struct ExiImmediateRequest {
     uint32_t data;
 };
 
+struct SiTransferRequest {
+    unsigned channel = 0;
+    std::vector<uint8_t> output;
+    unsigned inputLength = 0;
+};
+
+struct SiTransferResult {
+    std::vector<uint8_t> input;
+    uint32_t error = 0;
+};
+
+struct PpcSerialInterface {
+    uint32_t polling = 0;
+    uint32_t communication = 0;
+    uint32_t status = 0;
+    std::array<uint32_t, 32> buffer = {};
+};
+
 struct PpcFpr {
     uint64_t ps0 = 0;
     uint64_t ps1 = 0;
@@ -60,6 +78,9 @@ struct PpcState {
     std::optional<uint16_t> dspControl;
     std::optional<uint32_t> aiControl;
     std::optional<uint32_t> diConfiguration;
+    std::optional<uint16_t> viDtvStatus;
+    std::optional<PpcSerialInterface> serialInterface;
+    std::function<SiTransferResult(const SiTransferRequest&)> transferSi;
     std::array<std::optional<uint32_t>, 3> exiStatus;
     std::array<std::optional<uint32_t>, 3> exiTransferControl;
     bool exiInitializationEnabled = false;
@@ -74,6 +95,17 @@ inline uint32_t ppc_read_msr(const PpcState& state) {
     return (state.msr & ~0x8000u) | (state.externalInterruptsEnabled ? 0x8000u : 0u);
 }
 
+inline uint32_t ppc_shift_right_arithmetic(PpcState& state, uint32_t value, uint32_t shift) {
+    shift &= 63u;
+    const bool negative = (value & 0x80000000u) != 0;
+    const bool carry = negative && shift != 0 &&
+        (shift >= 32 || (value & ((1u << shift) - 1u)) != 0);
+    state.xer = (state.xer & ~0x20000000u) | (carry ? 0x20000000u : 0u);
+    if (shift == 0) return value;
+    if (shift >= 32) return negative ? UINT32_MAX : 0;
+    return (value >> shift) | (negative ? UINT32_MAX << (32u - shift) : 0);
+}
+
 inline void ppc_reset_performance_monitor(PpcState& state, unsigned index, uint32_t value) {
     if (index >= state.performanceMonitor.size() || value != 0) {
         throw std::runtime_error("Unsupported PowerPC performance-monitor write (only zero resets supported).");
@@ -81,10 +113,19 @@ inline void ppc_reset_performance_monitor(PpcState& state, unsigned index, uint3
     state.performanceMonitor[index] = 0;
 }
 
+inline void ppc_check_pending_si_interrupt(const PpcState& state, bool enabled) {
+    if (enabled && state.piInterruptMask.has_value() && (*state.piInterruptMask & 8u) != 0 &&
+        state.serialInterface.has_value() &&
+        (state.serialInterface->communication & 0xc0000000u) == 0xc0000000u) {
+        throw std::runtime_error("Native SI completion interrupt requires guest interrupt delivery.");
+    }
+}
+
 inline void ppc_write_msr(PpcState& state, uint32_t value) {
     if (((ppc_read_msr(state) ^ value) & ~0xa000u) != 0) {
         throw std::runtime_error("Unsupported PowerPC MSR mode change (only FP/EE supported).");
     }
+    ppc_check_pending_si_interrupt(state, (value & 0x8000u) != 0);
     state.msr = value & ~0x8000u;
     state.externalInterruptsEnabled = (value & 0x8000u) != 0;
 }
@@ -153,6 +194,20 @@ inline void ppc_flush_cache_block(const PpcState& state, uint32_t address) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.serialInterface.has_value()) {
+        const auto& serial = *state.serialInterface;
+        if (address == 0xcc006430u) return serial.polling;
+        if (address == 0xcc006434u) {
+            if ((serial.communication & 1u) != 0) {
+                throw std::runtime_error("Native SI transfer pending without a completion backend.");
+            }
+            return serial.communication;
+        }
+        if (address == 0xcc006438u) return serial.status;
+        if (address >= 0xcc006480u && address <= 0xcc0064fcu && (address & 3u) == 0) {
+            return serial.buffer[(address - 0xcc006480u) / 4u];
+        }
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc006024u &&
         state.diConfiguration.has_value()) {
         return *state.diConfiguration;
@@ -228,6 +283,10 @@ inline void ppc_write_u64(PpcState& state, uint32_t address, uint64_t value) {
 }
 
 inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00206cu &&
+        state.viDtvStatus.has_value()) {
+        return *state.viDtvStatus;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00500au &&
         state.dspControl.has_value()) {
         return *state.dspControl;
@@ -243,6 +302,71 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.serialInterface.has_value()) {
+        auto& serial = *state.serialInterface;
+        if (address == 0xcc006430u) {
+            if ((value & ~0x03ffff0fu) != 0) {
+                throw std::runtime_error("Unsupported SI polling write (automatic polling is not implemented).");
+            }
+            serial.polling = value;
+            return;
+        }
+        if (address == 0xcc006434u) {
+            if ((serial.communication & 1u) != 0) {
+                throw std::runtime_error("Cannot change SI transfer parameters while a transfer is pending.");
+            }
+            if ((value & ~0xc87f7f07u) != 0) {
+                throw std::runtime_error("Unsupported SI communication control write.");
+            }
+            if ((value & 1u) != 0) {
+                if (!state.transferSi) {
+                    throw std::runtime_error("Native SI transfer requires a controller transaction/completion backend.");
+                }
+                SiTransferRequest request;
+                request.channel = (value >> 1) & 3u;
+                const auto outputLength = ((value >> 16) & 0x7fu) == 0 ?
+                    128u : (value >> 16) & 0x7fu;
+                request.inputLength = ((value >> 8) & 0x7fu) == 0 ?
+                    128u : (value >> 8) & 0x7fu;
+                request.output.reserve(outputLength);
+                for (unsigned index = 0; index < outputLength; ++index) {
+                    request.output.push_back(static_cast<uint8_t>(
+                        serial.buffer[index / 4] >> (24u - (index % 4) * 8u)));
+                }
+                const auto result = state.transferSi(request);
+                if ((result.error & ~0xfu) != 0 ||
+                    (result.error == 0 ? result.input.size() != request.inputLength : !result.input.empty())) {
+                    throw std::runtime_error("Invalid native SI transfer result length or error flags.");
+                }
+                for (unsigned index = 0; index < result.input.size(); ++index) {
+                    const auto shift = 24u - (index % 4) * 8u;
+                    auto& word = serial.buffer[index / 4];
+                    word = (word & ~(0xffu << shift)) | (uint32_t{result.input[index]} << shift);
+                }
+                serial.status |= result.error << ((3u - request.channel) * 8u);
+                serial.communication = (serial.communication & 0x10000000u) |
+                    (value & 0x487f7f06u) | 0x80000000u | (result.error != 0 ? 0x20000000u : 0u);
+                return;
+            }
+            serial.communication = (serial.communication & 0xb0000000u & ~(value & 0x80000000u)) |
+                (value & 0x487f7f06u);
+            return;
+        }
+        if (address == 0xcc006438u) {
+            if ((value & ~0x0f0f0f0fu) != 0) {
+                throw std::runtime_error("Unsupported SI status write (output polling commands are not implemented).");
+            }
+            serial.status &= ~value;
+            return;
+        }
+        if (address >= 0xcc006480u && address <= 0xcc0064fcu && (address & 3u) == 0) {
+            if ((serial.communication & 1u) != 0) {
+                throw std::runtime_error("Cannot write SI communication RAM during a pending transfer.");
+            }
+            serial.buffer[(address - 0xcc006480u) / 4u] = value;
+            return;
+        }
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.exiImmediateEnabled &&
         (address == 0xcc006810u || address == 0xcc006824u || address == 0xcc006838u)) {
         state.exiImmediateData[(address - 0xcc006810u) / 0x14u] = value;
@@ -332,8 +456,8 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
     }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003004u &&
         state.piInterruptMask.has_value()) {
-        if (value != 0xf0u) {
-            throw std::runtime_error("Unsupported PI interrupt mask write (only startup mask 0xf0 supported).");
+        if (value != 0xf0u && !(state.serialInterface.has_value() && value == 0xf8u)) {
+            throw std::runtime_error("Unsupported PI interrupt mask write (only startup mask 0xf0, or 0xf8 with SI mapped, supported).");
         }
         *state.piInterruptMask = value;
         return;

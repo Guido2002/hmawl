@@ -50,10 +50,14 @@ cmake --build build\native --config Release --target hmawl_original_startup hmaw
 .\build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup .\build\game-us-r0\main.dol
 ```
 
-The verified runner now completes original EXIInit, including actual immediate
+The verified runner now completes original EXIInit and SIInit, including actual immediate
 ID-command/read transactions against explicitly empty external slots and
-native console output of its SDK version. It reaches the next untranslated
-`SIInit` call at `PC=0x801F52F4`, `LR=0x801B0F90`.
+native console output of both SDK versions. Original SI code configures sampling,
+registers its interrupt handler, submits a controller type query and queues the
+remaining three probes. Controllers are explicitly disconnected: the transaction
+reports a hardware no-response error, not invented input. Its completion interrupt
+remains pending while EE is disabled; interrupt delivery is not yet implemented.
+The runner reaches `__OSInitSram` at `PC=0x801B5E98`, `LR=0x801B0F94`.
 This is an **explicit dependency stop (exit code 3)**, not successful OSInit,
 game initialization or rendering. RTC/SRAM/ROM, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.

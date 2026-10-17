@@ -48,9 +48,10 @@ int RunCli(int argc, Character** argv) {
         std::cout << "Executing hash-verified original USA DOL entry 0x80003154 "
                      "using compiled native blocks only.\n"
                      "Profile: loader IR/DR, EE disabled, coherent RAM, idle opt-in "
-                     "PI/MI/DSP/AI/EXI, empty memory-card slots/SP1, native console "
+                     "PI/MI/DSP/AI/EXI/SI, analog VI cable status, "
+                     "empty memory-card slots/SP1 and disconnected controllers, native console "
                      "(bounded %s/%%), RTC/SRAM/ROM unimplemented; "
-                     "steady-clock 40.5 MHz time base.\n";
+                     "162 MHz bus/486 MHz CPU metadata, steady-clock 40.5 MHz time base.\n";
         const auto result = RunOriginalStartup(dispatcher, state, blocks, depth);
         std::cerr << DescribeOriginalStartupStop(result) << '\n';
         return result.stop == OriginalStartupStop::Budget ? 4 :

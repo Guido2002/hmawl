@@ -3,6 +3,7 @@
 #include "native_time_base.h"
 #include "native_exi_bus.h"
 #include "native_console.h"
+#include "native_si_bus.h"
 
 #include <algorithm>
 #include <cfenv>
@@ -19,6 +20,18 @@ void Require(bool condition, const char* message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
+}
+
+template <typename Function>
+void Reject(Function function, const std::string& message) {
+    try {
+        function();
+    } catch (const std::exception& error) {
+        Require(std::string(error.what()).find(message) != std::string::npos,
+                "Unexpected native-dispatch rejection.");
+        return;
+    }
+    throw std::runtime_error("Expected native-dispatch failure: " + message);
 }
 
 void TestLogicalRegisters() {
@@ -1230,6 +1243,200 @@ void TestExiImmediateTransactions() {
     }
 }
 
+void TestSiStartupHardwareAndArithmetic() {
+    for (uint32_t value : {0u, 1u, 0x7fffffffu, 0x80000000u, 0xffffffffu, 0x80000020u}) {
+        for (uint32_t shift = 0; shift < 128; ++shift) {
+            for (bool record : {false, true}) {
+                PpcState state;
+                state.gpr[3] = value;
+                state.gpr[5] = shift;
+                state.xer = 0xe0000001u;
+                state.cr = 0x12345678u;
+                const unsigned count = shift & 63u;
+                const int64_t signedValue = value < 0x80000000u ?
+                    static_cast<int64_t>(value) : static_cast<int64_t>(value) - 0x100000000ll;
+                const int64_t divisor = int64_t{1} << std::min(count, 31u);
+                const uint32_t expected = static_cast<uint32_t>(count >= 32 ?
+                    (signedValue < 0 ? -1 : 0) :
+                    signedValue / divisor - (signedValue < 0 && signedValue % divisor != 0 ? 1 : 0));
+                const bool carry = signedValue < 0 &&
+                    (count >= 32 || (count != 0 && uint64_t{value} % (uint64_t{1} << count) != 0));
+                if (record) ppc_0000B530(state); else ppc_0000B520(state);
+                const uint32_t cr0 = ((expected == 0 ? 2u : expected < 0x80000000u ? 4u : 8u) | 1u) << 28;
+                Require(state.gpr[4] == expected && state.gpr[3] == value &&
+                            state.gpr[5] == shift && state.xer == (0xc0000001u | (carry ? 0x20000000u : 0u)) &&
+                            state.cr == (record ? cr0 | 0x02345678u : 0x12345678u),
+                        "Compiled sraw result, six-bit count, XER carry or CR0 mismatch.");
+            }
+        }
+        for (bool record : {false, true}) {
+            PpcState state;
+            state.gpr[3] = value;
+            state.gpr[5] = 0xffffffffu;
+            state.xer = 0xc0000001u;
+            state.cr = 0x12345678u;
+            auto reference = state;
+            const auto expected = ppc_shift_right_arithmetic(reference, value, 5);
+            if (record) ppc_0000B550(state); else ppc_0000B540(state);
+            const auto cr0 = ((expected == 0 ? 2u : expected < 0x80000000u ? 4u : 8u) | 1u) << 28;
+            Require(state.gpr[4] == expected && state.xer == reference.xer &&
+                        state.cr == (record ? cr0 | 0x02345678u : 0x12345678u),
+                    "Compiled srawi did not use its immediate shift or record flags.");
+        }
+        for (uint32_t right : {0u, 1u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
+            for (bool record : {false, true}) {
+                for (bool subtract : {false, true}) {
+                    PpcState state;
+                    state.gpr[3] = value;
+                    state.gpr[4] = value;
+                    state.gpr[5] = right;
+                    state.xer = 0xe0000001u;
+                    state.cr = 0x12345678u;
+                    const auto expected = subtract ? right - value : value ^ right;
+                    if (subtract) {
+                        if (record) ppc_0000B590(state); else ppc_0000B580(state);
+                    } else {
+                        if (record) ppc_0000B570(state); else ppc_0000B560(state);
+                    }
+                    const auto cr0 = ((expected == 0 ? 2u : expected < 0x80000000u ? 4u : 8u) | 1u) << 28;
+                    Require(state.gpr[subtract ? 3 : 4] == expected &&
+                                state.xer == (subtract ? 0xc0000001u | (right >= value ? 0x20000000u : 0u) :
+                                                         0xe0000001u) &&
+                                state.cr == (record ? cr0 | 0x02345678u : 0x12345678u),
+                            "Compiled xor/subfc result, XER or CR0 mismatch.");
+                }
+            }
+        }
+    }
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    Reject([&] { ppc_read_u32(state, 0xcc006434u); }, "address");
+    Reject([&] { ppc_read_u16(state, 0xcc00206cu); }, "address");
+    state.viDtvStatus = 0;
+    Require(ppc_read_u16(state, 0xcc00206cu) == 0, "Explicit analog VI profile differs.");
+    state.viDtvStatus = 1;
+    Require(ppc_read_u16(state, 0xcc00206cu) == 1, "VI digital-cable flag differs.");
+    Reject([&] { ppc_write_u16(state, 0xcc00206cu, 0); }, "address");
+    state.serialInterface.emplace();
+    ppc_write_u32(state, 0xcc006430u, 0x00f60200u);
+    Require(ppc_read_u32(state, 0xcc006430u) == 0x00f60200u, "SI polling timing was not retained.");
+    Reject([&] { ppc_write_u32(state, 0xcc006430u, 0x80); }, "automatic polling");
+    Reject([&] { ppc_write_u32(state, 0xcc006430u, 0x80000000u); }, "polling");
+    state.serialInterface->communication = 0xb0000000u;
+    ppc_write_u32(state, 0xcc006434u, 0xc0010300u);
+    Require(ppc_read_u32(state, 0xcc006434u) == 0x70010300u,
+            "SI transfer-complete W1C or interrupt-mask semantics differ.");
+    Reject([&] { ppc_write_u32(state, 0xcc006434u, 0xc0010301u); }, "backend");
+    Require(state.serialInterface->communication == 0x70010300u,
+            "Missing SI backend fabricated a transfer or completion.");
+    Reject([&] { ppc_write_u32(state, 0xcc006434u, 0x80u); }, "control");
+    state.serialInterface->status = 0x0f0f0f0fu;
+    ppc_write_u32(state, 0xcc006438u, 0x01020408u);
+    Require(ppc_read_u32(state, 0xcc006438u) == 0x0e0d0b07u, "SI per-channel error W1C differs.");
+    Reject([&] { ppc_write_u32(state, 0xcc006438u, 0x80000000u); }, "polling");
+    for (unsigned index = 0; index < 32; ++index) {
+        const auto address = 0xcc006480u + index * 4u;
+        ppc_write_u32(state, address, index * 0x01020304u);
+        Require(ppc_read_u32(state, address) == index * 0x01020304u, "SI communication RAM differs.");
+    }
+    Reject([&] { ppc_read_u32(state, 0xcc006481u); }, "address");
+    Reject([&] { ppc_write_u32(state, 0xcc006500u, 0); }, "address");
+    state.serialInterface->communication = 1;
+    Reject([&] { ppc_read_u32(state, 0xcc006434u); }, "completion backend");
+    Reject([&] { ppc_write_u32(state, 0xcc006480u, 0); }, "pending");
+}
+
+void TestSiTransactionsAndPendingInterrupt() {
+    for (unsigned channel = 0; channel < 4; ++channel) {
+        for (unsigned outputLength : {1u, 3u, 4u, 127u, 128u}) {
+            for (unsigned inputLength : {1u, 3u, 4u, 127u, 128u}) {
+                for (uint32_t error : {0u, 1u, 2u, 4u, 8u, 15u}) {
+                    PpcState state;
+                    state.memoryMap = PpcMemoryMap::GameCubeRam;
+                    state.serialInterface.emplace();
+                    auto& serial = *state.serialInterface;
+                    serial.communication = 0xb0000000u;
+                    serial.status = 0x01010101u;
+                    for (unsigned index = 0; index < 32; ++index) {
+                        serial.buffer[index] = 0x12345678u + index;
+                    }
+                    const auto before = serial.buffer;
+                    unsigned transfers = 0;
+                    state.transferSi = [&](const SiTransferRequest& request) {
+                        Require(request.channel == channel && request.inputLength == inputLength &&
+                                    request.output.size() == outputLength && transfers++ == 0,
+                                "SI channel, zero-encoded 128-byte length or transaction count differs.");
+                        for (unsigned index = 0; index < outputLength; ++index) {
+                            Require(request.output[index] ==
+                                        static_cast<uint8_t>(before[index / 4] >> (24u - index % 4u * 8u)),
+                                    "SI output byte order differs.");
+                        }
+                        return SiTransferResult{error == 0 ? std::vector<uint8_t>(inputLength, 0xa5) :
+                                                            std::vector<uint8_t>{}, error};
+                    };
+                    const uint32_t value = 0xc0000001u | (channel << 1) |
+                        ((outputLength & 127u) << 16) | ((inputLength & 127u) << 8);
+                    ppc_write_u32(state, 0xcc006434u, value);
+                    Require(transfers == 1 &&
+                                serial.communication == ((value & ~1u) | 0x10000000u |
+                                                         (error != 0 ? 0x20000000u : 0u)) &&
+                                serial.status == (0x01010101u | (error << ((3u - channel) * 8u))),
+                            "SI completion, COMERR, channel status or interrupt mask differs.");
+                    for (unsigned index = 0; index < 128; ++index) {
+                        const auto actual = static_cast<uint8_t>(serial.buffer[index / 4] >>
+                                                               (24u - index % 4u * 8u));
+                        const auto expected = error == 0 && index < inputLength ? uint8_t{0xa5} :
+                            static_cast<uint8_t>(before[index / 4] >> (24u - index % 4u * 8u));
+                        Require(actual == expected, "SI completion overwrote unreceived communication RAM.");
+                    }
+                }
+            }
+        }
+    }
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.serialInterface.emplace();
+    state.serialInterface->buffer.fill(0x12345678u);
+    for (const auto& result : {SiTransferResult{{}, 0}, SiTransferResult{{1, 2, 3}, 16},
+                               SiTransferResult{{1, 2, 3}, 8}, SiTransferResult{{1, 2}, 0}}) {
+        state.transferSi = [result](const SiTransferRequest&) { return result; };
+        Reject([&] { ppc_write_u32(state, 0xcc006434u, 0xc0010301u); }, "Invalid native SI");
+        Require(state.serialInterface->communication == 0 && state.serialInterface->status == 0 &&
+                    state.serialInterface->buffer.front() == 0x12345678u,
+                "Invalid SI backend result partially mutated hardware state.");
+    }
+    state.transferSi = [](const SiTransferRequest&) -> SiTransferResult {
+        throw std::runtime_error("SI backend failure");
+    };
+    Reject([&] { ppc_write_u32(state, 0xcc006434u, 0xc0010301u); }, "SI backend failure");
+    Require(state.serialInterface->communication == 0 && state.serialInterface->status == 0,
+            "Throwing SI backend fabricated completion.");
+    state.transferSi = TransferDisconnectedSi;
+    ppc_write_u32(state, 0xcc006434u, 0xc0010301u);
+    Require(state.serialInterface->communication == 0xe0010300u &&
+                state.serialInterface->status == 0x08000000u &&
+                state.serialInterface->buffer.front() == 0x12345678u,
+            "Disconnected SI port did not signal no-response without inventing input.");
+    state.externalInterruptsEnabled = false;
+    state.piInterruptMask = 0xf8u;
+    Reject([&] { ppc_write_msr(state, 0x8000u); }, "guest interrupt delivery");
+    Require(!state.externalInterruptsEnabled && state.msr == 0,
+            "Missing interrupt delivery silently enabled EE or lost the SI interrupt.");
+    state.externalInterruptsEnabled = true;
+    NativeDispatcher dispatcher;
+    Reject([&] { dispatcher.Execute(state, 0x1000u); }, "guest interrupt delivery");
+    Require(!state.callGuest, "Pending SI interrupt failure leaked dispatcher callbacks.");
+    ppc_write_u32(state, 0xcc006434u, 0xc0010300u);
+    ppc_write_msr(state, 0x8000u);
+    Require(state.externalInterruptsEnabled &&
+                state.serialInterface->communication == 0x60010300u,
+            "SI transfer-complete acknowledgement did not release the pending interrupt.");
+    for (auto request : {SiTransferRequest{4, {0}, 3}, SiTransferRequest{0, {}, 3},
+                          SiTransferRequest{0, {0}, 0}, SiTransferRequest{0, {0}, 129}}) {
+        Reject([&] { TransferDisconnectedSi(request); }, "Invalid native SI");
+    }
+}
+
 void TestMultiplyHighUnsigned() {
     for (uint32_t left : {0u, 1u, 0x7fffffffu, 0x80000000u, UINT32_MAX}) {
         for (uint32_t right : {0u, 1u, 2u, 0x80000000u, UINT32_MAX}) {
@@ -2157,18 +2364,6 @@ void TestComparisonAndNor() {
     }
 }
 
-template <typename Function>
-void Reject(Function function, const std::string& message) {
-    try {
-        function();
-    } catch (const std::exception& error) {
-        Require(std::string(error.what()).find(message) != std::string::npos,
-                "Unexpected native-dispatch rejection.");
-        return;
-    }
-    throw std::runtime_error("Expected native-dispatch failure: " + message);
-}
-
 void TestCountLeadingZeros() {
     for (uint32_t bit = 0; bit <= 32; ++bit) {
         PpcState state;
@@ -2542,6 +2737,8 @@ int main() {
         TestExiInitializationRegisters();
         TestExiImmediateTransactions();
         TestMultiplyHighUnsigned();
+        TestSiStartupHardwareAndArithmetic();
+        TestSiTransactionsAndPendingInterrupt();
         TestNativeConsoleAndEmptyExi();
         TestAndComplement();
         TestCacheBlockInstructions();

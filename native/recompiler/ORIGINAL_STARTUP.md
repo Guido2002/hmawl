@@ -51,6 +51,16 @@ guest strings and PowerPC GPR/overflow argument decoding. Currently only plain
 text, `%s` and `%%` are supported; other conversions, missing sinks and output
 errors fail explicitly before a success return. It emits the actual SDK
 version string; it does not discard logging.
+The loader supplies 162 MHz bus and 486 MHz CPU clock metadata in low memory,
+consistent with the 40.5 MHz time base. VI cable status is explicitly analog
+(DTV bit zero); this does not implement a display or renderer.
+SI has disabled-polling timing, communication RAM, error W1C and checked transfer
+semantics. All four controller ports are explicitly disconnected. A transaction
+sets the selected channel's NOREP error and COMERR/TCINT, without inventing reply
+bytes. Backend failures or invalid results cannot commit hardware completion.
+Automatic controller polling remains an explicit error. Completion interrupts
+remain pending while EE is disabled; enabling EE or dispatching with an unmasked,
+pending SI completion fails explicitly until guest interrupt delivery exists.
 This deliberately limited platform profile is not complete GameCube hardware.
 
 `original_startup_manifest.h` is the reusable list of original address ranges.
@@ -78,8 +88,14 @@ ID command and four-byte read run against the explicit empty SP1 port. Original
 code unlocks the channel, probes both empty memory-card slots, reports the SDK
 version to the console and returns from **EXIInit**.
 
-It then calls **SIInit at PC `0x801F52F4`, LR `0x801B0F90`**. SIInit is the
-next untranslated dependency. `EXIInit` has returned; `OSInit` has **not**.
+Original **SIInit also returns** after version reporting, sampling configuration,
+interrupt handler registration/unmasking, the first controller type transaction
+and queuing the remaining three probes. The first transaction has completed with
+the configured disconnected-port error, but its original guest interrupt handler
+has not run. This is not completed controller enumeration or usable input.
+
+The next untranslated dependency is **__OSInitSram at PC `0x801B5E98`,
+LR `0x801B0F94`**. `EXIInit` and `SIInit` have returned; `OSInit` has **not**.
 The game main loop, GX renderer,
 DVD startup, threads, audio, input and saves have not run.
 
@@ -87,9 +103,11 @@ DVD startup, threads, audio, input and saves have not run.
 
 With testing enabled, build `hmawl_original_startup_tests` and run CTest's
 `hmawl_original_startup_tests`. It uses the production library and real verified
-DOL, checking the exact next SIInit call, two original EXI transaction
+DOL, checking the exact SRAM initialization call, two original EXI transaction
 requests, cleared channel lock, both empty-slot probe results, exact console
-message, missing peripheral backend/console failures, initialization
+messages, the original SI command and three queued probes, sampling/handler state,
+pending no-response completion, missing SI backend/VI profile,
+missing EXI peripheral backend/console failures, initialization
 evidence, missing clock and unbound dispatcher dependencies, on-disk DOL
 truncation/mutation rejection, loaded-code integrity, block/call-depth bounds,
 the original nonconverging `OSGetTime` sampling loop, callback restoration and

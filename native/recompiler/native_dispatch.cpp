@@ -114,6 +114,7 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
     }
     state.pc = address;
     do {
+        ppc_check_pending_si_interrupt(state, state.externalInterruptsEnabled);
         if (remaining == 0) {
             throw std::runtime_error("Native function-entry budget exceeded at " + Address(state.pc) + ".");
         }

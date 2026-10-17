@@ -810,6 +810,9 @@ std::string RecompileFunction(uint32_t address,
             case 136:
                 expression = "ppc_subtract_extended(state, " + left + ", " + right + ")";
                 break;
+            case 8:
+                expression = "ppc_subtract_carry(state, " + left + ", " + right + ")";
+                break;
             case 266:
                 expression = left + " + " + right;
                 break;
@@ -828,6 +831,10 @@ std::string RecompileFunction(uint32_t address,
                 destination = ra;
                 expression = "state.gpr[" + std::to_string(rt) + "] | " + right;
                 break;
+            case 316:
+                destination = ra;
+                expression = "state.gpr[" + std::to_string(rt) + "] ^ " + right;
+                break;
             case 124:
                 destination = ra;
                 expression = "~(state.gpr[" + std::to_string(rt) + "] | " + right + ")";
@@ -836,6 +843,13 @@ std::string RecompileFunction(uint32_t address,
                 destination = ra;
                 expression = "(" + right + " & 63u) >= 32u ? 0u : state.gpr[" +
                              std::to_string(rt) + "] >> (" + right + " & 31u)";
+                break;
+            case 792:
+            case 824:
+                destination = ra;
+                expression = "ppc_shift_right_arithmetic(state, state.gpr[" +
+                    std::to_string(rt) + "], " +
+                    (extendedOpcode == 824 ? std::to_string(rb) + "u" : right) + ")";
                 break;
             case 339: {
                 const uint32_t spr = ra | (rb << 5);
