@@ -1613,6 +1613,103 @@ void TestSiStartupHardwareAndArithmetic() {
     Reject([&] { ppc_write_u32(state, 0xcc006480u, 0); }, "pending");
 }
 
+void TestCompiledDspTask() {
+    const auto stateFor = [](const std::vector<uint16_t>& words) {
+        PpcState state;
+        state.memoryMap = PpcMemoryMap::GameCubeRam;
+        state.dspControl = 0x100;
+        state.dspHardware.emplace();
+        auto& dsp = *state.dspHardware;
+        dsp.task.emplace();
+        dsp.task->mode = NativeDspTaskMode::Running;
+        dsp.programHalted = false;
+        dsp.dataRam.fill(0xa55a);
+        std::copy(words.begin(), words.end(), dsp.task->instructionRam.begin());
+        return state;
+    };
+    auto state = stateFor(SyntheticTaskWords);
+    auto& dsp = *state.dspHardware;
+    auto& task = *dsp.task;
+    state.executeDspTask = SyntheticDspTask;
+    NativeDspAdvanceTask(state);
+    Require(dsp.fromDspMailbox == 0xa3456789 && dsp.dataRam[0x20] == 0x1234 &&
+                dsp.dataRam[0x1f] == 0xa55a && dsp.dataRam[0x21] == 0xa55a &&
+                dsp.instructionPc == 22 && !dsp.programHalted && dsp.completedPrograms == 0 &&
+                task.registers[18] == 0xff && (task.registers[19] & 0xff00u) == 0x3a00 &&
+                task.interrupts == 1 && dsp.sentMail == 1 && *state.dspControl == 0x180,
+            "Compiled task did not derive memory stores, mail and IRQ from its own instructions.");
+    const auto executed = dsp.executedInstructions;
+    NativeDspAdvanceTask(state);
+    Require(dsp.instructionPc == 22 && dsp.executedInstructions == executed + 3 && dsp.sentMail == 1,
+            "Compiled task mailbox wait did not yield or overwrote pending mail.");
+    ppc_write_u16(state, 0xcc00500au, 0x104);
+    NativeDspAdvanceTask(state);
+    Require(dsp.programHalted && dsp.instructionPc == 22 && dsp.executedInstructions == executed + 3,
+            "CPU HALT did not pause the compiled DSP task.");
+    ppc_write_u16(state, 0xcc00500au, 0x100);
+    Require(!dsp.programHalted && task.mode == NativeDspTaskMode::Running && dsp.instructionPc == 22 &&
+                dsp.executedInstructions == executed + 3 && dsp.sentMail == 1,
+            "CPU resume restarted the task loader or lost compiled task state.");
+    Require(ppc_read_u16(state, 0xcc005004u) == 0xa345 &&
+                ppc_read_u16(state, 0xcc005006u) == 0x6789 && dsp.consumedMail == 1,
+            "CPU did not consume actual compiled task output.");
+    NativeDspAdvanceTask(state);
+    Require(dsp.instructionPc == 27 && !dsp.programHalted &&
+                task.cpuMailConsumed == 0, "Task input wait invented a CPU command.");
+    ppc_write_u16(state, 0xcc005000u, 0x9234);
+    Require((dsp.toDspMailbox & 0x80000000u) == 0 && task.cpuMailSent == 0,
+            "CPU mailbox high word committed an incomplete message.");
+    ppc_write_u16(state, 0xcc005002u, 0x5678);
+    Reject([&] { ppc_write_u16(state, 0xcc005000u, 0); }, "active");
+    Require(dsp.toDspMailbox == 0x92345678 && task.cpuMailSent == 1, "CPU mailbox message was overwritten.");
+    NativeDspAdvanceTask(state);
+    Require(dsp.programHalted && dsp.completedPrograms == 1 &&
+                task.mode == NativeDspTaskMode::Halted && dsp.dataRam[0x21] == 0x5678 &&
+                task.cpuMailConsumed == 1 && dsp.toDspMailbox == 0x12345678 &&
+                dsp.consumedMail == 1 && *state.dspControl == 0x184,
+            "Compiled task did not consume CPU input, store it and execute its real HALT.");
+    Reject([&] { ppc_write_u16(state, 0xcc005002u, 0); }, "active");
+    for (unsigned offset : {0u, 9u}) {
+        auto damaged = stateFor(SyntheticTaskWords);
+        damaged.executeDspTask = SyntheticDspTask;
+        damaged.dspHardware->instructionPc = offset == 9 ? 8 : 0;
+        damaged.dspHardware->task->instructionRam[offset] ^= 1;
+        const auto before = *damaged.dspHardware;
+        Reject([&] { NativeDspAdvanceTask(damaged); }, "code mismatch");
+        Require(damaged.dspHardware->dataRam == before.dataRam &&
+                    damaged.dspHardware->task->registers == before.task->registers &&
+                    damaged.dspHardware->executedInstructions == before.executedInstructions,
+                "Damaged DSP code committed instruction effects before integrity failure.");
+    }
+    auto signedState = stateFor({0x8f00, 0x009e, 0x8001, 0x0021});
+    signedState.executeDspTask = SignedDspTask;
+    NativeDspAdvanceTask(signedState);
+    Require(signedState.dspHardware->task->registers[16] == 0xffff &&
+                signedState.dspHardware->task->registers[28] == 0 &&
+                signedState.dspHardware->task->registers[30] == 0x8001,
+            "DSP S40 mid-register load did not sign-extend and clear the accumulator low word.");
+    Require(NativeDspTaskReadRegister(signedState, 30) == 0x8001, "DSP in-range S40 mid read was saturated.");
+    NativeDspTaskWriteRegister(signedState, 16, 0);
+    Require(NativeDspTaskReadRegister(signedState, 30) == 0x7fff, "DSP positive S40 overflow did not saturate.");
+    NativeDspTaskWriteRegister(signedState, 16, 0xff);
+    NativeDspTaskWriteRegister(signedState, 19, 0);
+    NativeDspTaskWriteRegister(signedState, 30, 0x7ffe);
+    NativeDspTaskWriteRegister(signedState, 19, 0x4000);
+    Require(NativeDspTaskReadRegister(signedState, 30) == 0x8000, "DSP negative S40 overflow did not saturate.");
+    Reject([&] { NativeDspTaskReadRegister(signedState, 12); }, "stack");
+    Reject([&] { NativeDspTaskWriteRegister(signedState, 12, 1); }, "stack");
+    auto unknown = stateFor({0xffff});
+    unknown.executeDspTask = UnsupportedDspTask;
+    Reject([&] { NativeDspAdvanceTask(unknown); }, "translation at word 0");
+    Require(unknown.dspHardware->executedInstructions == 0 &&
+                unknown.dspHardware->completedPrograms == 0 && unknown.dspHardware->sentMail == 0,
+            "Unsupported DSP task instruction fabricated execution or completion.");
+    Reject([&] { RecompileDspTask({}, 0, "Task"); }, "Invalid");
+    Reject([&] { RecompileDspTask({0x029f, 1}, 0, "Task"); }, "branch target");
+    Reject([&] { RecompileDspTask({0x009e}, 0, "Task"); }, "Truncated");
+    Reject([&] { RecompileDspTask({0x0021}, 0, "Task();"); }, "Invalid");
+}
+
 void TestCompiledDspInitialization() {
     for (unsigned variant = 0; variant < 2; ++variant) {
         PpcState state;
@@ -3858,6 +3955,7 @@ int main() {
         TestExternalInterruptDelivery();
         TestDspResetAndAramDma();
         TestCompiledDspInitialization();
+        TestCompiledDspTask();
         TestNativeConsoleAndEmptyExi();
         TestRealModeRamConfiguration();
         TestNativeConsoleIntegers();

@@ -34,6 +34,9 @@ struct OriginalStartupResult {
     bool arInitReturned = false;
     bool arqInitReturned = false;
     bool aiInitReturned = false;
+    bool dspInitReturned = false;
+    bool dspTaskAdded = false;
+    bool audioTaskInitReturned = false;
     uint32_t constructorsReturned = 0;
 };
 

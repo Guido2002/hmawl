@@ -148,6 +148,83 @@ void TestAiRegistersAndDmaGuards() {
     Require(state.audio->volume == 0x12ab, "Missing AI time source partially committed a write.");
 }
 
+void TestDspTaskLoader() {
+    uint64_t ticks = 0;
+    auto state = AudioState(ticks);
+    auto& dsp = *state.dspHardware;
+    dsp.task.emplace();
+    dsp.programHalted = false;
+    *state.dspControl = 0x800;
+    state.executeDspInitialization = NativeDspStartTaskLoader;
+    NativeDspStartTaskLoader(state);
+    Require(dsp.fromDspMailbox == 0x8071feed && dsp.sentMail == 1 &&
+                dsp.completedPrograms == 0 && dsp.executedInstructions == 0 &&
+                dsp.task->loaderStarts == 1, "Native loader greeting was confused with executed task code.");
+    const auto send = [&](uint32_t mail) {
+        NativeDspWriteCpuMail(state, 0xcc005000, static_cast<uint16_t>(mail >> 16));
+        NativeDspWriteCpuMail(state, 0xcc005002, static_cast<uint16_t>(mail));
+    };
+    Reject([&] { send(0x80f3a001); });
+    Require(dsp.task->cpuMailConsumed == 0 && dsp.task->parameters == 0,
+            "Loader accepted mail before its greeting was consumed.");
+    ppc_read_u16(state, 0xcc005006);
+    Reject([&] { send(0x1234a001); });
+    Reject([&] { send(0x80f3a002); });
+    Require(dsp.task->mode == NativeDspTaskMode::LoaderCommand && dsp.task->cpuMailConsumed == 0,
+            "Rejected native loader command advanced its protocol.");
+    send(0x80f3a001);
+    Reject([&] { send(0x80000001); });
+    send(0x80000020);
+    send(0x80f3c002);
+    Reject([&] { send(4096); });
+    send(0);
+    send(0x80f3a002);
+    for (uint32_t invalid : {0u, 1u, 8196u, 256u}) Reject([&] { send(invalid); });
+    send(8);
+    send(0x80f3b002);
+    Reject([&] { send(4); });
+    send(0);
+    send(0x80f3d001);
+    Reject([&] { send(4); });
+    Reject([&] { send(0); });
+    Require(dsp.task->instructionUploads == 0 && dsp.task->cpuMailConsumed == 9 &&
+                dsp.instructionPc == 0, "Missing native task binding fabricated a successful upload.");
+    state.executeDspTask = [](PpcState&) { throw std::runtime_error("Test task was not compiled."); };
+    state.validateDspTask = [](const PpcState&, uint32_t, uint16_t, uint16_t, uint16_t) {
+        throw std::runtime_error("Test task image mismatch.");
+    };
+    Reject([&] { send(0); });
+    Require(dsp.task->instructionUploads == 0 && dsp.task->cpuMailConsumed == 9 &&
+                dsp.task->instructionRam[0] == 0 && dsp.completedPrograms == 0,
+            "Failed task validation partially committed an instruction upload.");
+    state.validateDspTask = [](const PpcState& guest, uint32_t source, uint16_t destination,
+                              uint16_t bytes, uint16_t entry) {
+        Require(source == 32 && destination == 0 && bytes == 8 && entry == 0 &&
+                    ppc_read_u32(guest, source) == 0xa5a5a5a5,
+                "Loader validation received different DMA/entry parameters.");
+    };
+    send(0);
+    Require(dsp.task->instructionUploads == 1 && dsp.task->uploadedBytes == 8 &&
+                dsp.task->cpuMailSent == 10 && dsp.task->cpuMailConsumed == 10 &&
+                dsp.task->instructionRam[0] == 0xa5a5 && dsp.task->instructionRam[3] == 0xa5a5 &&
+                dsp.task->instructionRam[4] == 0 && dsp.task->mode == NativeDspTaskMode::Running &&
+                dsp.executedInstructions == 0 && dsp.sentMail == 1 && dsp.completedPrograms == 0,
+            "Loader did not copy real RAM bytes or fabricated task initialization output.");
+    Reject([&] { NativeDspAdvanceTask(state); });
+    Require(dsp.sentMail == 1 && dsp.completedPrograms == 0,
+            "Missing compiled task execution fabricated mail or completion.");
+    ppc_write_u16(state, 0xcc00500a, 0x805);
+    Require(dsp.task->mode == NativeDspTaskMode::Inactive && dsp.programHalted && dsp.resetCount == 1 &&
+                dsp.toDspMailbox == 0 && dsp.fromDspMailbox == 0,
+            "DSP reset did not discard the live loader/task protocol and pending mail.");
+    ppc_write_u16(state, 0xcc00500a, 0x800);
+    Require(dsp.task->mode == NativeDspTaskMode::LoaderCommand && dsp.task->parameters == 0 &&
+                dsp.task->loaderStarts == 2 && dsp.task->instructionUploads == 1 &&
+                dsp.fromDspMailbox == 0x8071feed && !dsp.programHalted &&
+                dsp.task->registers == std::array<uint16_t, 32>{},
+            "Restarted native loader retained parameters/registers or erased historical DMA evidence.");
+}
+
 void TestAramRegistersAndTransfers() {
     uint64_t ticks = 0;
     auto state = AudioState(ticks);
@@ -221,7 +298,8 @@ int main() {
         TestAiClockAndInterrupts();
         TestAiRegistersAndDmaGuards();
         TestAramRegistersAndTransfers();
-        std::cout << "Native AI/ARAM tests passed; no PCM playback or DSP task execution claimed.\n";
+        TestDspTaskLoader();
+        std::cout << "Native AI/ARAM/task-loader tests passed; no PCM playback or synthetic task execution claimed.\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Native audio test failure: " << error.what() << '\n';

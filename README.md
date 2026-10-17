@@ -84,7 +84,7 @@ The explicit native virtual drive identifies itself as revision 1 with no consol
 firmware/date; its checked inquiry/read DMA does not claim physical-drive identity.
 **Original OSInit now returns in the runner to `PC=LR=0x80003268`.**
 Without `--rvz`, missing DI hardware remains an explicit dependency failure.
-Expired decrementer delivery, general DSP tasks and audio playback remain unfinished.
+Expired decrementer delivery, general DSP mixing and audio playback remain unfinished.
 All **93 original DOL C++ constructors now return**, followed by `__init_user`;
 the original game `main` is entered in the Windows runner. Tests verify constructor
 order, nonvolatile registers and exact observer/non-observer execution equivalence.
@@ -110,11 +110,17 @@ return in the runner, followed by audio-engine setup; 178 original heap allocati
 complete. Checked split-register ARAM DMA and an explicit disconnected-expansion
 profile let the original SDK probe determine 16 MiB internal/zero external ARAM.
 AI stereo-volume registers, rate calibration, sample-clock timing and IRQ status
-are stateful, but there is no PCM playback.
+are stateful. Original DSPInit, DSPAddTask and DSP audio-task initialization now
+also return in the runner. An explicit BIOS-free native loader accepts the original
+mail protocol and validates/copies 6624 actual task bytes into DSP instruction RAM.
+The build-time-compiled task itself writes its init mail and asserts its interrupt;
+the original CPU handler and task-init callback execute. No DSP ROM is executed.
 The runner stops with **exit code 3** at
-`PC=0x801C3DDC`, `LR=0x801C3DA8`: original DSPInit requests the still-unimplemented
-DSP ROM/task bootstrap. No ROM bytes, mailbox acknowledgement or task completion
-are fabricated. Draws, unsupported copy modes and texture DMA still fail
+`PC=0x801C165C`, `LR=0x801F2CAC`: original AIStartDMA requires a native PCM
+playback backend. The task is waiting for CPU commands at DSP word `0x4A`, not
+completed; command-list DMA and mixing remain untranslated. There is no PCM playback.
+No ROM bytes, task-ready mail or task completion are fabricated.
+Draws, unsupported copy modes and texture DMA still fail
 explicitly. Pixel scanout, a game window/intro and the game main loop have not run.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.

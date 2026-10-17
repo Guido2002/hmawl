@@ -88,8 +88,17 @@ clearing and checked bidirectional RAM/ARAM DMA. DMA completion follows actual
 byte copies; W1C status/masks are retained. A BIOS-free native bootstrap validates
 all 128 installed payload bytes before executing the build-time-compiled original
 DSP initializer. The DSP ROM loader itself is not executed; this is an explicit
-native handoff contract, not DSP-ROM emulation. General DSP tasks, outgoing CPU
-mail and DSP interrupts remain unsupported and fail explicitly.
+native handoff contract, not DSP-ROM emulation. The same explicit contract supplies
+a native task-loader service: its documented greeting is not counted as executed
+ROM/task instructions or completion. Five ordered command/value pairs configure
+RAM source, IRAM word destination, byte count, zero initial DRAM upload and entry.
+Missing compiled bindings, malformed requests and changed original task bytes fail
+before committing IRAM or final-mail consumption. The original 6624-byte task is
+copied into 4096-word IRAM; task registers start at explicit profile-zero values.
+The native loader does not send the task's init message or assert its interrupt.
+Those stores execute from the statically compiled original microcode. Its DSP IRQ
+uses PI bit `0x40` and runs the original installed CPU handler and task-init callback.
+No DSP ROM is executed or supplied.
 
 The ARAM controller also exposes checked configuration, readiness and refresh,
 plus halfword address/count assembly; the count-low write triggers DMA. Transfers
@@ -106,8 +115,8 @@ are mapped as aligned 32-bit registers. The NTSC clock uses the integer rational
 fractional ticks, reset, counter wrap, threshold crossing, interrupt inhibition,
 masking and W1C are stateful. AI sample interrupts use PI bit `0x20`, distinct from
 DSP's `0x40`, and route through the original guest exception/AI handler. A separate
-threshold-crossing test also verifies that SDK mask restoration delivers the
-already-pending VI source, with both handlers acknowledging and returning.
+threshold-crossing test verifies the original handler acknowledgement, SDK mask
+restoration, exception return and complete interrupted CPU register preservation.
 This clock produces no PCM data or sound. Disabled PCM-DMA address/block registers
 retain configuration; enabling playback explicitly fails without a PCM backend.
 
@@ -122,6 +131,17 @@ to 65536 DSP instructions; busy mailbox waits fail at that bound, not with a
 fabricated acknowledgement. Reading mailbox high does not consume a message;
 reading low consumes its pending bit once. Unmasked pending DSP interrupts,
 like SI interrupts, cannot silently pass an enabled EE.
+
+The separate bounded task compiler follows static branches and emits native code
+with per-instruction/operand integrity guards. Task register/status moves, signed
+40-bit accumulator transfers with saturated reads, checked DRAM/mailbox stores,
+conditional polling branches and HALT are supported. A 256-instruction cooperative
+quantum and backward-wait yields let the original CPU service mail/interrupts;
+this is not cycle-accurate DSP timing. CPU HALT pauses rather than restarts a live
+task; reset clears the live protocol, and the explicit loader profile starts fresh
+parameters/registers. Unsupported instructions, stack accesses, task memory or
+mailbox overwrites fail explicitly. Command processing next needs translation at
+DSP word `0x4F`; command-list DMA and mixing are not implemented.
 
 ### Native console SRAM
 
@@ -265,18 +285,29 @@ five times in the deterministic regression. Volume is zero and final control is
 The audio-engine/voice setup reaches 178 real heap allocations without overlaps
 or escaped arena bounds. Original `DCStoreRangeNoSync` executes checked `dcbst`
 operations against coherent RAM.
-The next dependency is `PC=0x801C3DDC`, LR `0x801C3DA8`, SP `0x8035CEB8`:
-original DSPInit unhalts the DSP with ROM bootstrap selected. The existing bounded
-native initializer executes only the earlier verified DOL payload, not the DSP
-ROM/task loader. This request therefore fails explicitly. No ROM bytes,
-mailbox responses or DSP task completion are fabricated.
+Original DSPInit now returns through the explicit native loader handoff, followed
+by original DSPAddTask after ten CPU mail words and one 6624-byte IRAM upload.
+The original task clears its accumulators, initializes DRAM, writes its init mail,
+asserts DSP IRQ and waits. The original CPU DSP interrupt handler and init callback
+each execute once, setting the actual task-initialized guest flag; original
+audio-task initialization returns at `0x801F0FC4`.
+The next dependency is `PC=0x801C165C`, LR `0x801F2CAC`, SP `0x8035CEC8`:
+original AIStartDMA enables playback without a native PCM backend. This fails
+explicitly before enabling DMA. The task remains running/waiting at DSP word
+`0x4A`, not halted or completed. The only completed DSP program remains the earlier
+initializer. Total DSP output/consumption is 3/3: the initializer's real message,
+the explicit native loader greeting and the task's actual init message. The task
+has asserted exactly one IRQ. No ROM bytes or task-ready/completion messages are
+fabricated. The steady-clock runner observes 16880 total DSP steps in a measured
+run; polling counts depend on elapsed host time.
 The inquiry result remains `0x8001` and the entire real FST is intact.
 The deterministic regression uses 1000 ticks per clock sample when AI is stopped,
 and 8 while its sample clock is running, resolving the SDK's sub-sample calibration
 window without modifying guest code or injecting a calibration result.
-It returns 167 external exceptions (including 157 original VI handlers),
-advances 238 VI fields and restores one scheduler context. A VI source remains
-pending at the final interrupts-disabled DSP boundary. Steady-clock runner field/interrupt
+It executes exactly 17507 total DSP steps, returns 170 external exceptions
+(including 159 original VI handlers), advances 239 VI fields and restores one
+scheduler context. EE is enabled and no VI source remains pending at the
+PCM-enable boundary. Steady-clock runner field/interrupt
 counts depend on elapsed host time, not a forced completion.
 Real-disc tests verify every constructor in original table order and preservation
 of its stack, SDA and nonvolatile integer/floating registers. Traced and untraced
@@ -438,6 +469,9 @@ original sc/rfi return state and original DSP payload, both ARAM DMA transfers,
 complete ARAM guards, compiled DSP instruction/mail counts, poisoned DSP RAM
 clearing, RAM backup restoration, halted reset/mailboxes, missing DSP hardware
 and execution backend plus modified DSP program rejection,
+complete original task IRAM bytes and guards, host/DSP mailbox counts, actual
+task interrupt and CPU callback, running/waiting versus completed program state,
+and corrupt-task rejection before IRAM upload or init callback,
 original real-mode BAT/SRR state, five MI handler slots, exact native RAM metadata,
 complete poisoned arena clearing and its exclusive upper guard, integer kernel
 reports and absent memory/BAT/reset-profile failures,
@@ -456,7 +490,7 @@ observer checks each original table target and per-constructor ABI restoration;
 a second execution compares the complete 24 MiB RAM image, CPU registers,
 console output and deterministic clock samples against the production runner.
 It also verifies original heap descriptors, the eleven named Screen-era allocation
-return addresses and all subsequent observed allocator requests/returns (39 total),
+return addresses and all subsequent observed allocator requests/returns (178 total),
 requested sizes, 32-byte alignment, arena bounds, non-overlap, allocation count,
 manager singleton pointers, the Screen's FIFO pointer and both XFB pointers.
 It verifies exact CP/PE/ring state, burst/command counts and identical graphics

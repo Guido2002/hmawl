@@ -71,7 +71,8 @@ int RunCli(int argc, Character** argv) {
                      "empty memory-card slots/SP1 and disconnected controllers, native console "
                      "(bounded strings/32-bit integers), persisted SRAM reads (writes/RTC/ROM unimplemented); "
                      "16 MiB ARAM, explicit disconnected expansion, synchronous DMA, native AI sample clock/volume "
-                     "(no PCM playback), compiled DSP init/native bootstrap (DSP ROM/tasks unimplemented); "
+                     "(no PCM playback), explicit BIOS-free DSP task loader and compiled original task startup "
+                     "(DSP ROM execution/mixing unimplemented); "
                      "162 MHz bus/486 MHz CPU metadata, steady-clock 40.5 MHz time base.\n";
         std::cout << "Native SRAM profile: " << sramPath.u8string() << '\n';
         if (disc) {
@@ -87,6 +88,15 @@ int RunCli(int argc, Character** argv) {
                       << " synchronous DMA transfers; disconnected expansion: "
                       << dsp.absentAramReads << " no-data reads, " << dsp.absentAramWrites
                       << " unreceived writes. DSP programs completed=" << dsp.completedPrograms << ".\n";
+            if (dsp.task) {
+                const auto& task = *dsp.task;
+                std::cerr << "Native DSP task: " << task.loaderStarts << " BIOS-free loader starts, "
+                          << task.instructionUploads << " IRAM uploads/" << task.uploadedBytes
+                          << " bytes, CPU mail=" << task.cpuMailSent << "/" << task.cpuMailConsumed
+                          << ", task IRQs=" << task.interrupts << ", DSP PC=0x" << std::hex
+                          << dsp.instructionPc << std::dec << ", executed=" << dsp.executedInstructions
+                          << ", DSP mail=" << dsp.sentMail << "/" << dsp.consumedMail << ".\n";
+            }
         }
         if (state.audio) {
             const auto& ai = *state.audio;

@@ -98,6 +98,9 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.dspHardware->aramControllerReady = true;
     state.dspHardware->disconnectedAramExpansion = true;
     state.executeDspInitialization = ExecuteOriginalDspInitialization;
+    state.dspHardware->task.emplace();
+    state.executeDspTask = OriginalDspAudioTask;
+    state.validateDspTask = ValidateOriginalDspAudioTask;
     state.aiControl = 0;
     state.audio.emplace();
     state.diConfiguration = 1;
@@ -165,6 +168,9 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x80129fa4u) result.arInitReturned = true;
             if (pc == 0x80129fa8u) result.arqInitReturned = true;
             if (pc == 0x80129fb0u) result.aiInitReturned = true;
+            if (pc == 0x801f2da0u) result.dspInitReturned = true;
+            if (pc == 0x801f2dacu) result.dspTaskAdded = true;
+            if (pc == 0x801f0fc4u) result.audioTaskInitReturned = true;
         });
     } catch (const std::exception& error) {
         const std::string reason = error.what();
@@ -204,6 +210,9 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.arInitReturned) text << "Original ARInit returned. ";
     if (result.arqInitReturned) text << "Original ARQInit returned. ";
     if (result.aiInitReturned) text << "Original AIInit returned. ";
+    if (result.dspInitReturned) text << "Original DSPInit returned using the explicit native loader contract. ";
+    if (result.dspTaskAdded) text << "Original DSPAddTask returned after IRAM upload. ";
+    if (result.audioTaskInitReturned) text << "Original DSP audio-task initialization returned. ";
     text << "This is NOT a game boot; no game main loop or renderer ran.";
     return text.str();
 }

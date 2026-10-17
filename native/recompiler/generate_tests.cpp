@@ -753,6 +753,22 @@ int main(int argc, char** argv) {
             dsp[8] = 4;
             dsp[6] = 0xfffe;
             output << RecompileDspInitialization(dsp, "WrappedDspInitialization");
+            std::vector<uint16_t> task = {
+                0x1302, 0x1303, 0x1204, 0x1305, 0x1306, 0x8e00, 0x8c00, 0x8b00,
+                0x0092, 0xff, 0x8100, 0x8900, 0x009e, 0x1234, 0x00fe, 0x20,
+                0x16fc, 0x2345, 0x16fd, 0x6789, 0x16fb, 1
+            };
+            const auto outputWait = static_cast<uint16_t>(task.size());
+            task.insert(task.end(), {0x26fc, 0x02a0, 0x8000, 0x029c, outputWait});
+            const auto inputWait = static_cast<uint16_t>(task.size());
+            task.insert(task.end(), {0x26fe, 0x02c0, 0x8000, 0x029c, inputWait,
+                                     0x27ff, 0x00ff, 0x21, 0x0021});
+            output << RecompileDspTask(task, 0, "SyntheticDspTask");
+            output << "static const std::vector<uint16_t> SyntheticTaskWords = {";
+            for (auto word : task) output << word << "u,";
+            output << "};\n";
+            output << RecompileDspTask({0x8f00, 0x009e, 0x8001, 0x0021}, 0, "SignedDspTask");
+            output << RecompileDspTask({0xffff}, 0, "UnsupportedDspTask");
             Emit(output, 0xb5e0u, {
                 (31u << 26) | (3u << 21) | (26u << 16) | (467u << 1),
                 (31u << 26) | (4u << 21) | (27u << 16) | (467u << 1)});

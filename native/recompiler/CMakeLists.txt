@@ -31,6 +31,8 @@ add_library(hmawl_recompiler_core
     native_vi.cpp
     native_aram.cpp
     native_ai.cpp
+    native_dsp_task.cpp
+    dsp_task_recompiler.cpp
 )
 target_compile_features(hmawl_recompiler_core PUBLIC cxx_std_17)
 target_include_directories(hmawl_recompiler_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

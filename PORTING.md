@@ -58,9 +58,14 @@ ARQInit and AIInit now return in the runner as well. Stateful ARAM controller,
 split-register DMA, explicit disconnected expansion and AI rate/sample-clock
 registers permit original audio-engine setup to reach 178 returned heap allocations.
 This models timing and register state, not PCM playback.
-The next runner boundary is the original DSPInit ROM/task bootstrap request at
-`PC=0x801C3DDC`, `LR=0x801C3DA8`. It fails explicitly without invented ROM contents,
-mailbox responses or DSP task completion.
+Original DSPInit, DSPAddTask and audio-task initialization now return in the runner.
+The explicit BIOS-free native loader validates/copies 6624 original DSP task bytes;
+their statically compiled startup sends its own init mail and interrupt. The original
+CPU DSP handler and init callback execute, without running or fabricating DSP ROM.
+The next runner boundary is original AIStartDMA at `PC=0x801C165C`, LR `0x801F2CAC`,
+SP `0x8035CEC8`: no native PCM playback backend is bound. The task remains waiting
+for CPU commands at DSP word `0x4A`; command-list DMA and mixing remain untranslated.
+No task-ready message or completed audio task is synthesized.
 Pixel scanout, the main loop and a rendered game frame remain unfinished.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
@@ -602,6 +607,23 @@ queue. Full runtime scheduling and device services are still needed.
   Verify 77 bursts/404 commands, all actual allocator requests/returns and complete
   observed/unobserved EFB/CPU/RAM/VI/GX equivalence. The first copy has 286720
   undefined power-on pixels; no rendered game frame, scanout or main loop is claimed.
+- [x] Complete original DSPInit, DSPAddTask and DSP audio-task initialization in the
+  production Windows runner. Extend the explicit BIOS-free handoff with checked,
+  ordered CPU mailbox parameters and an actual 6624-byte RAM-to-IRAM upload.
+  Validate the entire task image against its build-time DOL bytes before committing
+  upload/completion state. Compile the original task startup, status/register
+  operations, RAM/mail stores and bounded conditional waits, not a runtime decoder
+  or a native function fabricating the task's init message. Its actual stores assert
+  DSP IRQ; original CPU DSP dispatch and task-init callback acknowledge and return.
+  Test synthetic task execution, mailbox ownership, code/operand mutation, explicit
+  unsupported instructions, signed/saturating accumulator transfers, CPU halt/resume,
+  reset/reload, malformed loader requests and corrupted original task uploads.
+  All eleven regression executables pass; deterministic startup observes 17507 total
+  DSP steps, ten CPU messages, one task IRQ and 170 restored CPU exceptions.
+  The real steady-clock runner stops at original AIStartDMA, `0x801C165C`,
+  LR `0x801F2CAC`, SP `0x8035CEC8`, explicitly requiring a PCM backend.
+  The task is running/waiting at word `0x4A`, not completed; ROM execution,
+  command-list DMA, DSP mixing, sound and a game frame remain unimplemented.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -814,17 +836,15 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue beyond the verified startup chain: entry reaches `0x80003264`,
-   whose next call is `OSInit` at `0x801b0de0`. Register, hardware, ROM/BSS,
-   empty-argument and `DBInit` initialization run together in the startup test.
-   Implement remaining OS/platform dependencies explicitly rather than treating
-   unsupported hardware instructions as successful no-ops.
-   The initial `OSInit` prefix is independently verified through start-time
-   capture/interrupt masking, MMCR/PMC resets and HID0 SPD/FPSCR NI setup
-   plus boot-info/arena, exception and system-call vector installation
-   and alarm/module initialization (`0x801b0f6c`);
-   interrupt setup and remaining subsystem initialization
-   still follow.
+1. Continue the connected audio chain beyond original AIStartDMA at `0x801C165C`:
+   bind actual Windows PCM playback, model RAM DMA progression/completion interrupts,
+   then execute the original CPU audio callback and DSP command-mail path. The
+   initialized task currently waits at DSP word `0x4A`; its next command instruction
+   at `0x4F`, command-list DMA and subsequent mixing still need native translations.
+   Do not discard samples, fabricate callback completion or substitute a native
+   mixer for the original task. OSInit, all 93 DOL constructors, Screen and DSP
+   audio-task initialization already return in the production runner; the original
+   game initialization and main loop, real GX draws and intro frame remain the goal.
 2. Expand the recompiler's opcode coverage, extend the tested REL/native-function
    bridge with function discovery and module lifetime management, implement
    the remaining scene dependencies (`0x8001BD04`, `0x8100DCD8`, `0x8002283C`)

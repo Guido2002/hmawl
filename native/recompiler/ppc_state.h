@@ -6,6 +6,7 @@
 #include "native_vi.h"
 #include "native_aram.h"
 #include "native_ai.h"
+#include "native_dsp_task.h"
 
 #include <algorithm>
 #include <array>
@@ -80,6 +81,7 @@ struct PpcDspHardware {
     uint32_t sentMail = 0;
     uint32_t consumedMail = 0;
     std::vector<uint8_t> aram;
+    std::optional<NativeDspTask> task;
 };
 
 struct PpcFpr {
@@ -173,6 +175,8 @@ struct PpcState {
     std::optional<uint16_t> dspControl;
     std::optional<PpcDspHardware> dspHardware;
     std::function<void(PpcState&)> executeDspInitialization;
+    std::function<void(PpcState&)> executeDspTask;
+    std::function<void(const PpcState&, uint32_t, uint16_t, uint16_t, uint16_t)> validateDspTask;
     std::optional<uint32_t> aiControl;
     std::optional<NativeAi> audio;
     std::optional<uint32_t> diConfiguration;
@@ -244,7 +248,9 @@ inline bool ppc_si_interrupt_pending(const PpcState& state) {
 }
 
 inline bool ppc_external_interrupt_pending(const PpcState& state) {
-    return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & 0xf2cu) != 0;
+    const uint32_t supported = 0xf2cu |
+        (state.dspHardware && state.dspHardware->task && state.executeDspTask ? 0x40u : 0);
+    return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & supported) != 0;
 }
 
 inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
@@ -260,7 +266,8 @@ inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
         throw std::runtime_error("Native external interrupt requires guest interrupt delivery.");
     }
     if (enabled && state.piInterruptMask.has_value() && (*state.piInterruptMask & 0x40u) != 0 &&
-        state.dspHardware.has_value() && state.dspControl.has_value()) {
+        state.dspHardware.has_value() && state.dspControl.has_value() &&
+        !(state.dspHardware->task && state.executeDspTask)) {
         const auto control = *state.dspControl;
         if ((control & 0x180u) == 0x180u || (control & 0x60u) == 0x60u ||
             (control & 0x18u) == 0x18u) {
@@ -550,7 +557,8 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
 
 inline uint16_t ppc_read_u16(PpcState& state, uint32_t address) {
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc005006u &&
-        state.dspHardware.has_value() && state.executeDspInitialization) {
+        state.dspHardware.has_value() &&
+        (state.executeDspInitialization || (state.dspHardware->task && state.executeDspTask))) {
         auto& dsp = *state.dspHardware;
         const auto value = static_cast<uint16_t>(dsp.fromDspMailbox);
         if ((dsp.fromDspMailbox & 0x80000000u) != 0) {
@@ -900,6 +908,10 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
             return;
         }
         if (address == 0xcc005000u) {
+            if (dsp.task && dsp.task->mode != NativeDspTaskMode::Inactive) {
+                NativeDspWriteCpuMail(state, address, value);
+                return;
+            }
             if (value != 0 || (dsp.toDspMailbox & 0x80000000u) != 0) {
                 throw std::runtime_error("DSP outgoing mailbox requires a native DSP execution backend.");
             }
@@ -907,6 +919,10 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
             return;
         }
         if (address == 0xcc005002u) {
+            if (dsp.task && dsp.task->mode != NativeDspTaskMode::Inactive) {
+                NativeDspWriteCpuMail(state, address, value);
+                return;
+            }
             throw std::runtime_error("DSP outgoing mailbox requires a native DSP execution backend.");
         }
         if (address == 0xcc00500au) {
@@ -915,7 +931,11 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
             }
             const auto previous = *state.dspControl;
             const bool unhalt = (value & 4u) == 0 && ((previous & 4u) != 0 || (value & 1u) != 0);
-            if (unhalt && !state.executeDspInitialization) {
+            const bool resumeTask = (value & 1u) == 0 && dsp.task &&
+                (dsp.task->mode == NativeDspTaskMode::LoaderCommand ||
+                 dsp.task->mode == NativeDspTaskMode::LoaderValue ||
+                 dsp.task->mode == NativeDspTaskMode::Running);
+            if (unhalt && !resumeTask && !state.executeDspInitialization) {
                 throw std::runtime_error("DSP unhalt requires a native DSP execution backend; no mailbox acknowledgement was fabricated.");
             }
             if ((value & 1u) != 0 && (value & 0x804u) != 0x804u) {
@@ -926,16 +946,22 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
                 dsp.fromDspMailbox = 0;
                 ++dsp.resetCount;
                 dsp.programHalted = true;
+                if (dsp.task) dsp.task->mode = NativeDspTaskMode::Inactive;
             }
             *state.dspControl = static_cast<uint16_t>(
                 (previous & 0x02a8u & ~value) | (value & 0x0954u));
+            if (value & 4u) dsp.programHalted = true;
             if (unhalt) {
                 dsp.programHalted = false;
-                state.executeDspInitialization(state);
-                if (!dsp.programHalted) {
+                if (!resumeTask) state.executeDspInitialization(state);
+                const bool activeTask = dsp.task &&
+                    (dsp.task->mode == NativeDspTaskMode::LoaderCommand ||
+                     dsp.task->mode == NativeDspTaskMode::LoaderValue ||
+                     dsp.task->mode == NativeDspTaskMode::Running);
+                if (!dsp.programHalted && !activeTask) {
                     throw std::runtime_error("Native DSP initialization returned without a compiled HALT.");
                 }
-                *state.dspControl |= 4u;
+                if (dsp.programHalted) *state.dspControl |= 4u;
             }
             return;
         }

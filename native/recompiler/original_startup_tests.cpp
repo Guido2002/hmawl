@@ -534,6 +534,12 @@ int main(int argc, char** argv) {
                       << dsp.aramConfiguration << " PCM blocks=0x" << dsp.audioDmaBlocks
                       << " AI control=0x" << *discState.aiControl << " low-memory ARAM=0x"
                       << ppc_read_u32(discState, 0x800000d0u) << std::dec << '\n';
+            const auto& task = *dsp.task;
+            std::cout << "Original task: uploads=" << task.instructionUploads << " bytes=" << task.uploadedBytes
+                      << " host mail=" << task.cpuMailSent << "/" << task.cpuMailConsumed
+                      << " task IRQs=" << task.interrupts << " DSP mail=" << dsp.sentMail << "/" << dsp.consumedMail
+                      << " DSP PC=" << dsp.instructionPc << " instructions=" << dsp.executedInstructions
+                      << " task init flag=" << ppc_read_u32(discState, 0x80349a98u) << '\n';
             Require(ppc_read_u32(discState, 0x80349844u) == 1 &&
                         ppc_read_u32(discState, 0x8034986cu) == 1 &&
                         ppc_read_u32(discState, 0x803497f8u) == 1 &&
@@ -542,13 +548,28 @@ int main(int argc, char** argv) {
                         ppc_read_u32(discState, 0x800000d0u) == 0x1000000 &&
                         dsp.dmaTransfers == 5 && dsp.absentAramReads == 2 && dsp.absentAramWrites == 1 &&
                         dsp.aram.size() == 0x1000000 && dsp.aramConfiguration == 0x63 &&
-                        dsp.completedPrograms == 1 && dsp.executedInstructions == 16404 &&
+                        dsp.completedPrograms == 1 && dsp.executedInstructions == 17507 &&
                         dsp.audioDmaBlocks == 0x14 && ai.volume == 0 && discState.aiControl == 0x46 &&
                         ai.advancedSamples == 4 && ai.resets == 5,
                     "Original AR/ARQ/AI startup flags, physical sizing, probe or sample-clock evidence differs.");
+            Require(task.loaderStarts == 1 && task.instructionUploads == 1 && task.uploadedBytes == 6624 &&
+                        task.cpuMailSent == 10 && task.cpuMailConsumed == 10 && task.interrupts == 1 &&
+                        task.mode == NativeDspTaskMode::Running && task.source == 0x002e3da0 &&
+                        task.destination == 0 && task.bytes == 6624 && task.entry == 16 &&
+                        dsp.sentMail == 3 && dsp.consumedMail == 3 && dsp.instructionPc == 0x4a &&
+                        !dsp.programHalted && dsp.dataRam[0x0e1b] == 0x0e80 && dsp.dataRam[0x0e31] == 0 &&
+                        ppc_read_u32(discState, 0x80349a98u) == 1 &&
+                        ppc_read_u32(discState, 0x80349870u) == 1 &&
+                        ppc_read_u32(discState, 0x8033ea00u) == 1,
+                    "Original DSP task upload, actual microcode stores/mail/IRQ and original callback evidence differs.");
+            for (uint32_t word = 0; word < task.instructionRam.size(); ++word) {
+                Require(task.instructionRam[word] ==
+                            (word < task.bytes / 2 ? ppc_read_u16(discState, task.source + 2 * word) : 0),
+                        "Native DSP IRAM upload changed original words or overran its DMA range.");
+            }
             Require(discResult.stop == OriginalStartupStop::Dependency &&
-                        discResult.pc == 0x801c3ddcu && discResult.lr == 0x801c3da8u &&
-                        discResult.stack == 0x8035ceb8u && discResult.osInitReturned &&
+                        discResult.pc == 0x801c165cu && discResult.lr == 0x801f2cacu &&
+                        discResult.stack == 0x8035cec8u && discResult.osInitReturned &&
                         discResult.constructorsReturned == 93 && discResult.userInitReturned &&
                         discResult.gameMainEntered && discResult.memoryInitialized &&
                         discResult.screenInitEntered && discResult.gxInitEntered &&
@@ -556,15 +577,16 @@ int main(int argc, char** argv) {
                         discResult.viInitReturned && discResult.viConfigured && discResult.viRetraceReturned &&
                         discResult.screenInitReturned && discResult.arInitReturned &&
                         discResult.arqInitReturned && discResult.aiInitReturned &&
+                        discResult.dspInitReturned && discResult.dspTaskAdded && discResult.audioTaskInitReturned &&
                         !discState.callGuest && !discState.callException &&
-                        discResult.reason == "Native DSP ROM/task bootstrap is not implemented." &&
+                        discResult.reason == "Audio DMA enable requires a native PCM playback backend." &&
                         discState.discInterface->completedTransfers == 1 &&
                         discState.discInterface->status == 0x2au &&
                         discState.discInterface->dmaLength == 0 &&
                         discState.discInterface->control == 2 &&
-                        discState.externalInterrupt->delivered == 167 &&
-                        discState.externalInterrupt->returned == 167 && discState.threadContextReturns == 1 &&
-                        !discState.externalInterrupt->active && !discState.externalInterruptsEnabled &&
+                        discState.externalInterrupt->delivered == 170 &&
+                        discState.externalInterrupt->returned == 170 && discState.threadContextReturns == 1 &&
+                        !discState.externalInterrupt->active && discState.externalInterruptsEnabled &&
                         discState.piInterruptMask == 0xffcu &&
                         ppc_read_u16(discState, 0x800030e6u) == 0x8001u &&
                         ppc_read_u32(discState, 0x80317a6cu) == 0 &&
@@ -651,7 +673,7 @@ int main(int argc, char** argv) {
             bool initializedHeap = false;
             bool gxReturned = false;
             bool viReturned = false, viConfigured = false, retraceReturned = false, screenReturned = false;
-            unsigned viHandlers = 0;
+            unsigned viHandlers = 0, dspHandlers = 0, dspInitCallbacks = 0;
             unsigned vectorReturns = 0, normalizationEntries = 0, normalizationReturns = 0;
             std::optional<std::pair<uint32_t, uint32_t>> normalizationReturn;
             std::optional<PpcState> peSource;
@@ -662,6 +684,8 @@ int main(int argc, char** argv) {
             std::array<uint32_t, 32> savedRegisters{};
             std::array<uint64_t, 18> savedFprs{};
             const auto observe = [&](uint32_t pc) {
+                if (pc == 0x801c3f64u) ++dspHandlers;
+                if (pc == 0x801f2b60u) ++dspInitCallbacks;
                 if (pc == 0x8020ad8cu) {
                     ++vectorReturns;
                     Require(ppc_read_u32(traced, traced.gpr[1] + 0x2c) == 0 &&
@@ -806,8 +830,8 @@ int main(int argc, char** argv) {
             try {
                 dispatcher.Execute(traced, image.entryPoint(), 1000000, 128, observe);
             } catch (const std::exception& error) {
-                reachedBoundary = traced.pc == 0x801c3ddcu &&
-                    std::string(error.what()) == "Native DSP ROM/task bootstrap is not implemented.";
+                reachedBoundary = traced.pc == 0x801c165cu &&
+                    std::string(error.what()) == "Audio DMA enable requires a native PCM playback backend.";
                 if (!reachedBoundary) throw;
             }
             std::cout << "Observed original initialization allocations=" << allocations.size()
@@ -828,6 +852,7 @@ int main(int argc, char** argv) {
                         ppc_read_u32(traced, allocations[7].first + 8) == allocations[10].first,
                     "Original manager singletons or Screen FIFO pointer differ from allocated objects.");
             Require(reachedBoundary && gxReturned && viReturned && viConfigured && retraceReturned && screenReturned &&
+                        dspHandlers == 1 && dspInitCallbacks == 1 &&
                         vectorReturns == 1 && normalizationEntries == 3 && normalizationReturns == 3 &&
                         !normalizationReturn &&
                         entered == 93 && returned == 93 &&
@@ -858,9 +883,9 @@ int main(int argc, char** argv) {
             const auto& observedVi = *traced.video;
             std::cout << "Observed VI handler returns=" << viHandlers
                       << " pending cause=0x" << std::hex << NativeViInterruptCause(vi) << std::dec << '\n';
-            Require(vi.resets == 1 && vi.fields == 238 && viHandlers == 157 && vi.clockStarted &&
+            Require(vi.resets == 1 && vi.fields == 239 && viHandlers == 159 && vi.clockStarted &&
                         vi.registers[1] == 1 && vi.registers[3] == 429 &&
-                        NativeViInterruptCause(vi) == 0x100 &&
+                        NativeViInterruptCause(vi) == 0 &&
                         observedVi.registers == vi.registers && observedVi.lastTicks == vi.lastTicks &&
                         observedVi.elapsedTicks == vi.elapsedTicks && observedVi.fields == vi.fields &&
                         observedVi.writes == vi.writes && observedVi.resets == vi.resets &&
@@ -871,6 +896,18 @@ int main(int argc, char** argv) {
                     "Observed execution changed actual VI timing/register/interrupt or original scheduler state.");
             const auto& observedAi = *traced.audio;
             const auto& observedDsp = *traced.dspHardware;
+            const auto& observedTask = *observedDsp.task;
+            Require(observedTask.mode == task.mode && observedTask.command == task.command &&
+                        observedTask.parameters == task.parameters && observedTask.source == task.source &&
+                        observedTask.destination == task.destination && observedTask.bytes == task.bytes &&
+                        observedTask.dataBytes == task.dataBytes && observedTask.entry == task.entry &&
+                        observedTask.instructionRam == task.instructionRam && observedTask.registers == task.registers &&
+                        observedTask.loaderStarts == task.loaderStarts &&
+                        observedTask.instructionUploads == task.instructionUploads &&
+                        observedTask.uploadedBytes == task.uploadedBytes &&
+                        observedTask.cpuMailSent == task.cpuMailSent &&
+                        observedTask.cpuMailConsumed == task.cpuMailConsumed && observedTask.interrupts == task.interrupts,
+                    "Observer changed original DSP task state, code, registers, loader or mail accounting.");
             Require(traced.aiControl == discState.aiControl && traced.dspControl == discState.dspControl &&
                         observedAi.volume == ai.volume && observedAi.samples == ai.samples &&
                         observedAi.interruptTiming == ai.interruptTiming && observedAi.lastTicks == ai.lastTicks &&
@@ -987,7 +1024,7 @@ int main(int argc, char** argv) {
                           << " pending=" << NativeAiInterruptCause(interrupted)
                           << " delivered/returned=" << interrupted.externalInterrupt->delivered
                           << "/" << interrupted.externalInterrupt->returned
-                          << " expected=" << discState.externalInterrupt->returned + 2
+                          << " expected=" << discState.externalInterrupt->returned + 1
                           << " active=" << interrupted.externalInterrupt->active
                           << " GPR=" << std::equal(std::begin(interrupted.gpr), std::end(interrupted.gpr),
                                                   std::begin(resumedState.gpr))
@@ -997,11 +1034,11 @@ int main(int argc, char** argv) {
                           << " XER=" << (interrupted.xer == resumedState.xer)
                           << " CTR=" << (interrupted.ctr == resumedState.ctr)
                           << " MSR=" << (ppc_read_msr(interrupted) == ppc_read_msr(resumedState)) << '\n';
-                Require(resumed && handlers == 1 && pendingViHandlers == 1 &&
+                Require(resumed && handlers == 1 && pendingViHandlers == 0 &&
                             NativeAiInterruptCause(interrupted) == 0 &&
                             NativeViInterruptCause(*interrupted.video) == 0 &&
-                            interrupted.externalInterrupt->delivered == discState.externalInterrupt->delivered + 2 &&
-                            interrupted.externalInterrupt->returned == discState.externalInterrupt->returned + 2 &&
+                            interrupted.externalInterrupt->delivered == discState.externalInterrupt->delivered + 1 &&
+                            interrupted.externalInterrupt->returned == discState.externalInterrupt->returned + 1 &&
                             !interrupted.externalInterrupt->active &&
                             std::equal(std::begin(interrupted.gpr), std::end(interrupted.gpr),
                                        std::begin(resumedState.gpr)) &&
@@ -1010,8 +1047,7 @@ int main(int argc, char** argv) {
                             interrupted.ctr == resumedState.ctr &&
                             ppc_read_msr(interrupted) == ppc_read_msr(resumedState),
                         "Original AI handler did not acknowledge the sample interrupt and restore context.");
-                std::cout << "Test AI sample threshold executed the original AI handler, pending VI handler "
-                             "and both exception returns; "
+                std::cout << "Test AI sample threshold executed the original AI handler and exception return; "
                              "production startup does not request PCM playback.\n";
             }
             auto damagedConstructor = CreateOriginalStartupState(image);
@@ -1025,6 +1061,29 @@ int main(int argc, char** argv) {
                         damagedResult.reason.find("code mismatch") != std::string::npos &&
                         !damagedConstructor.callGuest && !damagedConstructor.callException,
                     "Damaged constructor code bypassed integrity checks or reported a false startup milestone.");
+            auto damagedTask = CreateOriginalStartupState(image);
+            InstallOriginalStartupDisc(damagedTask, disc);
+            uint64_t damagedTaskTicks = 1000000;
+            damagedTask.readTimeBase = [&] {
+                return damagedTaskTicks += (*damagedTask.aiControl & 1u) ? 8 : 1000;
+            };
+            damagedTask.writeConsole = [](const std::string&) {};
+            ppc_write_u16(damagedTask, 0x802e3da0u + 0x20, 0);
+            const auto rejectedTask = RunOriginalStartup(dispatcher, damagedTask);
+            const auto& rejectedDsp = *damagedTask.dspHardware;
+            Require(rejectedTask.stop == OriginalStartupStop::Dependency &&
+                        rejectedTask.dspInitReturned && !rejectedTask.dspTaskAdded &&
+                        !rejectedTask.audioTaskInitReturned &&
+                        rejectedTask.reason == "Native DSP task upload differs from build-time compiled DOL microcode." &&
+                        rejectedDsp.task->mode == NativeDspTaskMode::LoaderValue &&
+                        rejectedDsp.task->instructionUploads == 0 && rejectedDsp.task->uploadedBytes == 0 &&
+                        rejectedDsp.task->cpuMailConsumed == 9 && rejectedDsp.task->interrupts == 0 &&
+                        rejectedDsp.sentMail == 2 && rejectedDsp.consumedMail == 2 &&
+                        rejectedDsp.completedPrograms == 1 && rejectedDsp.executedInstructions == 16404 &&
+                        ppc_read_u32(damagedTask, 0x80349a98u) == 0 &&
+                        std::all_of(rejectedDsp.task->instructionRam.begin(), rejectedDsp.task->instructionRam.end(),
+                                    [](uint16_t word) { return word == 0; }),
+                    "Changed original DSP task data fabricated upload, execution, interrupt or CPU init completion.");
             auto absentBackend = CreateOriginalStartupState(image);
             InstallOriginalStartupDisc(absentBackend, disc);
             absentBackend.transferDisc = {};

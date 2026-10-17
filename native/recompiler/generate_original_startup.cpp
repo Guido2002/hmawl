@@ -87,7 +87,8 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
                             0x8019ad5cu, 0x80190204u, 0x8000b4c4u, 0x80198f54u,
                             0x80199ed8u, 0x8017a3a0u,
                             0x801cc448u, 0x801ce08cu, 0x801ce158u,
-                            0x801cb0c8u, 0x801cb1c4u, 0x801c1b44u,
+                            0x801cb0c8u, 0x801cb1c4u, 0x801c1b44u, 0x801c3f64u,
+                            0x801f2b60u, 0x801f2b70u,
                             0x801be410u, 0x801bde64u, 0x801c0044u,
                             0x8000c9c4u, 0x8000c920u, 0x8000c82cu, 0x8000c788u,
                             0x80021ab0u, 0x80021ef8u, 0x80021f48u, 0x80022004u,
@@ -191,12 +192,27 @@ int main(int argc, char** argv) {
             dspProgram.push_back(ppc_read_u16(dspSource, 0x802e0228u + offset));
         }
         functions << RecompileDspInitialization(dspProgram, "OriginalDspInitialization");
+        std::vector<uint16_t> taskProgram;
+        const auto taskBytes = ppc_read_u16(dspSource, 0x80348cd0u);
+        for (uint32_t offset = 0; offset < taskBytes; offset += 2) {
+            taskProgram.push_back(ppc_read_u16(dspSource, 0x802e3da0u + offset));
+        }
+        functions << RecompileDspTask(taskProgram, 0x10, "OriginalDspAudioTask");
+        functions << "static void ValidateOriginalDspAudioTask(const PpcState& state, "
+                     "uint32_t source, uint16_t destination, uint16_t bytes, uint16_t entry) {\n"
+                     "static constexpr uint16_t expected[] = {";
+        for (const auto word : taskProgram) functions << word << "u,";
+        functions << "};\nif (destination != 0 || bytes != sizeof(expected) || entry != 0x10)\n"
+                     "throw std::runtime_error(\"Unsupported native DSP task image bounds or entry.\");\n"
+                     "for (uint32_t i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i)\n"
+                     "if (ppc_read_u16(state, source + 2 * i) != expected[i])\n"
+                     "throw std::runtime_error(\"Native DSP task upload differs from build-time compiled DOL microcode.\");\n}\n";
         functions << "static void ExecuteOriginalDspInitialization(PpcState& state) {\n"
                      "    static constexpr uint16_t expected[] = {";
         for (const auto word : dspProgram) functions << word << "u,";
         functions << "};\n"
-                     "    if (state.dspControl && (*state.dspControl & 0x800u))\n"
-                     "        throw std::runtime_error(\"Native DSP ROM/task bootstrap is not implemented.\");\n"
+                     "    if (state.dspControl && (*state.dspControl & 0x800u)) {\n"
+                     "        NativeDspStartTaskLoader(state);\n        return;\n    }\n"
                      "    if (!state.dspHardware || !state.dspControl || "
                      "(*state.dspControl & 0x805u) != 0 || "
                      "state.dspHardware->aramConfiguration != 0x43u)\n"
