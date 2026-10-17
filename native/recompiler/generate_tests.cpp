@@ -15,8 +15,8 @@
 namespace {
 
 void Emit(std::ostream& output, uint32_t address,
-          const std::vector<uint32_t>& instructions) {
-    output << RecompileFunction(address, instructions) << '\n';
+          const std::vector<uint32_t>& instructions, RecompileOptions options = {}) {
+    output << RecompileFunction(address, instructions, options) << '\n';
 }
 
 void EmitNativeBinding(std::ostream& functions, std::ostream& bindings,
@@ -350,6 +350,17 @@ int main(int argc, char** argv) {
             }
         } else {
             std::ostringstream output;
+            Emit(output, 0xb400u, {0x38630001u, 0x4200fffcu, 0x38800001u}, {true, true});
+            Emit(output, 0xb420u, {0x48000000u, 0x38800001u}, {true, true});
+            Emit(output, 0xb430u, {0x4e800420u, 0x38800001u}, {true, true});
+            Emit(output, 0xb440u, {0x4d800020u, 0x38800001u}, {true, true});
+            Emit(output, 0xb450u, {0x41820000u, 0x38800001u}, {true, true});
+            Emit(output, 0xb460u, {0x48000009u, 0x38800001u, 0x38800002u}, {true, true});
+            Emit(output, 0xb480u, {0x4e800421u, 0x38800001u}, {true, true});
+            Emit(output, 0xb490u, {0x4e800021u, 0x38800001u}, {true, true});
+            Emit(output, 0xb4a0u, {0x38630001u, 0x80640000u}, {false, true});
+            Emit(output, 0xb4c0u, {0x42000009u, 0x38800001u, 0x38800002u}, {true, true});
+            Emit(output, 0xb4e0u, {0x4d820420u, 0x38800001u}, {true, true});
             for (unsigned opcode : {24u, 28u, 444u, 536u}) {
                 Emit(output, 0x1000u + opcode * 4u,
                      {XForm(3, 4, 5, opcode, true)});

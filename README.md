@@ -36,6 +36,30 @@ from a GameCube RVZ. It cannot yet discover all game functions, translate the
 full instruction set, or run the game. No playable native Windows version is
 available yet.
 
+## Running the original startup natively
+
+There is now a **production console runner, separate from the test executables**,
+which loads the verified USA DOL and executes continuously from its original
+entry point through hardware, memory, interrupt, context and cache setup into
+the original EXI initialization/identification chain. It uses compiled C++
+blocks only, not a PowerPC interpreter or replacement OSInit.
+
+```powershell
+cmake -S . -B build\native "-DHMAWL_ORIGINAL_US_DOL:FILEPATH=$PWD\build\game-us-r0\main.dol"
+cmake --build build\native --config Release --target hmawl_original_startup hmawl_original_startup_tests
+.\build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup .\build\game-us-r0\main.dol
+```
+
+The verified runner currently stops at `PC=0x801F6F24`: original `EXISelect`
+tries to write `0x200` to `0xCC006800` to select channel 0/device 2. This is an
+**explicit unsupported-device stop (exit code 3)**, not successful OSInit, game
+initialization or rendering. No device ID is supplied to skip that dependency.
+The runner reports exact guest PC/registers, verifies original code at dispatch,
+and limits dispatched blocks and nested calls. Generated branch transfers yield
+to dispatch so original polling loops cannot bypass the execution budget.
+See [original-startup runner details](native/recompiler/ORIGINAL_STARTUP.md)
+for the loader/device profile, limits, exit codes and regression coverage.
+
 The recompiler can inspect the disc ID and revision from the RVZ header without
 extracting or modifying the image:
 
@@ -462,7 +486,9 @@ The separate continuation now also executes the original channel-status resets,
 channel-0 ROMDIS write and all eight EXI interrupt-handler registrations. An
 explicit `exiInitializationEnabled` opt-in requires each reset channel's mapped
 idle transfer control, preserves W1C pending/presence bits, and resets its
-clock/enables. Original uncached channel-0/device-2 identification reaches
+clock/enables. Channel-0 ROMDIS remains set until a global reset, including when
+subsequent writes leave its bit clear. Original uncached channel-0/device-2
+identification reaches
 `EXILock` and `EXISelect`, then fails explicitly on the unsupported chip-select
 write at `0x801f6f24` (`0xcc006800`, value `0x200`). Both standalone and
 entry-derived tests cover this connected chain without supplying a cached or

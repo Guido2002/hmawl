@@ -103,15 +103,15 @@ void EmitPairedLoad(std::ostringstream& output, uint32_t pc, uint32_t reg,
 
 void EmitBranch(std::ostringstream& output, uint32_t target, uint32_t address,
                 uint32_t next, uint32_t nextAddress, uint64_t end,
-                bool conditional) {
-    if (IsInFunction(target, address, end)) {
+                bool conditional, bool yieldAtBranches) {
+    if (!yieldAtBranches && IsInFunction(target, address, end)) {
         output << "        goto " << Label(target) << ";\n";
     } else {
         output << "        state.pc = " << Hex(target) << ";\n"
                << "        return;\n";
     }
     if (conditional) {
-        if (static_cast<uint64_t>(nextAddress) < end) {
+        if (!yieldAtBranches && static_cast<uint64_t>(nextAddress) < end) {
             output << "    } else {\n        goto " << Label(nextAddress)
                    << ";\n    }\n";
         } else {
@@ -124,7 +124,8 @@ void EmitBranch(std::ostringstream& output, uint32_t target, uint32_t address,
 } // namespace
 
 std::string RecompileFunction(uint32_t address,
-                              const std::vector<uint32_t>& instructions) {
+                              const std::vector<uint32_t>& instructions,
+                              RecompileOptions options) {
     if (instructions.empty() || (address & 3u) != 0) {
         throw std::runtime_error(
             "Function requires a 4-byte-aligned address and at least one instruction.");
@@ -140,7 +141,8 @@ std::string RecompileFunction(uint32_t address,
     bool hasIndirectBranch = false;
     for (const auto instruction : instructions) {
         const uint32_t extendedOpcode = Bits(instruction, 1, 10);
-        if (Bits(instruction, 26, 6) == 19 && (instruction & 1u) == 0 &&
+        if (!options.yieldAtBranches &&
+            Bits(instruction, 26, 6) == 19 && (instruction & 1u) == 0 &&
             extendedOpcode == 528) {
             hasIndirectBranch = true;
             break;
@@ -165,6 +167,9 @@ std::string RecompileFunction(uint32_t address,
 
         output << "\n" << Label(pc) << ": {\n"
                << "    // " << Hex(pc) << ": " << Hex(instruction) << "\n";
+        if (options.precisePc) {
+            output << "    state.pc = " << Hex(pc) << ";\n";
+        }
 
         switch (opcode) {
         case 10:
@@ -242,14 +247,15 @@ std::string RecompileFunction(uint32_t address,
             if ((instruction & 1u) != 0) {
                 output << "        ppc_call_guest(state, " << Hex(target) << ");\n"
                        << "    }\n";
-                if (static_cast<uint64_t>(next) < end) {
+                if (!options.yieldAtBranches && static_cast<uint64_t>(next) < end) {
                     output << "    goto " << Label(next) << ";\n";
                 } else {
                     output << "    state.pc = " << Hex(next) << ";\n"
                            << "    return;\n";
                 }
             } else {
-                EmitBranch(output, target, address, next, next, end, true);
+                EmitBranch(output, target, address, next, next, end, true,
+                           options.yieldAtBranches);
             }
             break;
         }
@@ -261,14 +267,15 @@ std::string RecompileFunction(uint32_t address,
             if ((instruction & 1u) != 0) {
                 output << "    state.lr = " << Hex(next) << ";\n"
                        << "    ppc_call_guest(state, " << Hex(target) << ");\n";
-                if (static_cast<uint64_t>(next) < end) {
+                if (!options.yieldAtBranches && static_cast<uint64_t>(next) < end) {
                     output << "    goto " << Label(next) << ";\n";
                 } else {
                     output << "    state.pc = " << Hex(next) << ";\n"
                            << "    return;\n";
                 }
             } else {
-                EmitBranch(output, target, address, next, next, end, false);
+                EmitBranch(output, target, address, next, next, end, false,
+                           options.yieldAtBranches);
             }
             break;
         }
@@ -572,20 +579,20 @@ std::string RecompileFunction(uint32_t address,
                    << ")) {\n";
             if (link != 0) {
                 output << "        ppc_call_guest(state, " << target << ");\n";
-                if (static_cast<uint64_t>(next) < end) {
+                if (!options.yieldAtBranches && static_cast<uint64_t>(next) < end) {
                     output << "        goto " << Label(next) << ";\n";
                 } else {
                     output << "        state.pc = " << Hex(next) << ";\n"
                            << "        return;\n";
                 }
-            } else if (extendedOpcode == 528) {
+            } else if (extendedOpcode == 528 && !options.yieldAtBranches) {
                 output << "        indirect_target = " << target << ";\n"
                        << "        goto indirect_branch;\n";
             } else {
                 output << "        state.pc = " << target << ";\n"
                        << "        return;\n";
             }
-            if (static_cast<uint64_t>(next) < end) {
+            if (!options.yieldAtBranches && static_cast<uint64_t>(next) < end) {
                 output << "    } else {\n        goto " << Label(next)
                        << ";\n    }\n";
             } else {

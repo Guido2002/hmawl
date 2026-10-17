@@ -23,6 +23,12 @@ the game's PowerPC instructions to generated C++ and provide a native Windows
 runtime. Its code is only a reference for the architecture; this project does
 not copy its implementation.
 
+An optional native console runner now executes the verified original DOL entry
+continuously, without test-only guest callbacks. It reaches `EXISelect` at
+`0x801F6F24` and explicitly rejects selecting channel 0/device 2; full OSInit,
+game initialization, the main loop and a rendered game frame remain unachieved.
+See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
+
 ## Phases and completion criteria
 
 ### 0. Establish a verified input and reference build
@@ -345,12 +351,26 @@ queue. Full runtime scheduling and device services are still needed.
   uncached channel-0/device-2 identification. Translate original GetID, lock,
   interrupt-mask helper and select routines. Require explicit initialization
   opt-in plus mapped inactive controls for reset writes; exhaustively test
-  valid status combinations, preserved pending/presence bits and rejected
+  valid status combinations, preserved pending/presence bits and sticky ROMDIS
+  (zero writes cannot re-enable the mask ROM), plus rejected
   busy/reserved/unsupported states without mutation. Verify the connected chain's
   handler slots, software lock/selection, zero uncached ID, bounded calls,
   non-stack RAM and CPU/device guards. Stop on the real unsupported chip-select
   write at `0x801f6f24` (`0xcc006800`, `0x200`); do not fabricate a device ID or
   return success. EXIInit and OSInit remain incomplete.
+  Register semantics: [YAGCD EXI hardware registers](https://gc-forever.com/yagcd/chap5.html#sec5.9).
+- [x] Connect the real startup chain to a separate production Windows console
+  executable. Generate bounded native blocks from a hash-verified DOL, including
+  original entry OSInit/EXIInit call sites; retain original-word verification at
+  registration and dispatch. Add opt-in recompiler branch yielding and precise
+  instruction PC reporting, leaving existing function translations unchanged.
+  Verify compiled direct/conditional/CTR/LR branches, linked-call continuations,
+  self-loop budget exhaustion and exact fault PC. Run the production executable
+  from `0x80003154` to the real EXI selection failure at `0x801F6F24`, with no
+  supplied peripheral ID or substituted OSInit. Test dispatch/depth limits, a
+  nonconverging original time-base loop, missing bindings/time source and
+  truncated/mutated on-disk DOL plus mutated RAM-code rejection. This is a
+  runnable original startup milestone, not full OSInit or a game boot.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

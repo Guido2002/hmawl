@@ -236,7 +236,8 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
                     (*control & ~0x3eu) != 0) {
                     throw std::runtime_error("Unsupported EXI status reset (requires mapped idle transfer control and valid status).");
                 }
-                *status = (previous & (channel == 2 ? 0xau : 0x180au)) | value;
+                *status = (previous & (channel == 2 ? 0xau :
+                    channel == 0 ? 0x380au : 0x180au)) | value;
                 return;
             }
             const uint32_t written = channel == 2 ? 0xfu : channel == 0 ? 0x2c0fu : 0xc0fu;
@@ -244,8 +245,7 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
                 throw std::runtime_error("Unsupported EXI status write (only idle startup interrupt masking supported).");
             }
             // Zero in W1C fields retains pending status; EXT is read-only.
-            *status = previous & ~(channel == 2 ? 0x5u :
-                channel == 0 && state.exiInitializationEnabled ? 0x2405u : 0x405u);
+            *status = previous & ~(channel == 2 ? 0x5u : 0x405u);
             return;
         }
     }

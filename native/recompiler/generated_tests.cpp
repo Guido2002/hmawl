@@ -49,6 +49,7 @@ void TestLogicalRegisters() {
                     expected = shift >= 32 ? 0u : source >> shift;
                     break;
                 }
+
                 Require(state.gpr[4] == expected && state.gpr[3] == source &&
                             state.gpr[5] == right,
                         "Compiled logical instruction used incorrect register fields or shift width.");
@@ -59,6 +60,112 @@ void TestLogicalRegisters() {
             }
         }
     }
+}
+
+void TestYieldingBranchesAndPrecisePc() {
+    for (uint32_t count : {1u, 2u, UINT32_MAX}) {
+        PpcState state;
+        state.gpr[3] = 0;
+        state.gpr[4] = 0x12345678u;
+        state.ctr = count;
+        state.cr = 0x13572468u;
+        state.xer = 0xe0000000u;
+        ppc_0000B400(state);
+        Require(state.gpr[3] == 1 && state.gpr[4] == 0x12345678u &&
+                    state.ctr == count - 1 && state.cr == 0x13572468u &&
+                    state.xer == 0xe0000000u &&
+                    state.pc == (count == 1 ? 0xb408u : 0xb400u),
+                "Yielding bdnz did not update CTR exactly once or executed past its boundary.");
+    }
+    PpcState state;
+    state.gpr[4] = 0x12345678u;
+    ppc_0000B420(state);
+    Require(state.pc == 0xb420u && state.gpr[4] == 0x12345678u,
+            "A direct self branch did not yield.");
+    for (uint32_t target : {0xb430u, 0xb434u, 0x1000u}) {
+        state.ctr = target | 3u;
+        ppc_0000B430(state);
+        Require(state.pc == target && state.ctr == (target | 3u) &&
+                    state.gpr[4] == 0x12345678u,
+                "A local or external CTR branch did not yield with target alignment preserved.");
+    }
+    for (bool taken : {false, true}) {
+        state.cr = taken ? 0xffffffffu : 0;
+        state.lr = 0xb443u;
+        ppc_0000B440(state);
+        Require(state.pc == (taken ? 0xb440u : 0xb444u) && state.lr == 0xb443u &&
+                    state.gpr[4] == 0x12345678u,
+                "Conditional LR branch did not yield on both paths.");
+        ppc_0000B450(state);
+        Require(state.pc == (taken ? 0xb450u : 0xb454u) &&
+                    state.gpr[4] == 0x12345678u,
+                "Conditional direct self branch did not yield on both paths.");
+    }
+    for (const auto& entry : {
+             std::make_pair(0xb460u, ppc_0000B460),
+             std::make_pair(0xb480u, ppc_0000B480),
+             std::make_pair(0xb490u, ppc_0000B490)}) {
+        unsigned calls = 0;
+        state.ctr = entry.first + 8u;
+        state.lr = entry.first + 8u;
+        state.callGuest = [&](uint32_t target, PpcState& guest) {
+            Require(++calls == 1 && target == entry.first + 8u &&
+                        guest.lr == entry.first + 4u,
+                    "Yielding linked branch changed its original target or continuation.");
+            guest.pc = guest.lr;
+        };
+        entry.second(state);
+        Require(calls == 1 && state.pc == entry.first + 4u &&
+                    state.gpr[4] == 0x12345678u,
+                "Linked branch did not return to dispatch after its guest call.");
+    }
+    for (uint32_t count : {1u, 2u}) {
+        unsigned calls = 0;
+        state.ctr = count;
+        state.callGuest = [&](uint32_t target, PpcState& guest) {
+            Require(++calls == 1 && target == 0xb4c8u && guest.lr == 0xb4c4u,
+                    "Conditional linked branch called the wrong target.");
+            guest.pc = guest.lr;
+        };
+        ppc_0000B4C0(state);
+        Require(calls == (count == 1 ? 0u : 1u) && state.ctr == count - 1 &&
+                    state.pc == 0xb4c4u && state.lr == 0xb4c4u &&
+                    state.gpr[4] == 0x12345678u,
+                "Conditional linked branch did not yield after exactly one CTR test.");
+    }
+    for (bool taken : {false, true}) {
+        state.cr = taken ? 0xffffffffu : 0;
+        state.ctr = 0xb4e3u;
+        ppc_0000B4E0(state);
+        Require(state.pc == (taken ? 0xb4e0u : 0xb4e4u) &&
+                    state.ctr == 0xb4e3u && state.gpr[4] == 0x12345678u,
+                "Conditional CTR branch did not yield on both paths without decrementing CTR.");
+    }
+    state.callGuest = {};
+    state.memory.resize(0xc000u);
+    ppc_write_u32(state, 0xb420u, 0x48000000u);
+    ppc_write_u32(state, 0xb424u, 0x38800001u);
+    NativeDispatcher dispatcher;
+    dispatcher.Register(0, state, {{0xb420u, ppc_0000B420, {0x48000000u, 0x38800001u}}});
+    state.lr = 0xb500u;
+    bool rejected = false;
+    try {
+        dispatcher.Execute(state, 0xb420u, 7);
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("budget exceeded") != std::string::npos;
+    }
+    Require(rejected && state.pc == 0xb420u && !state.callGuest,
+            "A real compiled self loop escaped the dispatch budget or retained its callback.");
+    state.gpr[3] = 0;
+    state.gpr[4] = UINT32_MAX;
+    rejected = false;
+    try {
+        ppc_0000B4A0(state);
+    } catch (const std::out_of_range&) {
+        rejected = true;
+    }
+    Require(rejected && state.pc == 0xb4a4u && state.gpr[3] == 1,
+            "Precise PC did not identify a failed straight-line memory instruction.");
 }
 
 void TestFloatingPointTransfers() {
@@ -1007,7 +1114,8 @@ void TestExiInitializationRegisters() {
                 state.exiStatus[channel] = initial;
                 state.exiTransferControl[channel] = 0x3eu;
                 ppc_write_u32(state, address, value);
-                const uint32_t expected = (initial & (channel == 2 ? 0xau : 0x180au)) | value;
+                const uint32_t expected = (initial & (channel == 2 ? 0xau :
+                    channel == 0 ? 0x380au : 0x180au)) | value;
                 Require(ppc_read_u32(state, address) == expected &&
                             state.exiTransferControl[channel] == 0x3eu &&
                             state.memory == ram,
@@ -1032,8 +1140,8 @@ void TestExiInitializationRegisters() {
     }
     state.exiStatus[0] = 0x3c7fu;
     ppc_write_u32(state, 0xcc006800u, 0x1070u);
-    Require(state.exiStatus[0] == 0x187au,
-            "Original interrupt masking did not clear ROMDIS while preserving pending/presence state.");
+    Require(state.exiStatus[0] == 0x387au,
+            "Original interrupt masking did not retain sticky ROMDIS and pending/presence state.");
     state.exiInitializationEnabled = false;
     state.exiStatus[0] = 0x70u;
     bool rejected = false;
@@ -2236,6 +2344,7 @@ void TestNativeDispatch() {
 int main() {
     try {
         TestLogicalRegisters();
+        TestYieldingBranchesAndPrecisePc();
         TestFloatingPointTransfers();
         TestFloatingPointMoves();
         TestFpscrWrites();

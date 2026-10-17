@@ -31,6 +31,31 @@ target_link_libraries(hmawl_recompiler_core PRIVATE libzstd_static)
 add_executable(hmawl_recompiler main.cpp)
 target_link_libraries(hmawl_recompiler PRIVATE hmawl_recompiler_core)
 
+set(HMAWL_ORIGINAL_US_DOL "" CACHE FILEPATH "Verified USA revision 0 DOL for the production original-startup runner")
+if(HMAWL_ORIGINAL_US_DOL)
+    get_filename_component(HMAWL_ORIGINAL_US_DOL "${HMAWL_ORIGINAL_US_DOL}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+    add_executable(hmawl_generate_original_startup generate_original_startup.cpp)
+    target_link_libraries(hmawl_generate_original_startup PRIVATE hmawl_recompiler_core)
+    set(generated_original_startup "${CMAKE_CURRENT_BINARY_DIR}/generated_original_startup.h")
+    add_custom_command(OUTPUT "${generated_original_startup}"
+        COMMAND hmawl_generate_original_startup "${HMAWL_ORIGINAL_US_DOL}" "${generated_original_startup}"
+        DEPENDS hmawl_generate_original_startup "${HMAWL_ORIGINAL_US_DOL}"
+            original_startup_manifest.h
+        VERBATIM
+    )
+    add_library(hmawl_original_startup_runtime original_startup.cpp "${generated_original_startup}")
+    target_include_directories(hmawl_original_startup_runtime PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_libraries(hmawl_original_startup_runtime PUBLIC hmawl_recompiler_core)
+    add_executable(hmawl_original_startup original_startup_main.cpp)
+    target_link_libraries(hmawl_original_startup PRIVATE hmawl_original_startup_runtime)
+    if(BUILD_TESTING)
+        add_executable(hmawl_original_startup_tests original_startup_tests.cpp)
+        target_link_libraries(hmawl_original_startup_tests PRIVATE hmawl_original_startup_runtime)
+        add_test(NAME hmawl_original_startup_tests
+            COMMAND hmawl_original_startup_tests "${HMAWL_ORIGINAL_US_DOL}")
+    endif()
+endif()
+
 if(BUILD_TESTING)
     add_executable(hmawl_recompiler_tests tests.cpp)
     target_link_libraries(hmawl_recompiler_tests PRIVATE hmawl_recompiler_core)
