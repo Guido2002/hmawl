@@ -1264,6 +1264,7 @@ int main(int argc, char** argv) {
                     0x8000ac34u, 0x8000ac44u, 0x8000ac48u, 0x8000ac54u,
                     0x8000ac58u, 0x8000ac64u};
                 unsigned loopSteps = 0, arrayConstructors = 0;
+                unsigned loopEntries = 0;
                 unsigned resourceReads = 0, fileCallbacks = 0, readNotifications = 0;
                 uint64_t resourceBytes = 0;
                 uint32_t pendingReadAddress = 0;
@@ -1279,8 +1280,19 @@ int main(int argc, char** argv) {
                 std::vector<uint32_t> deferredMethods, cleanupMethods;
                 std::vector<uint32_t> updateQueue, sceneQueue, renderQueue;
                 std::vector<uint32_t> renderMethods, renderCleanupMethods;
+                std::vector<uint32_t> secondPassMethods;
                 std::array<uint32_t, 7> cameraProjection{};
                 bool perspectiveChecked = false, perspectiveApplied = false, projectionRestored = false;
+                bool firstLoopQueuesCleared = false;
+                uint32_t firstAssetState = 0, firstFadeActive = 0, firstManagerList = 0;
+                uint8_t firstCameraActive = 0;
+                const std::array<uint32_t, 7> frameReturns = {
+                    0x8000acf8u, 0x8000ad14u, 0x8000ad2cu, 0x8000ad34u,
+                    0x8000ad38u, 0x8000ad3cu, 0x8000ac34u};
+                unsigned frameSteps = 0, padReads = 0;
+                std::array<uint32_t, 3> frameBuffers{};
+                uint32_t frameCounter = 0;
+                uint32_t loopStack = 0;
                 const auto readFloat = [&](uint32_t address) {
                     const auto bits = ppc_read_u32(pcmState, address);
                     float value;
@@ -1328,6 +1340,86 @@ int main(int argc, char** argv) {
                 };
                 bindPcmTest(pcmState, pcmTicks, submittedFrames);
                 const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 50000000, 128, [&](uint32_t pc) {
+                    if (pc == 0x8000ac34u) {
+                        ++loopEntries;
+                        if (loopEntries == 1) loopStack = pcmState.gpr[1];
+                        else Require(pcmState.gpr[1] == loopStack,
+                                     "Original completed loop did not preserve main's stack pointer.");
+                    }
+                    if ((loopEntries == 1 && pc != 0x8000ac34u) ||
+                        (loopEntries == 2 && pc == 0x8000ac34u)) {
+                        if (std::find(frameReturns.begin(), frameReturns.end(), pc) != frameReturns.end()) {
+                            Require(frameSteps < frameReturns.size() && pc == frameReturns[frameSteps],
+                                    "Original frame tail and next-loop entry did not execute in order.");
+                            ++frameSteps;
+                        }
+                    }
+                    if (pc == 0x8000ad14u) {
+                        Require(ppc_read_u32(pcmState, 0x80348fe0u) == 0,
+                                "Original first frame unexpectedly installed a post-render callback.");
+                    }
+                    if (pc == 0x8000ad2cu) {
+                        const auto screen = ppc_read_u32(pcmState, 0x803491b4u);
+                        for (unsigned index = 0; index < frameBuffers.size(); ++index)
+                            frameBuffers[index] = ppc_read_u32(pcmState, screen + index * 4);
+                        Require(frameBuffers[0] && frameBuffers[1] && frameBuffers[0] != frameBuffers[1] &&
+                                    frameBuffers[2] == frameBuffers[1] &&
+                                    uint32_t(ppc_read_u32(pcmState, 0x8034975cu) - pcmState.gpr[27]) >=
+                                        ppc_read_u32(pcmState, pcmState.gpr[29] + 0x54) - 1 &&
+                                    pcmState.graphics->efb && pcmState.graphics->efb->lastCopy &&
+                                    pcmState.graphics->efb->lastCopy->address == (frameBuffers[2] & 0x3fffffffu),
+                                "Original frame did not pass its retrace gate with a copied alternate framebuffer.");
+                        frameCounter = ppc_read_u32(pcmState, 0x803494a0u);
+                    }
+                    if (pc == 0x8000ad34u) {
+                        const auto screen = ppc_read_u32(pcmState, 0x803491b4u);
+                        Require(ppc_read_u32(pcmState, screen) == frameBuffers[0] &&
+                                    ppc_read_u32(pcmState, screen + 4) == frameBuffers[1] &&
+                                    ppc_read_u32(pcmState, screen + 8) == frameBuffers[0] &&
+                                    ppc_read_u32(pcmState, 0x80318868u) == frameBuffers[2] &&
+                                    ppc_read_u8(pcmState, 0x803494b4u) == 1 &&
+                                    ppc_read_u32(pcmState, 0x803494b0u) == 1,
+                                "Original Screen did not request the copied VI framebuffer and swap its draw buffer.");
+                    }
+                    if (pc == 0x8000ad38u)
+                        Require(ppc_read_u32(pcmState, 0x803494a0u) == frameCounter + 1,
+                                "Original timing update did not increment its frame counter.");
+                    if (pc == 0x80212744u) {
+                        Require(pcmState.gpr[3] == 0, "Original disconnected PADRead reported motor-capable controllers.");
+                        for (unsigned channel = 0; channel < 4; ++channel) {
+                            const auto status = pcmState.gpr[1] + 8 + channel * 12;
+                            Require(ppc_read_u8(pcmState, status + 10) == 0xff,
+                                    "Original PADRead did not report a disconnected controller.");
+                            for (unsigned byte = 0; byte < 10; ++byte)
+                                Require(ppc_read_u8(pcmState, status + byte) == 0,
+                                        "Original disconnected PADRead published nonzero buttons or axes.");
+                        }
+                        ++padReads;
+                    }
+                    if (pc == 0x8000ad3cu) {
+                        Require(padReads == 1 && ppc_read_u8(pcmState, 0x80341433u) == 0,
+                                "Original controller update did not consume its queued PAD sample.");
+                        for (unsigned channel = 0; channel < 4; ++channel) {
+                            const auto status = 0x80341574u + channel * 0x44;
+                            Require(ppc_read_u8(pcmState, status + 0x42) == 0xff &&
+                                        ppc_read_u32(pcmState, status) == 0 &&
+                                        ppc_read_u32(pcmState, status + 8) == 0 &&
+                                        ppc_read_u32(pcmState, status + 0x10) == 0,
+                                    "Original controller publication fabricated buttons or connected status.");
+                        }
+                        const auto tasks = ppc_read_u32(pcmState, 0x8034923cu);
+                        Require(queuedObjects(tasks + 0x74).empty() && queuedObjects(tasks + 0x48).empty(),
+                                "Original first loop did not clear both deferred queues.");
+                        for (const auto* queue : {&updateQueue, &renderQueue})
+                            for (const auto node : *queue)
+                                Require(ppc_read_u32(pcmState, node) == 0 && ppc_read_u32(pcmState, node + 4) == 0,
+                                        "Original first-loop cleanup did not unlink every scheduled node.");
+                        firstLoopQueuesCleared = true;
+                        firstAssetState = ppc_read_u32(pcmState, taskObjects[0].back() + 0x1a4);
+                        firstFadeActive = ppc_read_u32(pcmState, taskObjects[1].back() + 0x60);
+                        firstManagerList = ppc_read_u32(pcmState, returnedObjects.back() + 0x4c);
+                        firstCameraActive = ppc_read_u8(pcmState, ppc_read_u32(pcmState, 0x80349238u) + 4);
+                    }
                     if (pc == 0x8017d018u) {
                         const auto tasks = ppc_read_u32(pcmState, 0x8034923cu);
                         updateQueue = queuedObjects(tasks + 0x74);
@@ -1401,7 +1493,7 @@ int main(int argc, char** argv) {
                                 "Original main did not complete its three task passes in order.");
                         ++taskPass;
                     }
-                    if (pc == 0x80235d7cu && pcmState.lr == 0x8017d0c0u) {
+                    if (pc == 0x80235d7cu && pcmState.lr == 0x8017d0c0u && loopEntries == 1) {
                         Require(taskPass < taskMethods.size(), "Unexpected additional original task pass.");
                         const auto descriptor = pcmState.gpr[12];
                         const std::array<uint32_t, 3> slots = {0x10, 0x18, 0x14};
@@ -1413,6 +1505,11 @@ int main(int argc, char** argv) {
                         const auto vtable = ppc_read_u32(pcmState, pcmState.gpr[3] + 0x10);
                         taskMethods[taskPass].push_back(ppc_read_u32(pcmState, vtable + slots[taskPass]));
                         taskObjects[taskPass].push_back(pcmState.gpr[3]);
+                    }
+                    if (pc == 0x80235d7cu && pcmState.lr == 0x8017d0c0u && loopEntries == 2) {
+                        Require(secondPassMethods.size() < 8, "Original second-loop task pass exceeded its bound.");
+                        const auto vtable = ppc_read_u32(pcmState, pcmState.gpr[3] + 0x10);
+                        secondPassMethods.push_back(ppc_read_u32(pcmState, vtable + 0x10));
                     }
                     if (pc == 0x8015468cu) ++managerReturns;
                     if (pc == 0x80199dd4u) ++loaderWorkers;
@@ -1462,7 +1559,8 @@ int main(int argc, char** argv) {
                     }
                     if (pc == 0x8017acf0u) ++fileCallbacks;
                     if (pc == 0x80176754u && !sceneModule) ++arrayConstructors;
-                    if (std::find(loopReturns.begin(), loopReturns.end(), pc) != loopReturns.end()) {
+                    if (loopEntries <= 1 &&
+                        std::find(loopReturns.begin(), loopReturns.end(), pc) != loopReturns.end()) {
                         Require(loopSteps < loopReturns.size() && pc == loopReturns[loopSteps],
                                 "Original first-loop preparation did not execute in main's call order.");
                         ++loopSteps;
@@ -1501,7 +1599,8 @@ int main(int argc, char** argv) {
                           << " thread context returns=" << pcmState.threadContextReturns
                           << " archive handles=" << archiveHandles << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            sceneProlog != 0 && pcmResult.pc == 0x8000cc9cu && pcmResult.lr == 0x8000acfcu &&
+                            sceneProlog != 0 && pcmResult.pc == 0x800e10c4u &&
+                            pcmResult.lr == sceneModule + 0x3ec80u &&
                             pcmResult.sceneModuleLinked && pcmResult.scenePrologEntered &&
                             pcmResult.sceneInitializationEntered && pcmResult.scenePrologReturned &&
                             pcmResult.sceneConstructorsReturned == 28 && pcmResult.systemTaskReturned &&
@@ -1510,23 +1609,28 @@ int main(int argc, char** argv) {
                             pcmResult.screenPreparationReturned && pcmResult.renderQueuePrepared &&
                             pcmResult.renderPassReturned && pcmResult.renderQueueCleared &&
                             pcmResult.frameDrawSyncReturned &&
+                            pcmResult.postRenderCallbackReturned && pcmResult.frameRetraceWaitReturned &&
+                            pcmResult.frameBufferExchangeReturned && pcmResult.frameTimingReturned &&
+                            pcmResult.controllerUpdateReturned &&
+                            pcmResult.gameLoopIterationsCompleted == 1 && loopEntries == 2 &&
+                            frameSteps == frameReturns.size() && padReads == 1 &&
                             sceneConstructors.returned == 28 && !sceneConstructors.active &&
                             !dispatcher.Contains(sceneProlog) &&
                             pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
                             pcmResult.gameInitializationReturned && pcmResult.gameLoopEntered &&
                             pcmResult.firstLoopPreparationReturned &&
                             pcmState.pcm->active && pcmState.pcm->starts == 1 &&
-                            pcmState.pcm->completedBuffers == 4209 && pcmState.pcm->submittedFrames == submittedFrames &&
-                            submittedFrames == 673600 && pcmHandlers == 4206 && pcmCallbacks == 4203 &&
-                            commandAddress != 0 && commandHandshakes == 4203 &&
-                            pcmState.dspHardware->task->cpuMailSent == 12619 &&
-                            pcmState.dspHardware->task->cpuMailConsumed == 12619 &&
+                            pcmState.pcm->completedBuffers == 4210 && pcmState.pcm->submittedFrames == submittedFrames &&
+                            submittedFrames == 673760 && pcmHandlers == 4207 && pcmCallbacks == 4204 &&
+                            commandAddress != 0 && commandHandshakes == 4204 &&
+                            pcmState.dspHardware->task->cpuMailSent == 12622 &&
+                            pcmState.dspHardware->task->cpuMailConsumed == 12622 &&
                             !(pcmState.dspHardware->toDspMailbox & 0x80000000u) &&
-                            pcmState.dspHardware->task->dataTransfers == 134463 &&
-                            pcmState.dspHardware->task->transferredBytes == 40807980 &&
+                            pcmState.dspHardware->task->dataTransfers == 134495 &&
+                            pcmState.dspHardware->task->transferredBytes == 40817692 &&
                             pcmState.dspHardware->instructionPc == 0x4a &&
-                            pcmState.dspHardware->task->interrupts == 4204 &&
-                            pcmState.dspHardware->sentMail == 4206 && pcmState.dspHardware->consumedMail == 4206 &&
+                            pcmState.dspHardware->task->interrupts == 4205 &&
+                            pcmState.dspHardware->sentMail == 4207 && pcmState.dspHardware->consumedMail == 4207 &&
                             pcmState.dspHardware->task->mode == NativeDspTaskMode::Running &&
                             pcmState.dspHardware->completedPrograms == 1 &&
                             !pcmState.systemCallActive && !pcmState.externalInterrupt->active &&
@@ -1565,8 +1669,7 @@ int main(int argc, char** argv) {
                             taskObjects[1] == taskObjects[2],
                         "Original task passes did not call every registered virtual method in priority order.");
                 const auto fade = taskObjects[1].back();
-                Require(ppc_read_u32(pcmState, taskObjects[0].back() + 0x1a4) == 1 &&
-                            ppc_read_u32(pcmState, fade + 0x60) == 1 &&
+                Require(firstAssetState == 1 && firstFadeActive == 1 &&
                             ppc_read_u32(pcmState, fade + 0x14) == 0x10000,
                         "Original asset update did not enter its first fade state and register the fade task.");
                 const auto tasks = ppc_read_u32(pcmState, 0x8034923cu);
@@ -1577,11 +1680,7 @@ int main(int argc, char** argv) {
                         "Original updates did not build the ordered audio/camera and camera/scene deferred queues.");
                 Require(deferredMethods == std::vector<uint32_t>{0x8012ab20u, 0x8008661cu} &&
                             cleanupMethods == std::vector<uint32_t>{0x800094c8u, 0x800094c8u} &&
-                            queuedObjects(tasks + 0x74).empty() &&
-                            ppc_read_u32(pcmState, updateQueue[0]) == 0 &&
-                            ppc_read_u32(pcmState, updateQueue[0] + 4) == 0 &&
-                            ppc_read_u32(pcmState, updateQueue[1]) == 0 &&
-                            ppc_read_u32(pcmState, updateQueue[1] + 4) == 0,
+                            firstLoopQueuesCleared,
                         "Original deferred audio/camera callbacks did not return and unlink their queue nodes.");
                 Require(renderQueue == std::vector<uint32_t>{
                             0x80315534u, 0x80315558u, 0x8031557cu, 0x803155a0u,
@@ -1592,11 +1691,12 @@ int main(int argc, char** argv) {
                             0x80181fd4u, 0x8008660cu, 0x80182048u, 0x80154fb4u} &&
                             renderCleanupMethods == std::vector<uint32_t>(8, 0x800094e8u) &&
                             perspectiveChecked && perspectiveApplied && projectionRestored &&
-                            queuedObjects(tasks + 0x48).empty(),
+                            firstLoopQueuesCleared,
                         "Original sorted render pass, perspective restoration or queue cleanup did not complete.");
-                for (const auto node : renderQueue)
-                    Require(ppc_read_u32(pcmState, node) == 0 && ppc_read_u32(pcmState, node + 4) == 0,
-                            "Original render cleanup did not unlink every scheduled node.");
+                Require(secondPassMethods == expectedMethods[0] &&
+                            queuedObjects(tasks + 0x74) == updateQueue &&
+                            queuedObjects(tasks + 0x48) == sceneQueue,
+                        "Original second loop did not resume its first task pass and rebuild the deferred queues.");
                 const auto listener = ppc_read_u32(pcmState, taskObjects[0][1] + 0x54) + 0x84;
                 const std::array<uint32_t, 12> listenerInverse = {
                     0xbf800000u, 0x80000000u, 0, 0x80000000u, 0x3f800000u, 0x80000000u,
@@ -1611,8 +1711,8 @@ int main(int argc, char** argv) {
                 const auto camera = returnedObjects.front();
                 const auto view = ppc_read_u32(pcmState, 0x80349238u);
                 Require(ppc_read_u32(pcmState, view + 8) == camera + 0x9c &&
-                            ppc_read_u8(pcmState, view + 4) == 1,
-                        "Original camera did not publish its active view matrix.");
+                            firstCameraActive == 1 && ppc_read_u8(pcmState, view + 4) == 0,
+                        "Original camera did not publish its view and reset its active flag for the second loop.");
                 for (unsigned row = 0; row < 3; ++row) {
                     double origin = readFloat(camera + 0x9c + row * 16 + 12);
                     double direction = 0;
@@ -1663,7 +1763,7 @@ int main(int argc, char** argv) {
                 }
                 const auto manager = returnedObjects.back();
                 Require(ppc_read_u32(pcmState, 0x803491e0u) == manager &&
-                            ppc_read_u32(pcmState, manager + 0x4c) == 1 &&
+                            firstManagerList == 1 && ppc_read_u32(pcmState, manager + 0x4c) == 0 &&
                             ppc_read_u32(pcmState, manager + 0xa8) == 0 &&
                             ppc_read_u32(pcmState, manager + 0xac) == 0,
                         "Original manager did not toggle its active task list during its first update.");
@@ -1684,11 +1784,17 @@ int main(int argc, char** argv) {
                 uint64_t plainTicks = 1000000, plainFrames = 0;
                 bindPcmTest(plainPcm, plainTicks, plainFrames);
                 const auto plainResult = RunOriginalStartup(dispatcher, plainPcm, 50000000);
+                Require(DescribeOriginalStartupStop(pcmResult).find("Verified complete original game-loop iterations: 1.") !=
+                            std::string::npos &&
+                            DescribeOriginalStartupStop(pcmResult).find("no complete game-loop iteration") == std::string::npos &&
+                            DescribeOriginalStartupStop(pcmResult).find("no rendered game frame is verified.") != std::string::npos,
+                        "Original startup report omitted the verified loop or claimed a rendered game frame.");
                 Require(plainResult.pc == pcmResult.pc && plainResult.lr == pcmResult.lr &&
                             plainResult.reason == pcmResult.reason && plainTicks == pcmTicks &&
                             plainFrames == submittedFrames && plainPcm.memory == pcmState.memory &&
                             std::equal(std::begin(plainPcm.gpr), std::end(plainPcm.gpr), std::begin(pcmState.gpr)) &&
-                            plainPcm.fpr == pcmState.fpr &&
+                            plainPcm.fpr == pcmState.fpr && plainPcm.fpscr == pcmState.fpscr &&
+                            plainPcm.gqr == pcmState.gqr &&
                             plainPcm.cr == pcmState.cr && plainPcm.xer == pcmState.xer &&
                             plainPcm.ctr == pcmState.ctr && plainPcm.lr == pcmState.lr &&
                             plainPcm.srr0 == pcmState.srr0 && plainPcm.srr1 == pcmState.srr1 &&
@@ -1727,11 +1833,50 @@ int main(int argc, char** argv) {
                             plainResult.screenPreparationReturned && plainResult.renderQueuePrepared &&
                             plainResult.renderPassReturned && plainResult.renderQueueCleared &&
                             plainResult.frameDrawSyncReturned &&
+                            plainResult.postRenderCallbackReturned && plainResult.frameRetraceWaitReturned &&
+                            plainResult.frameBufferExchangeReturned && plainResult.frameTimingReturned &&
+                            plainResult.controllerUpdateReturned && plainResult.gameLoopIterationsCompleted == 1 &&
                             !dispatcher.Contains(sceneProlog) &&
                             plainResult.startupObjectsReturned == pcmResult.startupObjectsReturned &&
                             plainResult.resourceReadNotifications == pcmResult.resourceReadNotifications &&
                             plainPcm.discInterface->completedTransfers == pcmState.discInterface->completedTransfers,
                         "PCM observation changed CPU/RAM, DMA timing, original interrupts or native DSP execution.");
+                const auto& observedGx = *pcmState.graphics;
+                const auto& plainGx = *plainPcm.graphics;
+                Require(observedGx.efb && plainGx.efb && observedGx.efb->lastCopy && plainGx.efb->lastCopy &&
+                            observedGx.cp == plainGx.cp && observedGx.bp == plainGx.bp &&
+                            observedGx.xf == plainGx.xf && observedGx.fifo == plainGx.fifo &&
+                            observedGx.commands == plainGx.commands && observedGx.gathered == plainGx.gathered &&
+                            observedGx.cpuBase == plainGx.cpuBase && observedGx.cpuEnd == plainGx.cpuEnd &&
+                            observedGx.cpuWrite == plainGx.cpuWrite &&
+                            observedGx.writeGatherAddress == plainGx.writeGatherAddress &&
+                            observedGx.bpMask == plainGx.bpMask && observedGx.control == plainGx.control &&
+                            observedGx.watermarkStatus == plainGx.watermarkStatus && observedGx.cpToken == plainGx.cpToken &&
+                            observedGx.peControl == plainGx.peControl && observedGx.pePending == plainGx.pePending &&
+                            observedGx.poke == plainGx.poke && observedGx.token == plainGx.token &&
+                            observedGx.performanceSelect == plainGx.performanceSelect &&
+                            observedGx.performanceBursts == plainGx.performanceBursts &&
+                            observedGx.performanceCommands == plainGx.performanceCommands &&
+                            observedGx.performanceResets == plainGx.performanceResets &&
+                            observedGx.bursts == plainGx.bursts && observedGx.decodedCommands == plainGx.decodedCommands &&
+                            observedGx.vertexCacheInvalidations == plainGx.vertexCacheInvalidations &&
+                            observedGx.efb->color == plainGx.efb->color && observedGx.efb->depth == plainGx.efb->depth &&
+                            observedGx.efb->defined == plainGx.efb->defined && observedGx.efb->copies == plainGx.efb->copies &&
+                            observedGx.efb->clears == plainGx.efb->clears &&
+                            observedGx.efb->undefinedCopies == plainGx.efb->undefinedCopies &&
+                            observedGx.efb->lastCopy->address == plainGx.efb->lastCopy->address &&
+                            observedGx.efb->lastCopy->width == plainGx.efb->lastCopy->width &&
+                            observedGx.efb->lastCopy->height == plainGx.efb->lastCopy->height &&
+                            observedGx.efb->lastCopy->stride == plainGx.efb->lastCopy->stride &&
+                            observedGx.efb->lastCopy->undefinedPixels == plainGx.efb->lastCopy->undefinedPixels,
+                        "First-loop observation changed GX/FIFO state or original EFB/XFB copy effects.");
+                const auto& observedVi = *pcmState.video;
+                const auto& plainVi = *plainPcm.video;
+                Require(observedVi.registers == plainVi.registers && observedVi.lastTicks == plainVi.lastTicks &&
+                            observedVi.elapsedTicks == plainVi.elapsedTicks && observedVi.fields == plainVi.fields &&
+                            observedVi.writes == plainVi.writes && observedVi.resets == plainVi.resets &&
+                            observedVi.clockStarted == plainVi.clockStarted,
+                        "First-loop observation changed VI timing, interrupts or framebuffer register state.");
                 auto failedScene = CreateOriginalStartupState(image);
                 InstallOriginalStartupDisc(failedScene, disc);
                 failedScene.pcm.emplace();
@@ -1759,9 +1904,27 @@ int main(int argc, char** argv) {
                 Require(rejectedRender.reason == "Injected render observer failure." &&
                             rejectedRender.renderQueuePrepared && !rejectedRender.renderPassReturned &&
                             !rejectedRender.renderQueueCleared && !rejectedRender.frameDrawSyncReturned &&
+                            !rejectedRender.postRenderCallbackReturned && !rejectedRender.frameRetraceWaitReturned &&
+                            !rejectedRender.frameBufferExchangeReturned && !rejectedRender.frameTimingReturned &&
+                            !rejectedRender.controllerUpdateReturned && rejectedRender.gameLoopIterationsCompleted == 0 &&
                             !dispatcher.Contains(sceneProlog) &&
                             !interruptedRender->callGuest && !interruptedRender->callException,
                         "Interrupted original render pass fabricated completion or leaked native scene bindings.");
+                auto damagedLoop = StartupFixture(image);
+                InstallOriginalStartupDisc(*damagedLoop, disc);
+                damagedLoop->pcm.emplace();
+                uint64_t damagedLoopTicks = 1000000, damagedLoopFrames = 0;
+                bindPcmTest(*damagedLoop, damagedLoopTicks, damagedLoopFrames);
+                ppc_write_u32(*damagedLoop, 0x8000ad3cu, 0);
+                const auto rejectedLoop = RunOriginalStartup(dispatcher, *damagedLoop, 50000000);
+                Require(rejectedLoop.stop == OriginalStartupStop::Dependency && rejectedLoop.pc == 0x8000ad3cu &&
+                            rejectedLoop.reason.find("code mismatch") != std::string::npos &&
+                            rejectedLoop.frameBufferExchangeReturned && rejectedLoop.frameTimingReturned &&
+                            !rejectedLoop.controllerUpdateReturned && rejectedLoop.gameLoopIterationsCompleted == 0 &&
+                            DescribeOriginalStartupStop(rejectedLoop).find("no complete game-loop iteration") !=
+                                std::string::npos &&
+                            !dispatcher.Contains(sceneProlog) && !damagedLoop->callGuest && !damagedLoop->callException,
+                        "Corrupt original loop backedge fabricated a completed iteration or leaked scene bindings.");
                 auto damagedLink = CreateOriginalStartupState(image);
                 InstallOriginalStartupDisc(damagedLink, disc);
                 damagedLink.pcm.emplace();

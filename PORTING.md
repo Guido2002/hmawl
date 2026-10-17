@@ -83,10 +83,14 @@ Screen frame preparation and the kernel's sorted render-task insertion.
 The eight scheduled render callbacks, original queue cleanup and frame draw-sync
 submission now return. Perspective/tangent calculation, GX projection
 save/apply/restore and viewport restoration execute original code.
-With `--max-blocks 50000000`, the next untranslated post-render callback is
-`PC=0x8000CC9C`, LR `0x8000ACFC`.
-The original main loop enters its first iteration and its reset/update/resource/
-audio preparation returns, but no complete iteration or rendered frame is verified.
+The original post-render callback lookup, retrace gate, Screen framebuffer
+exchange, timing and controller update now return, followed by the original
+backedge. The first complete main-loop iteration is verified; the second iteration
+begins and reaches its original scene-asset update.
+With `--max-blocks 50000000`, the next untranslated dependency is
+`PC=0x800E10C4`, LR `scene module base + 0x3EC80`
+(`0x8039DC20` at the current allocation).
+No rendered game frame is verified.
 The default one-million-block limit can expire earlier.
 A deterministic disc fixture verifies all 15170 relocation records, section addresses,
 BSS clearing and deferred imports; 31 DVD reads transfer 8819232 bytes.
@@ -97,7 +101,7 @@ General voice mixing/ADPCM remains untranslated. The original PCM buffers contai
 zero samples; Windows buffer acceptance is not proof of audible game audio.
 Callers without a PCM backend still fail explicitly at original AIStartDMA.
 No task-ready message or completed audio task is synthesized.
-Pixel scanout, the main loop and a rendered game frame remain unfinished.
+Pixel scanout, sustained gameplay and a rendered game frame remain unfinished.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
 ## Phases and completion criteria
@@ -797,6 +801,20 @@ queue. Full runtime scheduling and device services are still needed.
   and the independent `BUILD_TESTING=OFF` Windows runner reach the post-render
   dependency at `0x8000CC9C`, LR `0x8000ACFC`.
   This verifies render-state execution, not visible geometry or a complete loop.
+- [x] Complete the first original main-loop iteration and enter the second.
+  Compile the post-render callback accessor, Screen framebuffer exchange, timing
+  update, connected controller sample/publication and rumble-maintenance chain,
+  and original reset-switch wrapper. Verify the retrace condition, copied
+  alternate XFB request, draw-buffer swap, frame counter and all four disconnected
+  PAD statuses with zero buttons/axes. Observe the actual original backedge and
+  next loop entry with main's stack preserved; tail return alone cannot count as
+  a completed loop. Corrupt backedge code must fail without claiming completion.
+  Keep first-loop queue, fade, manager and camera assertions scoped to that loop;
+  verify second-loop list toggling, view reset and deferred-queue reconstruction.
+  Extend observed/unobserved parity to GX/FIFO/EFB/XFB and VI state.
+  The independent `BUILD_TESTING=OFF` Windows runner verifies exactly one complete
+  iteration, then stops at scene-update dependency `0x800E10C4`,
+  LR `scene module base + 0x3EC80`. No visible game frame or connected input is claimed.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -1009,11 +1027,12 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue the original post-render callback from `0x8000CC9C`,
-   LR `0x8000ACFC`, toward retrace wait, framebuffer exchange and a completed
-   main-loop iteration. The eight sorted kernel/camera/scene render callbacks,
-   original node cleanup and frame draw-sync submission now return, but no
-   visible geometry or displayed game frame is verified.
+1. Continue the second iteration's scene-asset update from `0x800E10C4`,
+   LR `scene module base + 0x3EC80`, toward the original fade/draw task setup
+   and real geometry. The first complete original main-loop iteration now
+   returns through retrace gating, framebuffer exchange, timing and controller
+   publication and takes its backedge with the stack preserved. No visible
+   geometry or displayed game frame is verified.
    The genuine relocated `wlp1.rel` prolog now executes all 28 constructors,
    followed by original scene/asset loading and 31 completed DVD reads.
    Its prolog now returns with the loader queue drained; SystemTask and all three
@@ -1029,7 +1048,7 @@ systems and the executable can be packaged without the GameCube build toolchain.
    Do not discard samples, fabricate callback completion or substitute a native
    mixer for the original task. OSInit, all 93 DOL constructors, Screen and DSP
    audio-task initialization already return in the production runner; the remaining
-   game initialization and main loop, real GX draws and intro frame remain the goal.
+   scene progression, sustained main-loop execution, real GX draws and intro frame remain the goal.
 2. Expand the recompiler's opcode coverage, extend the tested REL/native-function
    bridge with function discovery and module lifetime management, implement
    the remaining scene dependencies (`0x8001BD04`, `0x8100DCD8`, `0x8002283C`)

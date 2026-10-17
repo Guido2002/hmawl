@@ -225,7 +225,10 @@ original task-list passes execute, including the first scene/asset update and
 fade registration. Deferred audio/camera updates, queue cleanup and Screen frame
 preparation now return. The kernel schedules its original render tasks; all eight
 render callbacks, render queue cleanup and frame draw-sync submission now return.
-The next dependency is the post-render callback at `0x8000CC9C`, LR `0x8000ACFC`.
+The first complete main-loop iteration now executes its original post-render
+lookup, retrace gate, framebuffer exchange, timing and controller update and takes
+the backedge. The next dependency is the second loop's scene update at
+`0x800E10C4`, LR `scene module base + 0x3EC80`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -402,14 +405,18 @@ The relocated prolog executes its 28 constructors, loads scene assets and return
 SystemTask and the three original task-list passes now return. Deferred
 audio/camera updates, queue cleanup, Screen frame preparation and kernel render
 scheduling return. All eight scheduled render callbacks, render queue cleanup and
-frame draw-sync submission return. The next untranslated post-render callback is
-`PC=0x8000CC9C`, LR `0x8000ACFC`;
+frame draw-sync submission return. The original post-render lookup, retrace gate,
+framebuffer exchange, timing and controller publication now return and execution
+takes the original backedge. One complete main-loop iteration is verified.
+The next untranslated second-loop scene-update dependency is
+`PC=0x800E10C4`, LR `scene module base + 0x3EC80`
+(`0x8039DC20` at the current allocation);
 DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier.
 Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
 host elapsed time. Host timing can also expose other untranslated startup paths.
 No mixed or audible
-game audio, renderer, scanout or complete main-loop iteration is claimed.
+game audio, renderer or scanout is claimed.
 The inquiry result remains `0x8001` and the entire real FST is intact.
 The no-PCM deterministic regression uses 1000 ticks per clock sample when AI is stopped,
 and 8 while its sample clock is running, resolving the SDK's sub-sample calibration
@@ -446,8 +453,8 @@ The final three constructors, two array elements, singleton/vtable state and thr
 handle initializations are verified. First-loop entry and six ordered preparation
 blocks are checked through the original reset/update/resource/audio calls.
 Corrupt late constructor code is rejected before reporting any loop entry.
-No complete loop iteration, GX renderer, general scheduled game-thread execution,
-connected input or saves have been verified.
+The complete first-loop evidence below does not establish a GX renderer,
+general scheduled game-thread execution, connected input or saves.
 
 The original SystemTask update and transition are compiled from bounded original
 ranges, keeping the 100000-instruction recursive discovery limit. Mode 41 requests
@@ -534,10 +541,40 @@ restored orthographic coefficients, ordered callback targets, all node links
 cleared and an empty render queue. Injecting a failure at the first callback must
 leave render completion, cleanup and draw-sync markers false and release native
 scene bindings. Observed and unobserved CPU/RAM/interrupt/PCM/DSP states still match.
-The original frame draw-sync submission returns at `0x8000ACF8`; execution next
-needs the post-render callback at `0x8000CC9C`, LR `0x8000ACFC`.
-This completes the scheduled render-state pass, not a main-loop iteration or
-rendered scene. No runtime PPC decoder or
+The original frame draw-sync submission returns at `0x8000ACF8`.
+The accessor at `0x8000CC9C` returns the game's optional post-render callback
+pointer (zero in this run); no replacement callback is installed.
+Main's original retrace-count gate passes, then `Screen::UpdateFrameBuffer`
+requests the copied alternate XFB through the original `VISetNextFrameBuffer`
+and switches its next draw pointer back to the other allocation. This is a
+framebuffer request, not proof of pixel scanout. The original timing update
+increments the frame counter. Original `0x80213CE4` executes rumble maintenance,
+SDK PAD sampling, the reset-switch wrapper, queued-sample processing and game
+controller publication. All four PAD channels retain error -1 with zero
+buttons/axes; no connected controller or native replacement PAD routine is used.
+
+The fixture verifies these return sites in order, the actual retrace threshold,
+copied XFB address, both persistent framebuffer allocations, next draw pointer,
+VI request pointer, frame counter and published disconnected PAD statuses.
+Only reaching the original `0x8000AC34` again after `0x8000AD3C` increments the
+completed-loop counter; tail markers alone do not. A damaged backedge fails
+code validation without reporting completion or leaking relocated bindings.
+The first iteration completes and the second resumes with the same main stack.
+It resets the camera's active flag, toggles the manager's list again, rebuilds
+the deferred queues and reaches the scene-asset update dependency at
+`0x800E10C4`, LR `scene module base + 0x3EC80`.
+First-loop queue/fade/camera assertions are captured before those second-loop
+changes, rather than weakening their expected values.
+
+At this boundary the deterministic PCM fixture has 4210 completed DMA periods,
+673760 submitted zero frames, 4207 original handlers and 4204 original callbacks/
+command returns. CPU mail sent/consumed is 12622/12622, DSP mail 4207/4207 and
+task IRQ count 4205; 134495 DSP data DMAs transfer 40817692 bytes.
+The prior 31 DVD reads/8819232 bytes, 52 loader workers/exits, one DEC alarm
+and 54 SDK thread-context returns remain unchanged. Observed/unobserved
+CPU/RAM/PCM/DSP/interrupt parity is retained and GX/FIFO/EFB/XFB plus VI
+register/timing parity is explicitly checked through this completed iteration.
+The original first loop is complete, not a rendered scene. No runtime PPC decoder or
 replacement linker is involved in the original startup path.
 An independent `BUILD_TESTING=OFF` Windows build reaches the same dependency;
 production execution does not depend on the test generator or fixture bindings.

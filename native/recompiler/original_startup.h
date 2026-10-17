@@ -54,6 +54,12 @@ struct OriginalStartupResult {
     bool renderPassReturned = false;
     bool renderQueueCleared = false;
     bool frameDrawSyncReturned = false;
+    bool postRenderCallbackReturned = false;
+    bool frameRetraceWaitReturned = false;
+    bool frameBufferExchangeReturned = false;
+    bool frameTimingReturned = false;
+    bool controllerUpdateReturned = false;
+    uint32_t gameLoopIterationsCompleted = 0;
     uint32_t sceneConstructorsReturned = 0;
     uint32_t constructorsReturned = 0;
     uint32_t startupObjectsReturned = 0;

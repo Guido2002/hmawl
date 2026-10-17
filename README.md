@@ -153,8 +153,14 @@ cleanup and frame draw-sync submission.** The connected perspective/tangent
 calculation, GX projection save/apply/restore and viewport restoration execute
 original statically translated code. This is a render-state pass, not proof of
 drawn geometry or a displayed frame.
-With `--max-blocks 50000000`, the next untranslated post-render callback is
-`PC=0x8000CC9C`, `LR=0x8000ACFC` (**exit code 3**, not a successful game boot).
+**The first complete original main-loop iteration is now verified.**
+The optional post-render callback lookup, retrace gate, original Screen framebuffer
+exchange, timing update and controller sampling/publication return. Execution
+takes the original backedge and starts the second iteration with the same stack.
+The disconnected controllers remain disconnected; no host input is synthesized.
+With `--max-blocks 50000000`, the next untranslated scene-update dependency is
+`PC=0x800E10C4`, `LR=scene module base + 0x3EC80`
+(`0x8039DC20` at the current allocation; **exit code 3**, not a successful game boot).
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
 imports), 31 real reads totaling 8819232 bytes, original archive initialization,
@@ -168,8 +174,8 @@ Device/queue errors fail explicitly;
 hosts or library callers without a PCM backend retain the AIStartDMA dependency error.
 No ROM bytes, task-ready mail, mixed samples or task completion are fabricated.
 Draws, unsupported copy modes and texture DMA still fail
-explicitly. No complete main-loop iteration, pixel scanout, game window/intro or
-rendered game frame has been verified.
+explicitly. One complete original loop is verified, but pixel scanout, a game
+window/intro and a rendered game frame have not been verified.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.
 The CLI creates an English/NTSC/stereo `native-console.sram` beside the input DOL

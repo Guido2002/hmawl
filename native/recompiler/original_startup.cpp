@@ -142,6 +142,7 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
     }
     OriginalStartupResult result{};
     bool sceneRegistered = false;
+    bool loopTailReturned = false;
     uint32_t sceneModule = 0;
     const auto finish = [&](OriginalStartupStop stop, const std::string& reason) {
         if (sceneRegistered) {
@@ -169,7 +170,11 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
                 pc == 0x8000ab0cu || pc == 0x8000ab2cu || pc == 0x8000ab4cu ||
                 pc == 0x8000ab6cu || pc == 0x8000ab8cu || pc == 0x8000abacu ||
                 pc == 0x8000abccu || pc == 0x8000ac04u) ++result.startupObjectsReturned;
-            if (pc == 0x8000ac34u) result.gameLoopEntered = true;
+            if (pc == 0x8000ac34u) {
+                result.gameLoopEntered = true;
+                if (loopTailReturned) ++result.gameLoopIterationsCompleted;
+                loopTailReturned = false;
+            }
             if (pc == 0x8000ac64u) result.firstLoopPreparationReturned = true;
             if (pc == 0x8000ac74u) result.systemTaskReturned = true;
             if (pc == 0x8000ac80u || pc == 0x8000ac8cu || pc == 0x8000ac98u)
@@ -181,6 +186,14 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x8000ace8u) result.renderPassReturned = true;
             if (pc == 0x8000acf0u) result.renderQueueCleared = true;
             if (pc == 0x8000acf8u) result.frameDrawSyncReturned = true;
+            if (pc == 0x8000ad14u) result.postRenderCallbackReturned = true;
+            if (pc == 0x8000ad2cu) result.frameRetraceWaitReturned = true;
+            if (pc == 0x8000ad34u) result.frameBufferExchangeReturned = true;
+            if (pc == 0x8000ad38u) result.frameTimingReturned = true;
+            if (pc == 0x8000ad3cu) {
+                result.controllerUpdateReturned = true;
+                loopTailReturned = true;
+            }
             if (pc == 0x80177c6cu && state.gpr[3] == 1) {
                 result.sceneModuleLinked = true;
                 sceneModule = ppc_read_u32(state, state.gpr[31] + 0x70u);
@@ -217,7 +230,7 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
         return finish(budget ? OriginalStartupStop::Budget : OriginalStartupStop::Dependency, reason);
     }
     return finish(OriginalStartupStop::UnexpectedReturn,
-                  "Original entry returned unexpectedly; no game main loop is available.");
+                  "Original entry returned unexpectedly instead of remaining in the game main loop.");
 }
 
 std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
@@ -271,6 +284,16 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.renderPassReturned) text << "Original scheduled render callbacks returned. ";
     if (result.renderQueueCleared) text << "Original render queue cleared. ";
     if (result.frameDrawSyncReturned) text << "Original frame draw-sync submission returned. ";
-    text << "This is NOT a playable game boot; no complete game-loop iteration or rendered frame is verified.";
+    if (result.postRenderCallbackReturned) text << "Original optional post-render callback dispatch returned. ";
+    if (result.frameRetraceWaitReturned) text << "Original frame retrace-wait condition passed. ";
+    if (result.frameBufferExchangeReturned) text << "Original Screen framebuffer exchange returned. ";
+    if (result.frameTimingReturned) text << "Original frame timing update returned. ";
+    if (result.controllerUpdateReturned) text << "Original controller sampling/publication returned. ";
+    if (result.gameLoopIterationsCompleted)
+        text << "Verified complete original game-loop iterations: " << std::dec
+             << result.gameLoopIterationsCompleted << ". ";
+    text << "This is NOT a playable game boot; ";
+    if (!result.gameLoopIterationsCompleted) text << "no complete game-loop iteration or rendered frame is verified.";
+    else text << "no rendered game frame is verified.";
     return text.str();
 }
