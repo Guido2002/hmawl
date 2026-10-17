@@ -171,6 +171,9 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
                 pc == 0x8000abccu || pc == 0x8000ac04u) ++result.startupObjectsReturned;
             if (pc == 0x8000ac34u) result.gameLoopEntered = true;
             if (pc == 0x8000ac64u) result.firstLoopPreparationReturned = true;
+            if (pc == 0x8000ac74u) result.systemTaskReturned = true;
+            if (pc == 0x8000ac80u || pc == 0x8000ac8cu || pc == 0x8000ac98u)
+                ++result.taskPassesReturned;
             if (pc == 0x80177c6cu && state.gpr[3] == 1) {
                 result.sceneModuleLinked = true;
                 sceneModule = ppc_read_u32(state, state.gpr[31] + 0x70u);
@@ -252,6 +255,8 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.sceneConstructorsReturned) text << result.sceneConstructorsReturned << " original scene C++ constructors returned. ";
     if (result.sceneInitializationEntered) text << "Original mode-41 scene initialization entered. ";
     if (result.scenePrologReturned) text << "Original scene prolog returned to SystemTask. ";
+    if (result.systemTaskReturned) text << "Original SystemTask returned to main. ";
+    if (result.taskPassesReturned) text << result.taskPassesReturned << " original task-list passes returned. ";
     text << "This is NOT a playable game boot; no complete game-loop iteration or rendered frame is verified.";
     return text.str();
 }

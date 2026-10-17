@@ -103,7 +103,9 @@ int main(int argc, char** argv) {
         };
         // Original mode-41 dispatcher case and its state-24 asset setup case.
         std::vector<uint32_t> pending = {start + image.entryOffsets()[0],
-            kBase + 0x45b8cu, kBase + 0x46040u, kBase + 0x28d0u};
+            kBase + 0x45b8cu, kBase + 0x46040u, kBase + 0x28d0u,
+            kBase + 0x954u, kBase + 0x958u, kBase + 0x263cu, kBase + 0x3e734u,
+            kBase + 0x42ecu, kBase + 0x42f4u};
         const auto& ctors = image.sections().at(2);
         for (uint32_t offset = 0; offset < ctors.size; offset += 4) {
             const auto found = std::find_if(image.relocations().begin(), image.relocations().end(),
@@ -111,6 +113,24 @@ int main(int argc, char** argv) {
                     return fixup.patchSection == 2 && fixup.patchOffset == offset;
                 });
             if (found != image.relocations().end()) pending.push_back(canonicalTarget(*found));
+        }
+        // Original asset-update state switch, guarded to seven cases by cmplwi.
+        const auto& data = image.sections().at(5);
+        for (uint32_t index = 0; index < 7; ++index) {
+            const auto found = std::find_if(image.relocations().begin(), image.relocations().end(),
+                [&](const RelRelocation& fixup) {
+                    return fixup.patchSection == 5 &&
+                        fixup.patchOffset == 0x4bbe8u - data.fileOffset + index * 4;
+                });
+            if (found == image.relocations().end()) {
+                throw std::runtime_error("Missing original asset-update switch relocation.");
+            }
+            const auto target = canonicalTarget(*found);
+            if (found->type != 1 || target < kBase + 0x3e778u ||
+                target > kBase + 0x3e7c4u || (target & 3u) != 0) {
+                throw std::runtime_error("Original asset-update switch exceeds its bounded case range.");
+            }
+            pending.push_back(target);
         }
         std::set<uint32_t> visited, leaders(pending.begin(), pending.end());
         std::map<uint32_t, uint32_t> instructions;

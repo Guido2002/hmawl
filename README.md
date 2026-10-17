@@ -140,8 +140,12 @@ relocates its sections, entries and available imports and clears its allocated B
 **The relocated module prolog now executes all 28 original C++ constructors,
 loads mode-41 scene assets and returns to SystemTask.**
 The static native bindings follow the actual allocation instead of requiring a fixed REL address.
-With `--max-blocks 50000000`, the next untranslated SystemTask phase is
-`PC=0x80177D30`, `LR=0x8017760C` (**exit code 3**, not a successful game boot).
+**SystemTask now returns to main, followed by all three original task-list passes.**
+The original member-function dispatcher calls the scene, audio, managers and camera
+in priority order. The scene asset enters its first fade state and registers the
+original fade task; updates build the real deferred audio/camera and camera/scene queues.
+With `--max-blocks 50000000`, the next untranslated deferred audio callback is
+`PC=0x8012AB20`, `LR=0x8017D29C` (**exit code 3**, not a successful game boot).
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
 imports), 31 real reads totaling 8819232 bytes, original archive initialization,

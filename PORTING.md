@@ -76,8 +76,10 @@ to main. Eleven subsequent original startup objects now return, and an actual
 Original SystemTask now loads `wlp1.rel` and original `OSLink` returns success.
 Its relocatable native prolog executes all 28 original C++ constructors, loads
 mode-41 scene assets and returns to SystemTask at `0x80177C88`.
-With `--max-blocks 50000000`, the next untranslated SystemTask phase is
-`PC=0x80177D30`, LR `0x8017760C`.
+SystemTask and all three original task-list passes now return to main. The first
+scene/asset update registers the original fade task and builds real deferred queues.
+With `--max-blocks 50000000`, the next untranslated deferred audio callback is
+`PC=0x8012AB20`, LR `0x8017D29C`.
 The original main loop enters its first iteration and its reset/update/resource/
 audio preparation returns, but no complete iteration or rendered frame is verified.
 The default one-million-block limit can expire earlier.
@@ -751,8 +753,19 @@ queue. Full runtime scheduling and device services are still needed.
   tables, state-24 scene publication, 52 worker exits, one alarm exception,
   54 thread-context returns and a drained queue. Observed/unobserved full runs
   must have identical CPU/RAM, timer, PCM and DSP state. The prolog returns at
-  `0x80177C88`; the next untranslated phase is `0x80177D30`, LR `0x8017760C`.
+  `0x80177C88`; this originally reached `0x80177D30`, LR `0x8017760C`.
   No rendered frame or complete main-loop iteration is claimed.
+- [x] Complete the first three original task-list passes after scene loading.
+  Compile the connected SystemTask filter setup, task framework, original
+  `__ptmf_scall`, registered update callbacks and scene/asset update switch.
+  Keep the recursive discovery limit unchanged and compile 1522 relocatable
+  scene instructions. Verify seven first-pass callbacks and eight callbacks
+  in each subsequent pass, including the newly registered fade task, in exact
+  priority order with original member-function descriptors and update masks.
+  Verify asset state 0-to-1, active fade, manager list toggle and ordered
+  audio/camera and camera/scene deferred queues. Preserve full observed/unobserved
+  CPU/RAM, interrupt, PCM and DSP parity. Main reaches the deferred audio callback
+  at `0x8012AB20`, LR `0x8017D29C`; rendering and a completed loop remain unverified.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -965,11 +978,14 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue original SystemTask from `0x80177D30`
-   toward the first scene update and completed main-loop iteration.
+1. Continue the original deferred audio callback from `0x8012AB20`,
+   LR `0x8017D29C`, through the queued camera/scene work toward Screen and a
+   completed main-loop iteration.
    The genuine relocated `wlp1.rel` prolog now executes all 28 constructors,
    followed by original scene/asset loading and 31 completed DVD reads.
-   Its prolog now returns with the loader queue drained. Scope discovery to the actual transition and
+   Its prolog now returns with the loader queue drained; SystemTask and all three
+   task-list passes return with real deferred queues and the first fade registered.
+   Scope discovery to the actual transition and
    indirect targets instead of lifting the existing compiler safety bound. The first
    game-system initialization now returns to main in the Windows runner; original
    DSP lists reach their own output/completion and resume waiting for new work.

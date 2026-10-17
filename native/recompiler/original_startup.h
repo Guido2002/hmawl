@@ -45,6 +45,8 @@ struct OriginalStartupResult {
     bool scenePrologEntered = false;
     bool sceneInitializationEntered = false;
     bool scenePrologReturned = false;
+    bool systemTaskReturned = false;
+    uint32_t taskPassesReturned = 0;
     uint32_t sceneConstructorsReturned = 0;
     uint32_t constructorsReturned = 0;
     uint32_t startupObjectsReturned = 0;

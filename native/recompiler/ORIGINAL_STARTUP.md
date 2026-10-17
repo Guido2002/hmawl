@@ -220,8 +220,10 @@ eleven original startup objects and a real DVD resource read. The original loop
 enters at `0x8000AC34`; preparation returns through `0x8000AC64` before the
 SystemTask transition at `0x8017755C`. It now loads and links the original scene REL,
 executes all 28 module constructors and enters mode-41 scene initialization.
-Manager initialization and resource loading now return; the next dependency is
-SystemTask at `0x80177D30`, LR `0x8017760C`.
+Manager initialization, resource loading and SystemTask now return. All three
+original task-list passes execute, including the first scene/asset update and
+fade registration. The next dependency is the deferred audio callback
+at `0x8012AB20`, LR `0x8017D29C`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -395,7 +397,8 @@ and a real 128-byte resource read. Its original main loop enters the first itera
 reset dispatch, update-mask calculation and resource/audio preparation return.
 SystemTask now loads and links `wlp1.rel` through the original SDK `OSLink`.
 The relocated prolog executes its 28 constructors, loads scene assets and returns.
-The next untranslated phase is `PC=0x80177D30`, LR `0x8017760C`;
+SystemTask and the three original task-list passes now return. The next
+untranslated deferred audio callback is `PC=0x8012AB20`, LR `0x8017D29C`;
 DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier.
 Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
@@ -450,8 +453,9 @@ Tests inspect all 15170 relocation records: DOL/self imports resolve to the actu
 addresses, while imports from not-yet-loaded modules retain their original bytes.
 OSLink success does not mean those other modules have been loaded.
 Corrupt original OSLink code is rejected before the linked-module milestone.
-The scene generator now compiles 1005 original instructions: the prolog, all 28
-constructors, mode-41 scene creation and the connected state-24 asset setup case.
+The scene generator now compiles 1522 original instructions: the prolog, all 28
+constructors, mode-41 scene creation, the connected state-24 asset setup case,
+scene/asset update callbacks and the original seven-case asset-update switch.
 Branches, PC and LR use the actual code allocation. For relocated immediates,
 the operation/register selection remains statically compiled; only the operand at
 its known instruction location is loaded after the dispatcher's exact word check.
@@ -491,9 +495,22 @@ call chain without resetting its execution budget.
 The deterministic full run verifies one timer exception/return and 54 thread
 context returns. Observed/unobserved runs must match CPU/RAM, timer deadlines,
 interrupts, PCM and DSP state. The module prolog returns at `0x80177C88`, followed
-by the original post-load Memory check. The next dependency is SystemTask
-`0x80177D30`, LR `0x8017760C`; no completed loop iteration or rendered scene
-is verified. No runtime PPC decoder or
+by the original post-load Memory check.
+
+SystemTask's filter setup now returns to main, followed by the three task-list
+passes at `0x8017CD7C`, `0x8017CDC0` and `0x8017CE04`. The original
+`__ptmf_scall` executes the actual three-word virtual member-function descriptors;
+no native replacement dispatch or injected callback completion is used.
+The deterministic fixture verifies seven first-pass callbacks and eight in each
+subsequent pass, in priority order, using the original `0x800` update mask.
+The asset-update switch's seven targets come from checked section-5 ADDR32
+relocations. The original asset changes state 0 to 1, starts its fade and registers
+the fade task, which participates in the later passes. The task-list manager
+toggles its active list; its constructor reset is checked separately before update.
+The deferred queues contain the actual audio/camera and camera/scene subobjects
+in sorted order. Their first audio callback is the next untranslated dependency:
+`0x8012AB20`, LR `0x8017D29C`. No deferred queue completion, completed loop
+iteration or rendered scene is verified. No runtime PPC decoder or
 replacement linker is involved in the original startup path.
 An independent `BUILD_TESTING=OFF` Windows build reaches the same dependency;
 production execution does not depend on the test generator or fixture bindings.

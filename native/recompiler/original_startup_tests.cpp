@@ -1271,6 +1271,9 @@ int main(int argc, char** argv) {
                 uint32_t systemTask = 0;
                 unsigned managerReturns = 0, loaderWorkers = 0, loaderExits = 0, alarmHandlers = 0;
                 unsigned archiveHandles = 0;
+                std::array<std::vector<uint32_t>, 3> taskMethods;
+                std::array<std::vector<uint32_t>, 3> taskObjects;
+                unsigned taskPass = 0;
                 SceneConstructors sceneConstructors;
                 const auto transfer = pcmState.transferDisc;
                 pcmState.transferDisc = [&](const std::array<uint32_t, 3>& command, uint32_t length) {
@@ -1302,6 +1305,24 @@ int main(int argc, char** argv) {
                 };
                 bindPcmTest(pcmState, pcmTicks, submittedFrames);
                 const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 50000000, 128, [&](uint32_t pc) {
+                    if (pc == 0x8000ac80u || pc == 0x8000ac8cu || pc == 0x8000ac98u) {
+                        Require(taskPass < 3 && pc == 0x8000ac80u + taskPass * 12,
+                                "Original main did not complete its three task passes in order.");
+                        ++taskPass;
+                    }
+                    if (pc == 0x80235d7cu && pcmState.lr == 0x8017d0c0u) {
+                        Require(taskPass < taskMethods.size(), "Unexpected additional original task pass.");
+                        const auto descriptor = pcmState.gpr[12];
+                        const std::array<uint32_t, 3> slots = {0x10, 0x18, 0x14};
+                        Require(ppc_read_u32(pcmState, descriptor) == 0 &&
+                                    ppc_read_u32(pcmState, descriptor + 4) == slots[taskPass] &&
+                                    ppc_read_u32(pcmState, descriptor + 8) == 0x10 &&
+                                    pcmState.gpr[4] == 0x800 && taskMethods[taskPass].size() < 8,
+                                "Original task member-function descriptor or update mask changed.");
+                        const auto vtable = ppc_read_u32(pcmState, pcmState.gpr[3] + 0x10);
+                        taskMethods[taskPass].push_back(ppc_read_u32(pcmState, vtable + slots[taskPass]));
+                        taskObjects[taskPass].push_back(pcmState.gpr[3]);
+                    }
                     if (pc == 0x8015468cu) ++managerReturns;
                     if (pc == 0x80199dd4u) ++loaderWorkers;
                     if (pc == 0x801b72bcu) ++loaderExits;
@@ -1340,6 +1361,13 @@ int main(int argc, char** argv) {
                                     pc == objectReturns[returnedObjects.size()] && pcmState.gpr[3] != 0,
                                 "Original startup objects did not return in main's original order.");
                         returnedObjects.push_back(pcmState.gpr[3]);
+                        if (pc == objectReturns.back()) {
+                            const auto manager = pcmState.gpr[3];
+                            Require(ppc_read_u32(pcmState, manager + 0x4c) == 0 &&
+                                        ppc_read_u32(pcmState, manager + 0xa8) == 0 &&
+                                        ppc_read_u32(pcmState, manager + 0xac) == 0,
+                                    "Original manager constructor did not reset both task lists.");
+                        }
                     }
                     if (pc == 0x8017acf0u) ++fileCallbacks;
                     if (pc == 0x80176754u && !sceneModule) ++arrayConstructors;
@@ -1382,10 +1410,11 @@ int main(int argc, char** argv) {
                           << " thread context returns=" << pcmState.threadContextReturns
                           << " archive handles=" << archiveHandles << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            sceneProlog != 0 && pcmResult.pc == 0x80177d30u && pcmResult.lr == 0x8017760cu &&
+                            sceneProlog != 0 && pcmResult.pc == 0x8012ab20u && pcmResult.lr == 0x8017d29cu &&
                             pcmResult.sceneModuleLinked && pcmResult.scenePrologEntered &&
                             pcmResult.sceneInitializationEntered && pcmResult.scenePrologReturned &&
-                            pcmResult.sceneConstructorsReturned == 28 &&
+                            pcmResult.sceneConstructorsReturned == 28 && pcmResult.systemTaskReturned &&
+                            pcmResult.taskPassesReturned == 3 &&
                             sceneConstructors.returned == 28 && !sceneConstructors.active &&
                             !dispatcher.Contains(sceneProlog) &&
                             pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
@@ -1426,6 +1455,42 @@ int main(int argc, char** argv) {
                             ppc_read_u32(pcmState, scene + 0x34) == 24 &&
                             ppc_read_u32(pcmState, loader + 0xcc) == ppc_read_u32(pcmState, loader + 0xd0),
                         "Original scene was not published with state-24 assets and a fully drained loader queue.");
+                const std::array<std::vector<uint32_t>, 3> expectedMethods = {{
+                    {0x80177648u, 0x8012a3c8u, 0x8017649cu, 0x80197f58u,
+                     0x80154bd0u, 0x8008616cu, sceneModule + 0x3e734u},
+                    {0x801782e4u, 0x80009540u, 0x80009540u, 0x80009540u,
+                     0x80009540u, 0x80086634u, sceneModule + 0x42f4u, 0x801894ecu},
+                    {0x801782ecu, 0x80009538u, 0x80009538u, 0x80009538u,
+                     0x80009538u, 0x8008663cu, sceneModule + 0x42ecu, 0x801894f4u}
+                }};
+                Require(taskPass == 3 && taskMethods == expectedMethods &&
+                            taskObjects[0].front() == systemTask &&
+                            taskObjects[0].back() == ppc_read_u32(pcmState, scene + 0x18) &&
+                            std::equal(taskObjects[0].begin(), taskObjects[0].end(), taskObjects[1].begin()) &&
+                            taskObjects[1] == taskObjects[2],
+                        "Original task passes did not call every registered virtual method in priority order.");
+                const auto fade = taskObjects[1].back();
+                Require(ppc_read_u32(pcmState, taskObjects[0].back() + 0x1a4) == 1 &&
+                            ppc_read_u32(pcmState, fade + 0x60) == 1 &&
+                            ppc_read_u32(pcmState, fade + 0x14) == 0x10000,
+                        "Original asset update did not enter its first fade state and register the fade task.");
+                const auto queuedObjects = [&](uint32_t list) {
+                    std::vector<uint32_t> objects;
+                    auto node = ppc_read_u32(pcmState, list + 4);
+                    while (node != list + 0x14) {
+                        Require(objects.size() < 8, "Original deferred task queue is cyclic or exceeds its bound.");
+                        objects.push_back(ppc_read_u32(pcmState, node + 0xc));
+                        node = ppc_read_u32(pcmState, node + 4);
+                    }
+                    return objects;
+                };
+                const auto tasks = ppc_read_u32(pcmState, 0x8034923cu);
+                Require(queuedObjects(tasks + 0x74) ==
+                            std::vector<uint32_t>{taskObjects[0][1] + 0x30, taskObjects[0][5] + 0x30} &&
+                            queuedObjects(tasks + 0x48) ==
+                            std::vector<uint32_t>{taskObjects[0][5] + 0x18, taskObjects[0][4] + 0x18} &&
+                            pcmResult.argument3 == taskObjects[0][1] + 0x30,
+                        "Original updates did not build the ordered audio/camera and camera/scene deferred queues.");
                 TestScenePlacements(image, sceneBytes);
                 const auto camera = returnedObjects.front();
                 Require(ppc_read_u32(pcmState, 0x80349228u) == camera &&
@@ -1451,10 +1516,10 @@ int main(int argc, char** argv) {
                 }
                 const auto manager = returnedObjects.back();
                 Require(ppc_read_u32(pcmState, 0x803491e0u) == manager &&
-                            ppc_read_u32(pcmState, manager + 0x4c) == 0 &&
+                            ppc_read_u32(pcmState, manager + 0x4c) == 1 &&
                             ppc_read_u32(pcmState, manager + 0xa8) == 0 &&
                             ppc_read_u32(pcmState, manager + 0xac) == 0,
-                        "Original final manager did not reset both task lists.");
+                        "Original manager did not toggle its active task list during its first update.");
                 for (unsigned offset : {0x50u, 0x7cu}) {
                     Require(ppc_read_u32(pcmState, manager + offset + 0x10) == 0x802c9a14u &&
                                 ppc_read_u32(pcmState, manager + offset + 0x24) == 0x802c9a14u &&
@@ -1510,6 +1575,7 @@ int main(int argc, char** argv) {
                             plainResult.sceneModuleLinked &&
                             plainResult.scenePrologEntered && plainResult.sceneInitializationEntered &&
                             plainResult.scenePrologReturned && plainResult.sceneConstructorsReturned == 28 &&
+                            plainResult.systemTaskReturned && plainResult.taskPassesReturned == 3 &&
                             !dispatcher.Contains(sceneProlog) &&
                             plainResult.startupObjectsReturned == pcmResult.startupObjectsReturned &&
                             plainResult.resourceReadNotifications == pcmResult.resourceReadNotifications &&
