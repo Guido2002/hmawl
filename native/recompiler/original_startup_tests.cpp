@@ -1280,7 +1280,13 @@ int main(int argc, char** argv) {
                 std::vector<uint32_t> deferredMethods, cleanupMethods;
                 std::vector<uint32_t> updateQueue, sceneQueue, renderQueue;
                 std::vector<uint32_t> renderMethods, renderCleanupMethods;
-                std::vector<uint32_t> secondPassMethods;
+                std::array<std::vector<uint32_t>, 3> secondTaskMethods;
+                unsigned secondTaskPass = 0;
+                std::vector<uint32_t> secondSceneQueue, secondRenderQueue, secondRenderMethods;
+                bool secondCameraReset = false;
+                uint32_t textureHeader = 0, textureObject = 0, quad = 0, transform = 0;
+                unsigned textureInitializations = 0, quadSubmissions = 0, fadeInterpolations = 0;
+                std::array<uint8_t, 4> fadeColor{};
                 std::array<uint32_t, 7> cameraProjection{};
                 bool perspectiveChecked = false, perspectiveApplied = false, projectionRestored = false;
                 bool firstLoopQueuesCleared = false;
@@ -1303,7 +1309,7 @@ int main(int argc, char** argv) {
                     std::vector<uint32_t> objects;
                     auto node = ppc_read_u32(pcmState, list + 4);
                     while (node != list + 0x14) {
-                        Require(objects.size() < 8, "Original deferred task queue is cyclic or exceeds its bound.");
+                        Require(objects.size() < 16, "Original deferred task queue is cyclic or exceeds its bound.");
                         objects.push_back(ppc_read_u32(pcmState, node + 0xc));
                         node = ppc_read_u32(pcmState, node + 4);
                     }
@@ -1422,11 +1428,18 @@ int main(int argc, char** argv) {
                     }
                     if (pc == 0x8017d018u) {
                         const auto tasks = ppc_read_u32(pcmState, 0x8034923cu);
-                        updateQueue = queuedObjects(tasks + 0x74);
-                        sceneQueue = queuedObjects(tasks + 0x48);
+                        if (loopEntries == 1) {
+                            updateQueue = queuedObjects(tasks + 0x74);
+                            sceneQueue = queuedObjects(tasks + 0x48);
+                        } else {
+                            Require(queuedObjects(tasks + 0x74) == updateQueue,
+                                    "Original second loop did not rebuild its audio/camera updates.");
+                            secondSceneQueue = queuedObjects(tasks + 0x48);
+                        }
                     }
                     if (pc == 0x8017cf70u) {
-                        renderQueue = queuedObjects(ppc_read_u32(pcmState, 0x8034923cu) + 0x48);
+                        auto& queue = loopEntries == 1 ? renderQueue : secondRenderQueue;
+                        queue = queuedObjects(ppc_read_u32(pcmState, 0x8034923cu) + 0x48);
                         const auto gx = ppc_read_u32(pcmState, pcmState.gpr[2] - 0x5f48u);
                         for (unsigned index = 0; index < cameraProjection.size(); ++index)
                             cameraProjection[index] = ppc_read_u32(pcmState, gx + 0x4d8 + index * 4);
@@ -1475,12 +1488,19 @@ int main(int argc, char** argv) {
                         const auto descriptor = pcmState.gpr[12];
                         const auto vtable = ppc_read_u32(pcmState, pcmState.gpr[3] +
                             ppc_read_u32(pcmState, descriptor) + ppc_read_u32(pcmState, descriptor + 8));
-                        auto& methods = pcmState.lr == 0x8017d180u ? renderMethods : renderCleanupMethods;
-                        Require(methods.size() < 8, "Original render callback or cleanup repeated unexpectedly.");
-                        methods.push_back(ppc_read_u32(pcmState, vtable + ppc_read_u32(pcmState, descriptor + 4)));
+                        if (loopEntries == 1) {
+                            auto& methods = pcmState.lr == 0x8017d180u ? renderMethods : renderCleanupMethods;
+                            Require(methods.size() < 8, "Original render callback or cleanup repeated unexpectedly.");
+                            methods.push_back(ppc_read_u32(pcmState, vtable + ppc_read_u32(pcmState, descriptor + 4)));
+                        } else {
+                            Require(pcmState.lr == 0x8017d180u && secondRenderMethods.size() < 16,
+                                    "Original second render pass cleaned up or repeated before its draw boundary.");
+                            secondRenderMethods.push_back(
+                                ppc_read_u32(pcmState, vtable + ppc_read_u32(pcmState, descriptor + 4)));
+                        }
                     }
                     if (pc == 0x80235d7cu &&
-                        (pcmState.lr == 0x8017d29cu || pcmState.lr == 0x8017d2fcu)) {
+                        (pcmState.lr == 0x8017d29cu || pcmState.lr == 0x8017d2fcu) && loopEntries == 1) {
                         const auto descriptor = pcmState.gpr[12];
                         const auto vtable = ppc_read_u32(pcmState, pcmState.gpr[3] +
                             ppc_read_u32(pcmState, descriptor) + ppc_read_u32(pcmState, descriptor + 8));
@@ -1489,9 +1509,10 @@ int main(int argc, char** argv) {
                         methods.push_back(ppc_read_u32(pcmState, vtable + ppc_read_u32(pcmState, descriptor + 4)));
                     }
                     if (pc == 0x8000ac80u || pc == 0x8000ac8cu || pc == 0x8000ac98u) {
-                        Require(taskPass < 3 && pc == 0x8000ac80u + taskPass * 12,
+                        auto& pass = loopEntries == 1 ? taskPass : secondTaskPass;
+                        Require(pass < 3 && pc == 0x8000ac80u + pass * 12,
                                 "Original main did not complete its three task passes in order.");
-                        ++taskPass;
+                        ++pass;
                     }
                     if (pc == 0x80235d7cu && pcmState.lr == 0x8017d0c0u && loopEntries == 1) {
                         Require(taskPass < taskMethods.size(), "Unexpected additional original task pass.");
@@ -1507,9 +1528,61 @@ int main(int argc, char** argv) {
                         taskObjects[taskPass].push_back(pcmState.gpr[3]);
                     }
                     if (pc == 0x80235d7cu && pcmState.lr == 0x8017d0c0u && loopEntries == 2) {
-                        Require(secondPassMethods.size() < 8, "Original second-loop task pass exceeded its bound.");
+                        Require(secondTaskPass < 3 && secondTaskMethods[secondTaskPass].size() < 8,
+                                "Original second-loop task pass exceeded its bound.");
                         const auto vtable = ppc_read_u32(pcmState, pcmState.gpr[3] + 0x10);
-                        secondPassMethods.push_back(ppc_read_u32(pcmState, vtable + 0x10));
+                        const std::array<uint32_t, 3> slots = {0x10, 0x18, 0x14};
+                        secondTaskMethods[secondTaskPass].push_back(
+                            ppc_read_u32(pcmState, vtable + slots[secondTaskPass]));
+                    }
+                    if (loopEntries == 2 && pc == 0x8000ac54u) {
+                        secondCameraReset = ppc_read_u8(pcmState, ppc_read_u32(pcmState, 0x80349238u) + 4) == 0;
+                    }
+                    if (loopEntries == 2 && pc == 0x80188ffcu) {
+                        double fraction;
+                        const auto bits = pcmState.fpr[1].ps0;
+                        std::memcpy(&fraction, &bits, sizeof(fraction));
+                        Require(fraction >= 0 && fraction <= 1,
+                                "Original fade interpolation fraction is outside its time interval.");
+                        const auto inverse = float(1.0f - float(fraction));
+                        for (unsigned channel = 0; channel < fadeColor.size(); ++channel) {
+                            const auto from = ppc_read_u8(pcmState, pcmState.gpr[5] + channel);
+                            const auto to = ppc_read_u8(pcmState, pcmState.gpr[6] + channel);
+                            fadeColor[channel] = static_cast<uint8_t>(
+                                float(float(float(from) * inverse) + float(float(to) * float(fraction))));
+                        }
+                        ++fadeInterpolations;
+                    }
+                    if (loopEntries == 2 && pc == 0x80188e6cu) {
+                        for (unsigned channel = 0; channel < fadeColor.size(); ++channel)
+                            Require(ppc_read_u8(pcmState, pcmState.gpr[31] + 0x54 + channel) == fadeColor[channel],
+                                    "Original fade did not publish the independently interpolated RGBA channels.");
+                    }
+                    if (loopEntries == 2 && pc == 0x801a6130u) {
+                        Require(textureInitializations++ == 0 && pcmState.gpr[5] == 2,
+                                "Original scene selected an unexpected texture or initialized it repeatedly.");
+                        textureHeader = ppc_read_u32(pcmState,
+                            ppc_read_u32(pcmState, pcmState.gpr[3] + 8) + pcmState.gpr[5] * 8);
+                        textureObject = pcmState.gpr[4];
+                        Require(ppc_read_u16(pcmState, textureHeader + 2) == 431 &&
+                                    ppc_read_u16(pcmState, textureHeader) == 147 &&
+                                    ppc_read_u32(pcmState, textureHeader + 4) == 5,
+                                "Original scene texture is not its 431x147 RGB5A3 disc image.");
+                    }
+                    if (loopEntries == 2 && pc == 0x80181a38u) transform = pcmState.gpr[3];
+                    if (loopEntries == 2 && pc == 0x80181b9cu) {
+                        Require(pcmState.gpr[3] == textureObject &&
+                                    (ppc_read_u32(pcmState, textureObject + 8) & 0xffffffu) ==
+                                        (uint32_t(ppc_read_u16(pcmState, textureHeader + 2) - 1) |
+                                         (uint32_t(ppc_read_u16(pcmState, textureHeader) - 1) << 10) |
+                                         (ppc_read_u32(pcmState, textureHeader + 4) << 20)) &&
+                                    (ppc_read_u32(pcmState, textureObject + 12) & 0xffffffu) ==
+                                        ((ppc_read_u32(pcmState, textureHeader + 8) >> 5) & 0x1fffffu),
+                                "Original texture object lost its disc dimensions, format or image address.");
+                    }
+                    if (loopEntries == 2 && pc == 0x80181c4cu) {
+                        Require(quadSubmissions++ == 0, "Original first quad was submitted more than once.");
+                        quad = pcmState.gpr[31];
                     }
                     if (pc == 0x8015468cu) ++managerReturns;
                     if (pc == 0x80199dd4u) ++loaderWorkers;
@@ -1599,12 +1672,13 @@ int main(int argc, char** argv) {
                           << " thread context returns=" << pcmState.threadContextReturns
                           << " archive handles=" << archiveHandles << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            sceneProlog != 0 && pcmResult.pc == 0x800e10c4u &&
-                            pcmResult.lr == sceneModule + 0x3ec80u &&
+                            sceneProlog != 0 && pcmResult.pc == 0x80181c80u &&
+                            pcmResult.lr == 0x80181c4cu &&
+                            pcmResult.reason == "Native GX draw command requires a vertex/renderer backend." &&
                             pcmResult.sceneModuleLinked && pcmResult.scenePrologEntered &&
                             pcmResult.sceneInitializationEntered && pcmResult.scenePrologReturned &&
                             pcmResult.sceneConstructorsReturned == 28 && pcmResult.systemTaskReturned &&
-                            pcmResult.taskPassesReturned == 3 &&
+                            pcmResult.taskPassesReturned == 6 &&
                             pcmResult.deferredUpdatesReturned && pcmResult.deferredUpdateQueueCleared &&
                             pcmResult.screenPreparationReturned && pcmResult.renderQueuePrepared &&
                             pcmResult.renderPassReturned && pcmResult.renderQueueCleared &&
@@ -1693,10 +1767,78 @@ int main(int argc, char** argv) {
                             perspectiveChecked && perspectiveApplied && projectionRestored &&
                             firstLoopQueuesCleared,
                         "Original sorted render pass, perspective restoration or queue cleanup did not complete.");
-                Require(secondPassMethods == expectedMethods[0] &&
-                            queuedObjects(tasks + 0x74) == updateQueue &&
-                            queuedObjects(tasks + 0x48) == sceneQueue,
-                        "Original second loop did not resume its first task pass and rebuild the deferred queues.");
+                auto expectedSecondMethods = expectedMethods;
+                expectedSecondMethods[0].push_back(0x80188d58u);
+                Require(secondTaskPass == 3 && secondTaskMethods == expectedSecondMethods &&
+                            queuedObjects(tasks + 0x74).empty() &&
+                            queuedObjects(tasks + 0x48) == secondRenderQueue,
+                        "Original second loop did not complete all task passes or preserve its interrupted render queue.");
+                const auto sprite = taskObjects[0].back() + 0x4c;
+                std::vector<uint32_t> expectedSceneQueue = {
+                    sceneQueue[0], 0x802f37b0u, 0x802f3738u, 0x802f3788u,
+                    0x802f37d8u, sprite + 0x138, 0x802f3800u, 0x802f3760u, sceneQueue[1]};
+                const auto fadePriority = ppc_read_u32(pcmState, fade + 0x68);
+                Require(fadePriority == 0xdfffu || fadePriority == 0xcffeu,
+                        "Original fade selected an unexpected render phase.");
+                expectedSceneQueue.insert(std::find_if(expectedSceneQueue.begin(), expectedSceneQueue.end(),
+                    [&](uint32_t node) { return ppc_read_u32(pcmState, node + 0x14) > fadePriority; }), fade + 0x18);
+                auto expectedRenderQueue = expectedSceneQueue;
+                expectedRenderQueue.insert(expectedRenderQueue.begin(),
+                    {0x80315534u, 0x80315558u, 0x8031557cu, 0x803155a0u, 0x803155c4u});
+                expectedRenderQueue.insert(expectedRenderQueue.begin() + 6, 0x803155e8u);
+                Require(secondSceneQueue == expectedSceneQueue && secondRenderQueue == expectedRenderQueue &&
+                            secondRenderMethods == std::vector<uint32_t>{
+                                0x80181e7cu, 0x80181efcu, 0x80181f6cu, 0x80181f94u, 0x80181fd4u,
+                                0x8008660cu, 0x80182048u, 0x800e0f70u, 0x800e0fa4u,
+                                0x800e0f34u, 0x800e1004u, 0x800e3574u} &&
+                            ppc_read_u32(pcmState, 0x803492acu) == 0xffffffffu &&
+                            fadeInterpolations == 1 && textureInitializations == 1 && quadSubmissions == 1,
+                        "Original second scene did not register and dispatch its complete ordered textured draw chain.");
+                const auto& draw = *pcmState.graphics;
+                std::cout << "Quad registers: " << std::hex << draw.cp[0x50] << "/" << draw.cp[0x60] << "/"
+                          << draw.cp[0x70] << " texture " << draw.bp[0x88] << "/" << draw.bp[0x94]
+                          << " object " << ppc_read_u32(pcmState, textureObject + 8) << "/"
+                          << ppc_read_u32(pcmState, textureObject + 12) << std::dec
+                          << " copies/clears " << draw.efb->copies << "/" << draw.efb->clears << '\n';
+                Require(draw.cp[0x50] == 0x2200 && draw.cp[0x60] == 1 &&
+                            (draw.cp[0x70] & 0x3fe1e1ffu) == 0x01216006u &&
+                            (draw.bp[0x88] & 0xffffffu) ==
+                                (ppc_read_u32(pcmState, textureObject + 8) & 0xffffffu) &&
+                            (draw.bp[0x94] & 0xffffffu) ==
+                                (ppc_read_u32(pcmState, textureObject + 12) & 0xffffffu),
+                        "Original GX vertex format or texture binding differs from the rejected quad.");
+                Require(draw.commands.size() == 16 && draw.commands[0] == 0x80 &&
+                            draw.commands[1] == 0 && draw.commands[2] == 4 &&
+                            draw.efb->copies == 3 && draw.efb->clears == 3 &&
+                            ppc_read_u32(pcmState, sprite + 0x108) != 0 && quad != 0 && transform != 0,
+                        "Original four-vertex quad was not retained at the explicit unsupported renderer boundary.");
+                for (unsigned index = 0; index < 4; ++index) {
+                    const auto positionOffset = index < 2 ? 4u : 6u;
+                    const auto shift = index % 2 == 0 ? 8u : 0u;
+                    Require(draw.commands[3 + index] ==
+                                uint8_t(ppc_read_u16(pcmState, quad + positionOffset) >> shift) &&
+                                draw.commands[7 + index] ==
+                                    ppc_read_u8(pcmState, pcmResult.stack + 8 + index) &&
+                                draw.commands[11 + index] == ppc_read_u8(pcmState, quad + 0x1c + index),
+                            "Original rejected GX quad lost its signed position, RGBA or texture coordinate bytes.");
+                }
+                Require(draw.commands[15] == ppc_read_u8(pcmState, quad + 0x20) &&
+                            readFloat(transform + 0x14) == 0 && readFloat(transform + 0x18) == 0 &&
+                            readFloat(transform + 0x1c) == 0,
+                        "Original first quad has unexpected texture data or rotation.");
+                const std::array<double, 12> quadMatrix = {
+                    readFloat(transform + 0x20), 0, 0,
+                    float(readFloat(transform + 8) + int16_t(ppc_read_u16(pcmState, transform + 0x38))),
+                    0, readFloat(transform + 0x24), 0,
+                    float(readFloat(transform + 12) + int16_t(ppc_read_u16(pcmState, transform + 0x3a))),
+                    0, 0, readFloat(transform + 0x28), readFloat(transform + 16)};
+                for (unsigned index = 0; index < quadMatrix.size(); ++index) {
+                    const auto bits = draw.xf[index];
+                    float coefficient;
+                    std::memcpy(&coefficient, &bits, sizeof(coefficient));
+                    Require(coefficient == quadMatrix[index],
+                            "Original quad's paired-single transform differs from its scale and translation.");
+                }
                 const auto listener = ppc_read_u32(pcmState, taskObjects[0][1] + 0x54) + 0x84;
                 const std::array<uint32_t, 12> listenerInverse = {
                     0xbf800000u, 0x80000000u, 0, 0x80000000u, 0x3f800000u, 0x80000000u,
@@ -1711,7 +1853,7 @@ int main(int argc, char** argv) {
                 const auto camera = returnedObjects.front();
                 const auto view = ppc_read_u32(pcmState, 0x80349238u);
                 Require(ppc_read_u32(pcmState, view + 8) == camera + 0x9c &&
-                            firstCameraActive == 1 && ppc_read_u8(pcmState, view + 4) == 0,
+                            firstCameraActive == 1 && secondCameraReset && ppc_read_u8(pcmState, view + 4) == 1,
                         "Original camera did not publish its view and reset its active flag for the second loop.");
                 for (unsigned row = 0; row < 3; ++row) {
                     double origin = readFloat(camera + 0x9c + row * 16 + 12);
@@ -1828,7 +1970,7 @@ int main(int argc, char** argv) {
                             plainResult.sceneModuleLinked &&
                             plainResult.scenePrologEntered && plainResult.sceneInitializationEntered &&
                             plainResult.scenePrologReturned && plainResult.sceneConstructorsReturned == 28 &&
-                            plainResult.systemTaskReturned && plainResult.taskPassesReturned == 3 &&
+                            plainResult.systemTaskReturned && plainResult.taskPassesReturned == 6 &&
                             plainResult.deferredUpdatesReturned && plainResult.deferredUpdateQueueCleared &&
                             plainResult.screenPreparationReturned && plainResult.renderQueuePrepared &&
                             plainResult.renderPassReturned && plainResult.renderQueueCleared &&

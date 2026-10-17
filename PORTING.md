@@ -86,10 +86,12 @@ save/apply/restore and viewport restoration execute original code.
 The original post-render callback lookup, retrace gate, Screen framebuffer
 exchange, timing and controller update now return, followed by the original
 backedge. The first complete main-loop iteration is verified; the second iteration
-begins and reaches its original scene-asset update.
-With `--max-blocks 50000000`, the next untranslated dependency is
-`PC=0x800E10C4`, LR `scene module base + 0x3EC80`
-(`0x8039DC20` at the current allocation).
+completes all three task passes and reaches the original textured draw chain.
+The scene schedules six render-state tasks, a resource-backed sprite and the
+interpolated fade. Original nested resource traversal, transform and disc texture
+binding lead to a four-vertex GX quad. With `--max-blocks 50000000`, execution
+stops explicitly at `PC=0x80181C80`, LR `0x80181C4C` because native GX drawing
+requires a vertex/renderer backend. The pending draw is retained, not discarded.
 No rendered game frame is verified.
 The default one-million-block limit can expire earlier.
 A deterministic disc fixture verifies all 15170 relocation records, section addresses,
@@ -813,8 +815,16 @@ queue. Full runtime scheduling and device services are still needed.
   verify second-loop list toggling, view reset and deferred-queue reconstruction.
   Extend observed/unobserved parity to GX/FIFO/EFB/XFB and VI state.
   The independent `BUILD_TESTING=OFF` Windows runner verifies exactly one complete
-  iteration, then stops at scene-update dependency `0x800E10C4`,
-  LR `scene module base + 0x3EC80`. No visible game frame or connected input is claimed.
+  iteration. No visible game frame or connected input is claimed.
+- [x] Execute the second scene's connected render chain: original clear-color,
+  alpha blending, depth and textured vertex state; resource-backed sprite
+  scheduling; timed RGBA fade interpolation; nested resource-entry traversal;
+  paired-single scale/translation; original texture object/region selection and
+  four-vertex quad submission. Complete all six task-list passes across the two
+  iterations. Verify the 16-node render queue, ordered callback prefix, real
+  texture dimensions/format/address, transform and pending primitive payload.
+  Stop explicitly at `PC=0x80181C80`, LR `0x80181C4C` on the unimplemented native
+  vertex/renderer backend, without completing the second render pass or frame.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -1027,9 +1037,14 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue the second iteration's scene-asset update from `0x800E10C4`,
-   LR `scene module base + 0x3EC80`, toward the original fade/draw task setup
-   and real geometry. The first complete original main-loop iteration now
+1. Implement a checked native vertex/renderer path for the actual textured quad
+   now submitted by original code. The current explicit hardware boundary is
+   `PC=0x80181C80`, LR `0x80181C4C`; the pending GX command is opcode `0x80`,
+   vertex format 0, four vertices with direct signed-16 XY, RGBA8 and float ST.
+   Preserve 32-byte FIFO burst timing and incomplete payloads, use the actual
+   CP/XF/BP state and the 431x147 RGB5A3 disc texture, and reject unsupported formats explicitly.
+   Verify resulting EFB pixels before claiming rendering; then connect actual
+   XFB pixel scanout and Windows presentation. The first complete original main-loop iteration now
    returns through retrace gating, framebuffer exchange, timing and controller
    publication and takes its backedge with the stack preserved. No visible
    geometry or displayed game frame is verified.
@@ -1037,6 +1052,8 @@ systems and the executable can be packaged without the GameCube build toolchain.
    followed by original scene/asset loading and 31 completed DVD reads.
    Its prolog now returns with the loader queue drained; SystemTask and all three
    task-list passes return with real deferred queues and the first fade registered.
+   The second iteration also completes its task passes, updates the timed fade,
+   schedules the 16-node render queue and reaches original texture binding/drawing.
    Deferred audio/camera updates now finish, their queue clears and original
    Screen frame preparation returns before the kernel schedules six render tasks.
    Scope discovery to the actual transition and

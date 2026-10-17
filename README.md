@@ -158,9 +158,16 @@ The optional post-render callback lookup, retrace gate, original Screen framebuf
 exchange, timing update and controller sampling/publication return. Execution
 takes the original backedge and starts the second iteration with the same stack.
 The disconnected controllers remain disconnected; no host input is synthesized.
-With `--max-blocks 50000000`, the next untranslated scene-update dependency is
-`PC=0x800E10C4`, `LR=scene module base + 0x3EC80`
-(`0x8039DC20` at the current allocation; **exit code 3**, not a successful game boot).
+**The second iteration now reaches the first original textured GX quad.**
+All three second-loop task passes return, including timed fade interpolation.
+Six original scene render-state tasks, the resource-backed sprite and fade task
+join the kernel/camera/scene queue. The original nested resource traversal,
+paired-single transform, disc texture initialization/binding and four-vertex
+quad submission execute without replacement game code.
+With `--max-blocks 50000000`, execution stops at `PC=0x80181C80`,
+`LR=0x80181C4C`: `Native GX draw command requires a vertex/renderer backend.`
+The real FIFO retains the quad header and partial first vertex; drawing is not
+silently accepted. This is **exit code 3**, not a rendered frame or successful game boot.
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
 imports), 31 real reads totaling 8819232 bytes, original archive initialization,

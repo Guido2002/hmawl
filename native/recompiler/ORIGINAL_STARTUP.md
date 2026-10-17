@@ -227,8 +227,9 @@ preparation now return. The kernel schedules its original render tasks; all eigh
 render callbacks, render queue cleanup and frame draw-sync submission now return.
 The first complete main-loop iteration now executes its original post-render
 lookup, retrace gate, framebuffer exchange, timing and controller update and takes
-the backedge. The next dependency is the second loop's scene update at
-`0x800E10C4`, LR `scene module base + 0x3EC80`.
+the backedge. The second loop completes its task passes and reaches its original
+textured quad. The current hardware dependency is `PC=0x80181C80`,
+LR `0x80181C4C`: native GX requires a vertex/renderer backend.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -408,9 +409,8 @@ scheduling return. All eight scheduled render callbacks, render queue cleanup an
 frame draw-sync submission return. The original post-render lookup, retrace gate,
 framebuffer exchange, timing and controller publication now return and execution
 takes the original backedge. One complete main-loop iteration is verified.
-The next untranslated second-loop scene-update dependency is
-`PC=0x800E10C4`, LR `scene module base + 0x3EC80`
-(`0x8039DC20` at the current allocation);
+The second loop reaches the first original textured quad and stops explicitly at
+`PC=0x80181C80`, LR `0x80181C4C` on the missing native vertex/renderer backend;
 DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier.
 Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
@@ -561,10 +561,36 @@ completed-loop counter; tail markers alone do not. A damaged backedge fails
 code validation without reporting completion or leaking relocated bindings.
 The first iteration completes and the second resumes with the same main stack.
 It resets the camera's active flag, toggles the manager's list again, rebuilds
-the deferred queues and reaches the scene-asset update dependency at
-`0x800E10C4`, LR `scene module base + 0x3EC80`.
+the deferred queues and completes its three task passes, including the newly
+registered fade's timed update.
 First-loop queue/fade/camera assertions are captured before those second-loop
 changes, rather than weakening their expected values.
+
+The second scene update runs original `0x800E10C4` through `0x800E11CC`,
+registering six global render-state nodes. The RGBA clear color is white.
+Original `0x800E34E4` selects the resource-backed sprite's render phase and
+virtual node accessor; `0x80188D58` interpolates each fade channel and schedules
+the fade's render node. The kernel merges these with its six tasks and the
+camera/scene nodes into a 16-node queue. All six task-list passes across the two
+iterations return. The second render pass reaches the sprite after its original
+blend, depth, clear-color and textured-vertex-state callbacks.
+
+The sprite callback traverses the actual loaded resource hierarchy through
+`0x801816C4`, `0x801818C4` and `0x80181A38`. Original paired-single matrix scale
+and translation execute before `GXLoadPosMtxImm`. The game selects disc texture
+index 2 (431x147 RGB5A3), constructs its SDK texture object and resolves the original texture-region
+callback. Complete SDK vertex-descriptor and attribute-format jump tables are
+selected rather than replacing their indirect branches. The original quad has
+direct signed-16 XY, RGBA8 and float ST attributes, format 0 and four vertices.
+
+At `PC=0x80181C80`, LR `0x80181C4C`, the actual 32-byte write-gather burst exposes
+opcode `0x80` to native GX. It fails explicitly with
+`Native GX draw command requires a vertex/renderer backend.`
+The FIFO retains the header and partial first vertex; it is not consumed as a
+successful draw. Tests verify the sorted queue and callback prefix, independently
+interpolated RGBA, disc texture dimensions/format/image address, CP/BP bindings,
+scale/translation matrix and original position/color/texture-coordinate bytes.
+The second render pass and second main-loop iteration have not completed.
 
 At this boundary the deterministic PCM fixture has 4210 completed DMA periods,
 673760 submitted zero frames, 4207 original handlers and 4204 original callbacks/
