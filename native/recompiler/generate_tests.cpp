@@ -249,6 +249,46 @@ int main(int argc, char** argv) {
             EmitNativeBinding(functions, bindings, fixture.state, 0x80235f20u, 0x10,
                               "ppc_80235F20");
             bindings << ",\n    };\n}\n";
+            bindings << "#include \"native_cache.h\"\n"
+                        "static std::vector<NativeTranslation> UsDecodeQueueTranslations() {\n"
+                        "    return {\n";
+            for (const auto& range : std::vector<std::pair<uint32_t, uint32_t>>{
+                     {0x8019a5e0u, 0xc}, {0x8019a5ecu, 0x24},
+                     {0x8019a610u, 0x4c}, {0x8019a65cu, 0xc},
+                     {0x8019a6bcu, 0x13c}, {0x80190ef4u, 0x30},
+                     {0x80190944u, 0x70}, {0x80190f54u, 0x24},
+                     {0x8019a480u, 0x108}, {0x801786a0u, 0x34},
+                     {0x80178d7cu, 0xc0}, {0x80178ff8u, 0x170},
+                     {0x80179344u, 0x1dc},
+                     {0x80190f24u, 0x30}, {0x8017860cu, 0x54},
+                     {0x80178660u, 0x40}, {0x80178a44u, 0x12c},
+                     {0x80178b70u, 0x164}, {0x80178cd4u, 0x1c},
+                     {0x80178cf0u, 0x8c}, {0x80235ec4u, 0x20},
+                     {0x80235f10u, 0x20}}) {
+                bindings << "        ";
+                if (range.first >= 0x80235ec4u) {
+                    EmitNativeBinding(functions, bindings, fixture.state, range.first,
+                                      range.second, range.first == 0x80235ec4u ?
+                                          "ppc_80235EC4" : "ppc_80235F10");
+                } else {
+                    EmitNativeBinding(functions, bindings, fixture.state, range.first, range.second);
+                }
+                bindings << ",\n";
+            }
+            bindings << "        ";
+            EmitNativeBinding(functions, bindings, fixture.state, 0x801b23c8u, 0x30,
+                              "NativeFlushDataRange");
+            bindings << ",\n    };\n}\n";
+            bindings << "static std::vector<NativeTranslation> UsDvdCloseTranslations() {\n"
+                        "    return {\n";
+            for (const auto& range : std::vector<std::pair<uint32_t, uint32_t>>{
+                     {0x801ba734u, 0x24}, {0x801bd448u, 0xac},
+                     {0x801bd4f4u, 0x24}, {0x801b7a40u, 0x104}}) {
+                bindings << "        ";
+                EmitNativeBinding(functions, bindings, fixture.state, range.first, range.second);
+                bindings << ",\n";
+            }
+            bindings << "    };\n}\n";
             generated += functions.str() + bindings.str();
         } else if (argc == 4) {
             std::ifstream input(argv[2], std::ios::binary);
@@ -261,11 +301,28 @@ int main(int argc, char** argv) {
             }
             const auto image = DolImage::Parse(bytes);
             for (const auto& range : std::vector<std::pair<uint32_t, uint32_t>>{
-                {0x80003154u, 4}, {0x800032b0u, 0x90}, {0x80003100u, 0x40},
+                {0x80003154u, 0x110}, {0x800032b0u, 0x90}, {0x80003100u, 0x40},
                 {0x80003140u, 12}, {0x8000314cu, 8}, {0x800031f8u, 0x68},
                 {0x80003488u, 0x24}, {0x80003340u, 0xc0},
                 {0x800054e4u, 0x30}, {0x80005514u, 0xb8},
-                {0x800055ccu, 0x50}}) {
+                {0x800055ccu, 0x50}, {0x801b0bccu, 0x88},
+                {0x801b0b44u, 0x110}, {0x801b15a4u, 0x24},
+                {0x801b0b2cu, 0x128},
+                {0x801b0ae4u, 8}, {0x801b0aecu, 8},
+                {0x801b1584u, 0x54}, {0x801b24e0u, 0x10},
+                {0x801b24f0u, 0x14}, {0x801b2388u, 0x14},
+                {0x801b0a28u, 8}, {0x801b0a30u, 8},
+                {0x80003400u, 0x24},
+                {0x801b0a18u, 8}, {0x801b0a20u, 8},
+                {0x801b0a38u, 8}, {0x801b0a40u, 8},
+                {0x801b27e4u, 0x98}, {0x801b29dcu, 0xf4},
+                {0x801b34ecu, 0x218}, {0x801b3a44u, 0x14},
+                {0x801b3a6cu, 0x24}, {0x801d33e4u, 0x50},
+                {0x801d3348u, 0x28},
+                {0x801b0de0u, 0x4c}, {0x801b119cu, 0x1c},
+                {0x801b7bf0u, 0x18}, {0x801b7c10u, 0x64},
+                {0x801b0a9cu, 0x20}, {0x801b0abcu, 0x28},
+                {0x80235e00u, 0x4c}, {0x80235e4cu, 0x4c}}) {
                 generated += RecompileFunction(range.first,
                     image.ReadWords(range.first, range.second)) + '\n';
             }
@@ -276,6 +333,31 @@ int main(int argc, char** argv) {
                      {XForm(3, 4, 5, opcode, true)});
             }
             Emit(output, 0x3000, {0x34640001u});
+            Emit(output, 0x9300, {(31u << 26) | (3u << 21) | (83u << 1)});
+            Emit(output, 0x9310, {(31u << 26) | (3u << 21) | (146u << 1)});
+            Emit(output, 0x9320, {0x7c78e2a6u});
+            Emit(output, 0x9330, {0x7c78e3a6u});
+            Emit(output, 0x9340, {0x7c70faa6u});
+            Emit(output, 0x9350, {0x7c70fba6u});
+            Emit(output, 0x9360, {0x7c0004acu});
+            Emit(output, 0x9370, {0x4c00012cu});
+            Emit(output, 0x9380, {0x7c79faa6u});
+            Emit(output, 0x9390, {0x7c79fba6u});
+            for (unsigned extended = 0; extended < 2; ++extended) {
+                for (unsigned record = 0; record < 2; ++record) {
+                    for (unsigned alias = 0; alias < 3; ++alias) {
+                        Emit(output, 0x9400u + (extended * 6 + record * 3 + alias) * 16u,
+                            {XForm(alias == 0 ? 3 : alias == 1 ? 4 : 5, 4, 5,
+                                   extended ? 138 : 10, record != 0)});
+                    }
+                }
+            }
+            output << "static void (*const AddCarryTestFunctions[])(PpcState&) = {\n";
+            for (unsigned i = 0; i < 12; ++i) {
+                output << "    ppc_0000" << std::hex << std::uppercase
+                       << (0x9400u + i * 16u) << ",\n" << std::dec;
+            }
+            output << "};\n";
             Emit(output, 0x3010, {0x3464ffffu});
             Emit(output, 0x3020, {0x7c6903a6u, 0x7c8902a6u});
             Emit(output, 0x3030, {0x7c6103a6u, 0x7c8102a6u});
@@ -320,6 +402,108 @@ int main(int argc, char** argv) {
                                   0x38600009u, 0x4e800020u});
             Emit(output, 0x40e0, {0x38630001u, 0x2c030003u, 0x4d800420u,
                                   0x4e800020u});
+            unsigned transfer = 0;
+            for (unsigned opcode : {50u, 51u, 54u, 55u}) {
+                Emit(output, 0x5000u + transfer++ * 16u,
+                    {(opcode << 26) | (3u << 21) | (3u << 16) | 0xfff8u});
+            }
+            for (unsigned opcode : {599u, 631u, 727u, 759u}) {
+                Emit(output, 0x5000u + transfer++ * 16u, {XForm(3, 3, 4, opcode)});
+            }
+            Emit(output, 0x5080, {(50u << 26) | (3u << 21) | 0x100u});
+            Emit(output, 0x5090, {(54u << 26) | (3u << 21) | 0x100u});
+            Emit(output, 0x50a0, {XForm(3, 0, 4, 599)});
+            Emit(output, 0x50b0, {XForm(3, 0, 4, 727)});
+            Emit(output, 0x50c0, {XForm(3, 3, 3, 631)});
+            Emit(output, 0x50d0, {XForm(3, 3, 3, 759)});
+            unsigned unary = 0;
+            for (unsigned opcode : {72u, 40u, 264u, 136u}) {
+                for (bool record : {false, true}) {
+                    for (unsigned source : {4u, 3u}) {
+                        Emit(output, 0x5200u + unary++ * 16u,
+                            {(63u << 26) | (3u << 21) | (source << 11) |
+                             (opcode << 1) | static_cast<unsigned>(record)});
+                    }
+                }
+            }
+            std::vector<uint32_t> fpscrFunctions;
+            for (uint32_t fieldMask = 0; fieldMask < 256; ++fieldMask) {
+                for (uint32_t record = 0; record < 2; ++record) {
+                    const uint32_t address = 0x6000u +
+                        static_cast<uint32_t>(fpscrFunctions.size()) * 4u;
+                    Emit(output, address, {(63u << 26) | (fieldMask << 17) |
+                                          (4u << 11) | (711u << 1) | record});
+                    fpscrFunctions.push_back(address);
+                }
+            }
+            for (uint32_t field = 0; field < 8; ++field) {
+                for (uint32_t value = 0; value < 16; ++value) {
+                    for (uint32_t record = 0; record < 2; ++record) {
+                        const uint32_t address = 0x6000u +
+                            static_cast<uint32_t>(fpscrFunctions.size()) * 4u;
+                        Emit(output, address, {(63u << 26) | (field << 23) |
+                                              (value << 12) | (134u << 1) | record});
+                        fpscrFunctions.push_back(address);
+                    }
+                }
+            }
+            output << "static void (*const FpscrTestFunctions[])(PpcState&) = {\n";
+            for (uint32_t address : fpscrFunctions) {
+                output << "    ppc_" << std::hex << std::uppercase;
+                output.width(8);
+                output.fill('0');
+                output << address << ",\n" << std::dec;
+            }
+            output << "};\n";
+            Emit(output, 0x7000u, {(63u << 26) | (3u << 21) | (583u << 1)});
+            Emit(output, 0x7010u, {(63u << 26) | (3u << 21) | (583u << 1) | 1u});
+            for (unsigned i = 0; i < 8; ++i) {
+                Emit(output, 0x8000u + i * 16u, {
+                    XForm(3, 16u + i, 28, 467), XForm(4, 16u + i, 28, 339)});
+                for (unsigned single = 0; single < 2; ++single) {
+                    for (unsigned update = 0; update < 2; ++update) {
+                        Emit(output, 0x8100u + (i * 4u + single * 2u + update) * 16u, {
+                            ((56u + update) << 26) | (3u << 21) | (3u << 16) |
+                            (single << 15) | (i << 12) | 0xffcu});
+                        Emit(output, 0x9000u + (i * 4u + single * 2u + update) * 16u, {
+                            (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) |
+                            (single << 10) | (i << 7) | ((6u + update * 32u) << 1)});
+                    }
+                }
+            }
+            Emit(output, 0x8400, {(56u << 26) | (3u << 21) | 0x100u});
+            Emit(output, 0x9200, {(4u << 26) | (3u << 21) | (4u << 11) | (6u << 1)});
+            Emit(output, 0x9210, {(4u << 26) | (3u << 21) | (3u << 16) |
+                                 (3u << 11) | (38u << 1)});
+            Emit(output, 0x9220, {(4u << 26) | (3u << 21) | (3u << 16) | (6u << 1)});
+            unsigned paired = 0;
+            for (unsigned opcode : {72u, 40u, 264u, 136u, 528u, 560u, 592u, 624u}) {
+                for (unsigned record = 0; record < 2; ++record) {
+                    for (unsigned alias = 0; alias < 3; ++alias) {
+                        const unsigned left = alias == 1 ? 3 : 4;
+                        const unsigned right = alias == 2 ? 3 : 5;
+                        Emit(output, 0x8500u + paired++ * 16u, {
+                            (4u << 26) | (3u << 21) | ((opcode >= 528 ? left : 0u) << 16) |
+                            (right << 11) | (opcode << 1) | record});
+                    }
+                }
+            }
+            output << "static void (*const PairedLoadTestFunctions[])(PpcState&) = {\n";
+            for (unsigned i = 0; i < 32; ++i) {
+                output << "    ppc_0000" << std::hex << std::uppercase
+                       << (0x8100u + i * 16u) << ",\n" << std::dec;
+            }
+            output << "};\nstatic void (*const IndexedPairedLoadTestFunctions[])(PpcState&) = {\n";
+            for (unsigned i = 0; i < 32; ++i) {
+                output << "    ppc_0000" << std::hex << std::uppercase
+                       << (0x9000u + i * 16u) << ",\n" << std::dec;
+            }
+            output << "};\nstatic void (*const PairedMoveTestFunctions[])(PpcState&) = {\n";
+            for (unsigned i = 0; i < paired; ++i) {
+                output << "    ppc_0000" << std::hex << std::uppercase
+                       << (0x8500u + i * 16u) << ",\n" << std::dec;
+            }
+            output << "};\n";
             generated += output.str();
         }
         std::ofstream output(argv[argc - 1], std::ios::binary);

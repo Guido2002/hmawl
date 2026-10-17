@@ -3,6 +3,7 @@
 #include "native_dvd_reader.h"
 #include "native_dvd_queue.h"
 #include "native_interrupts.h"
+#include "native_cache.h"
 #include "dol_image.h"
 #include "sha1.h"
 
@@ -326,6 +327,40 @@ void DvdTestCallback(PpcState& state) {
     state.pc = state.lr;
 }
 
+void TestNativeCache() {
+    PpcState state;
+    state.memory.resize(0x1800000);
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.lr = 0x80003000u;
+    state.xer = 0xe0000000u;
+    for (const auto& range : std::vector<std::pair<uint32_t, uint32_t>>{
+             {0x80000000u, 1}, {0x80000001u, 31}, {0xc000001fu, 2},
+             {0x817fffffu, 1}, {0x017fffffu, 1}, {0xcc000000u, 0}}) {
+        state.gpr[3] = range.first;
+        state.gpr[4] = range.second;
+        state.cr = 0x12345678u;
+        const auto before = state.memory;
+        NativeFlushDataRange(state);
+        Require(state.memory == before && state.gpr[3] == range.first &&
+                    state.gpr[4] == range.second && state.pc == state.lr &&
+                    state.xer == 0xe0000000u &&
+                    state.cr == ((range.second == 0 ? 3u : 5u) << 28 | 0x02345678u),
+                "Coherent native cache flush changed payloads, arguments or comparison flags.");
+    }
+    for (const auto& range : std::vector<std::pair<uint32_t, uint32_t>>{
+             {0xcc000000u, 32}, {0x817fffffu, 2}, {0xfffffff0u, 32}}) {
+        state.gpr[3] = range.first;
+        state.gpr[4] = range.second;
+        const auto before = state.memory;
+        state.pc = 0x801b23c8u;
+        Reject([&] { NativeFlushDataRange(state); },
+               range.first == 0xfffffff0u ? "overflows" :
+               range.first == 0xcc000000u ? "not mapped" : "boundary");
+        Require(state.memory == before && state.pc == 0x801b23c8u,
+                "Invalid native cache range wrote memory or returned success.");
+    }
+}
+
 void TestNativeInterrupts() {
     for (bool initial : {false, true}) {
         for (uint32_t value : {0u, 1u, 2u, 0x80000000u, 0xffffffffu}) {
@@ -387,6 +422,13 @@ void TestNativeDvdQueue() {
         guest.cr = 0;
         guest.xer = 0;
         guest.ctr = 0;
+        guest.fpr.fill({0, 0});
+        guest.fpscr = 0;
+        guest.gqr.fill(0);
+        guest.msr = 0;
+        guest.hid2 = 0;
+        guest.hid0 = 0;
+        guest.l2cr = 0;
     };
     state.gpr[1] = 0x8035cfa0u;
     state.lr = 0x80003000u;
@@ -394,6 +436,20 @@ void TestNativeDvdQueue() {
     state.cr = 0x12345678;
     state.xer = 0xe0000000;
     state.ctr = 0x87654321;
+    for (unsigned reg = 0; reg < 32; ++reg) {
+        state.fpr[reg] = {UINT64_C(0x7ff0000000000001) + reg,
+                          UINT64_C(0xfff8123456780000) + reg};
+    }
+    state.fpscr = 0xf1234567u;
+    const auto floatingRegisters = state.fpr;
+    for (unsigned reg = 0; reg < 8; ++reg) {
+        state.gqr[reg] = 0x12345678u + reg;
+    }
+    const auto quantizationRegisters = state.gqr;
+    state.msr = 0x2000u;
+    state.hid2 = 0xa0000000u;
+    state.hid0 = 0xc000u;
+    state.l2cr = 0x80000000u;
     const auto prepare = [&](uint32_t block, uint32_t destination, uint32_t priority) {
         const auto offset = ppc_memory_offset(state, block, 0x3c);
         std::fill(state.memory.begin() + offset, state.memory.begin() + offset + 0x3c, 0);
@@ -434,6 +490,10 @@ void TestNativeDvdQueue() {
                     std::equal(registers.begin(), registers.end(), std::begin(state.gpr)) &&
                     state.cr == 0x12345678 && state.xer == 0xe0000000 &&
                     state.ctr == 0x87654321 && state.lr == 0x80003000u &&
+                    state.fpr == floatingRegisters && state.fpscr == 0xf1234567u &&
+                    state.gqr == quantizationRegisters &&
+                    state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
+                    state.hid0 == 0xc000u && state.l2cr == 0x80000000u &&
                     state.pc == 0x80003004u && state.externalInterruptsEnabled,
                 "DVD completion priority/FIFO, status, result or CPU restoration differs.");
     }
@@ -453,6 +513,11 @@ void TestNativeDvdQueue() {
                 std::equal(beforeCancel.begin() + buffer, beforeCancel.begin() + buffer + 32,
                            state.memory.begin() + buffer) && !queue.Pump(),
             "DVD queued cancellation did not deliver -3 then cancellation success without data.");
+    Require(state.fpr == floatingRegisters && state.fpscr == 0xf1234567u &&
+                state.gqr == quantizationRegisters &&
+                state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
+                state.hid0 == 0xc000u && state.l2cr == 0x80000000u,
+            "DVD cancellation callback damaged floating-point context.");
     const auto rejectSubmit = [&](const char* message) {
         const auto before = state.memory;
         const auto pending = queue.pending();
@@ -498,9 +563,16 @@ void TestNativeDvdQueue() {
     }
     prepare(info, output, 0);
     queue.Submit(state);
-    dvdCallbackAction = [&](PpcState&) {
+    dvdCallbackAction = [&](PpcState& guest) {
         Reject([&] { queue.Pump(); }, "non-reentrant");
         state.externalInterruptsEnabled = true;
+        guest.fpr.fill({UINT64_MAX, UINT64_MAX});
+        guest.fpscr = 0;
+        guest.gqr.fill(UINT32_MAX);
+        guest.msr = UINT32_MAX;
+        guest.hid2 = UINT32_MAX;
+        guest.hid0 = UINT32_MAX;
+        guest.l2cr = UINT32_MAX;
         throw std::runtime_error("Intentional DVD callback failure.");
     };
     const uint32_t previousPc = state.pc;
@@ -511,6 +583,11 @@ void TestNativeDvdQueue() {
                            std::begin(state.gpr)) &&
                 ppc_read_u32(state, info + 0xc) == 0 && state.externalInterruptsEnabled,
             "Throwing DVD callback was replayed, left the pump locked or corrupted CPU context.");
+    Require(state.fpr == floatingRegisters && state.fpscr == 0xf1234567u &&
+                state.gqr == quantizationRegisters &&
+                state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
+                state.hid0 == 0xc000u && state.l2cr == 0x80000000u,
+            "Throwing DVD callback damaged floating-point context.");
     prepare(info, output, 0);
     queue.Submit(state);
     dispatcher.Unregister(1);
@@ -815,6 +892,7 @@ int main() {
         TestClz();
         TestNativeDvdReader();
         TestNativeInterrupts();
+        TestNativeCache();
         TestNativeDvdQueue();
         TestSha1();
         TestRandomAccessAndExtraction();

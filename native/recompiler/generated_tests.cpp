@@ -2,6 +2,9 @@
 #include "native_dispatch.h"
 #include "native_time_base.h"
 
+#include <cfenv>
+#include <cmath>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -55,6 +58,839 @@ void TestLogicalRegisters() {
             }
         }
     }
+}
+
+void TestFloatingPointTransfers() {
+    using Function = void (*)(PpcState&);
+    const Function transfers[] = {
+        ppc_00005000, ppc_00005010, ppc_00005020, ppc_00005030,
+        ppc_00005040, ppc_00005050, ppc_00005060, ppc_00005070,
+        ppc_00005080, ppc_00005090, ppc_000050A0, ppc_000050B0,
+        ppc_000050C0, ppc_000050D0};
+    const uint64_t values[] = {
+        0, UINT64_C(0x8000000000000000), UINT64_C(0x3ff0000000000000),
+        UINT64_C(0xbff8000000000000), 1, UINT64_C(0x000fffffffffffff),
+        UINT64_C(0x0010000000000000), UINT64_C(0x7fefffffffffffff),
+        UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000),
+        UINT64_C(0x7ff0000000001234), UINT64_C(0xfff8123456789abc)};
+    for (uint32_t alias : {0u, 0x80000000u, 0xc0000000u}) {
+        PpcState state;
+        state.memoryMap = PpcMemoryMap::GameCubeRam;
+        state.memory.resize(kGameCubeRamSize, 0xcc);
+        for (unsigned index = 0; index < 14; ++index) {
+            const bool load = index < 8 ? index % 4 < 2 :
+                              index == 8 || index == 10 || index == 12;
+            const bool update = index == 1 || index == 3 || index == 5 ||
+                                index == 7 || index >= 12;
+            for (uint64_t bits : values) {
+                state.gpr[0] = 0xdeadbeefu;
+                state.gpr[3] = index < 4 ? alias + 0x108u :
+                               index < 8 ? alias + 0xf8u :
+                               index >= 12 ? alias + 0x80u : 0x12345678u;
+                state.gpr[4] = index < 8 ? 8u : alias + 0x100u;
+                state.cr = 0x12345678u;
+                state.xer = 0xe0000000u;
+                state.fpscr = 0xfedcba98u;
+                for (unsigned reg = 0; reg < 32; ++reg) {
+                    state.fpr[reg] = {UINT64_C(0x7ff8000000000000) + reg,
+                                      UINT64_C(0x8000000000000000) + reg};
+                }
+                state.fpr[3].ps0 = load ? ~bits : bits;
+                auto expected = state.fpr;
+                if (load) {
+                    expected[3].ps0 = bits;
+                }
+                ppc_write_u64(state, alias + 0x100u, load ? bits : ~bits);
+                const uint32_t base = state.gpr[3];
+                const uint32_t offset = state.gpr[4];
+                const uint32_t effective = index >= 12 ? base + base : alias + 0x100u;
+                transfers[index](state);
+                Require(state.fpr == expected &&
+                            state.gpr[3] == (update ? effective : base) &&
+                            state.gpr[4] == offset && state.gpr[0] == 0xdeadbeefu &&
+                            state.cr == 0x12345678u && state.xer == 0xe0000000u &&
+                            state.fpscr == 0xfedcba98u &&
+                            state.pc == 0x5004u + index * 16u,
+                        "Compiled double transfer changed raw bits, paired lanes, flags or base.");
+                Require(ppc_read_u64(state, alias + 0x100u) == bits &&
+                            ppc_read_u8(state, alias + 0xffu) == 0xcc &&
+                            ppc_read_u8(state, alias + 0x108u) == 0xcc,
+                        "Compiled double transfer lost big-endian bytes or overwrote guards.");
+            }
+        }
+        state.gpr[3] = alias + 0x10cu;
+        state.fpr[3].ps0 = UINT64_C(0x7ff0123456789abc);
+        ppc_00005020(state);
+        state.fpr[3].ps0 = 0;
+        ppc_00005000(state);
+        Require(state.fpr[3].ps0 == UINT64_C(0x7ff0123456789abc),
+                "Double transfer incorrectly required eight-byte rather than word alignment.");
+        for (unsigned index = 0; index < 8; ++index) {
+            for (uint32_t address : {0x101u, 0x102u, 0x103u,
+                                     0x817ffffcu, 0xcc000000u, 0xfffffffcu}) {
+                state.gpr[3] = index < 4 ? address + 8u : address;
+                state.gpr[4] = 0;
+                const uint32_t base = state.gpr[3];
+                const auto before = state.fpr;
+                const auto memory = state.memory;
+                bool rejected = false;
+                try {
+                    transfers[index](state);
+                } catch (const std::runtime_error& error) {
+                    Require((address & 3u) != 0 &&
+                                std::string(error.what()).find("Unaligned PowerPC") !=
+                                    std::string::npos,
+                            "Double transfer failed for an unexpected non-memory reason.");
+                    rejected = true;
+                } catch (const std::out_of_range&) {
+                    rejected = true;
+                }
+                Require(rejected && state.fpr == before && state.memory == memory &&
+                            state.gpr[3] == base,
+                        "Invalid double transfer partially updated memory, FPR or base.");
+            }
+        }
+    }
+}
+
+void TestFloatingPointMoves() {
+    using Function = void (*)(PpcState&);
+    const Function functions[] = {
+        ppc_00005200, ppc_00005210, ppc_00005220, ppc_00005230,
+        ppc_00005240, ppc_00005250, ppc_00005260, ppc_00005270,
+        ppc_00005280, ppc_00005290, ppc_000052A0, ppc_000052B0,
+        ppc_000052C0, ppc_000052D0, ppc_000052E0, ppc_000052F0};
+    for (unsigned operation = 0; operation < 16; ++operation) {
+        for (uint64_t bits : {UINT64_C(0), UINT64_C(0x8000000000000000),
+                             UINT64_C(1), UINT64_C(0x3ff0000000000000),
+                             UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000),
+                             UINT64_C(0x7ff0123456789abc), UINT64_C(0xfff8123456789abc)}) {
+            for (uint32_t flags : {0u, 0xf1234567u, 0x81234567u, 0x12345678u}) {
+                PpcState state;
+                for (unsigned reg = 0; reg < 32; ++reg) {
+                    state.gpr[reg] = reg + 0x100;
+                    state.fpr[reg] = {reg + 0x200u, reg + 0x300u};
+                }
+                const unsigned source = (operation & 1u) ? 3u : 4u;
+                state.fpr[source].ps0 = bits;
+                auto expected = state.fpr;
+                const uint64_t sign = UINT64_C(0x8000000000000000);
+                expected[3].ps0 = operation / 4 == 0 ? bits :
+                                  operation / 4 == 1 ? bits ^ sign :
+                                  operation / 4 == 2 ? bits & ~sign : bits | sign;
+                state.fpscr = flags;
+                state.cr = 0x12345678u;
+                state.xer = 0xe0000000u;
+                functions[operation](state);
+                const uint32_t cr = (operation & 2u) ?
+                    (0x10345678u | ((flags >> 4) & 0x0f000000u)) : 0x12345678u;
+                Require(state.fpr == expected && state.fpscr == flags &&
+                            state.cr == cr && state.xer == 0xe0000000u,
+                        "Compiled FPR move/sign operation changed payload, paired lane or CR1.");
+                for (unsigned reg = 0; reg < 32; ++reg) {
+                    Require(state.gpr[reg] == reg + 0x100,
+                            "Compiled floating-point move changed an integer register.");
+                }
+            }
+        }
+    }
+}
+
+uint32_t ExpectedFpscr(uint32_t original, uint32_t source, uint32_t fieldMask) {
+    uint32_t result = original;
+    for (unsigned field = 0; field < 8; ++field) {
+        if ((fieldMask & (0x80u >> field)) != 0) {
+            const uint32_t nibble = 0xf0000000u >> (field * 4u);
+            result = (result & ~nibble) | (source & nibble);
+        }
+    }
+    bool invalid = false;
+    for (unsigned bit : {7u, 8u, 9u, 10u, 11u, 12u, 21u, 22u, 23u}) {
+        invalid = invalid || (result & (0x80000000u >> bit)) != 0;
+    }
+    result = (result & ~0x20000000u) | (invalid ? 0x20000000u : 0);
+    bool enabledException = false;
+    for (unsigned kind = 0; kind < 5; ++kind) {
+        enabledException = enabledException ||
+            ((result & (0x20000000u >> kind)) != 0 &&
+             (result & (0x80u >> kind)) != 0);
+    }
+    return (result & ~0x40000000u) | (enabledException ? 0x40000000u : 0);
+}
+
+void TestFpscrWrites() {
+    const int rounding = std::fegetround();
+    const uint32_t values[] = {
+        0, 0xffffffffu, 0x80000000u, 0x60000000u, 0x01f80700u,
+        0x20000080u, 0x01000080u, 0x10000040u, 0x08000020u,
+        0x04000010u, 0x02000008u, 0x12345678u, 0xfedcba98u,
+        0x00000001u, 0x00000002u, 0x00000003u, 0x00000004u};
+    const auto check = [](unsigned function, uint32_t initial, uint32_t source,
+                          uint32_t expected, bool record) {
+        PpcState state;
+        for (unsigned reg = 0; reg < 32; ++reg) {
+            state.gpr[reg] = reg + 0x100;
+            state.fpr[reg] = {UINT64_C(0x7ff0000000000000) + reg,
+                              UINT64_C(0xfff8000000000000) + reg};
+        }
+        state.fpr[4].ps0 = UINT64_C(0xdeadbeef00000000) | source;
+        const auto fpr = state.fpr;
+        state.fpscr = initial;
+        state.cr = 0x12345678u;
+        state.xer = 0xe0000000u;
+        state.lr = 0x98765430u;
+        state.ctr = 0x87654321u;
+        FpscrTestFunctions[function](state);
+        const uint32_t cr = record ?
+            (0x10345678u | ((expected >> 4) & 0x0f000000u)) : 0x12345678u;
+        Require(state.fpscr == expected && state.cr == cr &&
+                    state.fpr == fpr && state.xer == 0xe0000000u &&
+                    state.lr == 0x98765430u && state.ctr == 0x87654321u &&
+                    state.pc == 0x6004u + function * 4u && state.memory.empty(),
+                "FPSCR write changed field masks, summaries, CR1, FPR lanes or unrelated state.");
+        for (unsigned reg = 0; reg < 32; ++reg) {
+            Require(state.gpr[reg] == reg + 0x100,
+                    "FPSCR write changed an integer register.");
+        }
+    };
+    for (unsigned mask = 0; mask < 256; ++mask) {
+        for (unsigned record = 0; record < 2; ++record) {
+            for (uint32_t initial : values) {
+                for (uint32_t source : values) {
+                    check(mask * 2 + record, initial, source,
+                          ExpectedFpscr(initial, source, mask), record != 0);
+                }
+            }
+            for (unsigned bit = 0; bit < 32; ++bit) {
+                const uint32_t value = 1u << bit;
+                for (uint32_t initial : {0u, 0xffffffffu}) {
+                    check(mask * 2 + record, initial, value,
+                          ExpectedFpscr(initial, value, mask), record != 0);
+                }
+            }
+        }
+    }
+    for (unsigned field = 0; field < 8; ++field) {
+        for (unsigned immediate = 0; immediate < 16; ++immediate) {
+            for (unsigned record = 0; record < 2; ++record) {
+                for (uint32_t initial : values) {
+                    check(512u + field * 32u + immediate * 2u + record,
+                          initial, 0xdeadbeefu,
+                          ExpectedFpscr(initial, immediate << (28u - field * 4u),
+                                        0x80u >> field), record != 0);
+                }
+            }
+            Require(std::fegetround() == rounding,
+                    "Guest FPSCR writes changed the host floating-point rounding mode.");
+        }
+    }
+}
+
+void TestFpscrReads() {
+    for (uint32_t flags : {0u, 0xffffffffu, 0x12345678u, 0xfedcba98u,
+                          0x20000000u, 0x40000000u}) {
+        for (bool record : {false, true}) {
+            PpcState state;
+            for (unsigned reg = 0; reg < 32; ++reg) {
+                state.fpr[reg] = {UINT64_C(0x7ff0000000000001) + reg,
+                                  UINT64_C(0x8000000000000000) + reg};
+            }
+            auto expected = state.fpr;
+            expected[3].ps0 = UINT64_C(0xfff8000000000000) | flags;
+            state.fpscr = flags;
+            state.cr = 0x12345678u;
+            state.xer = 0xe0000000u;
+            (record ? ppc_00007010 : ppc_00007000)(state);
+            const uint32_t cr = record ?
+                (0x10345678u | ((flags >> 4) & 0x0f000000u)) : 0x12345678u;
+            Require(state.fpr == expected && state.fpscr == flags &&
+                        state.cr == cr && state.xer == 0xe0000000u &&
+                        state.pc == (record ? 0x7014u : 0x7004u),
+                    "mffs lost boxed FPSCR bits, changed summaries, paired lanes or CR1.");
+        }
+    }
+}
+
+void TestSingleWidening() {
+    const std::pair<uint32_t, uint64_t> cases[] = {
+        {0, 0}, {0x80000000u, UINT64_C(0x8000000000000000)},
+        {0x3f800000u, UINT64_C(0x3ff0000000000000)},
+        {1, UINT64_C(0x36a0000000000000)},
+        {0x7fffffu, UINT64_C(0x380fffffc0000000)},
+        {0x800000u, UINT64_C(0x3810000000000000)},
+        {0x7f7fffffu, UINT64_C(0x47efffffe0000000)},
+        {0x7f800000u, UINT64_C(0x7ff0000000000000)},
+        {0xff800000u, UINT64_C(0xfff0000000000000)},
+        {0x7f800001u, UINT64_C(0x7ff0000020000000)},
+        {0xffc12345u, UINT64_C(0xfff82468a0000000)}};
+    for (const auto& value : cases) {
+        Require(ppc_widen_single_bits(value.first) == value.second,
+                "Single widening lost a signed zero, subnormal, infinity or NaN payload.");
+    }
+    uint32_t bits = 0x12345678u;
+    for (unsigned i = 0; i < 65536; ++i) {
+        bits = bits * 1664525u + 1013904223u;
+        if ((bits & 0x7f800000u) == 0x7f800000u) {
+            continue;
+        }
+        float single;
+        std::memcpy(&single, &bits, sizeof(single));
+        const double reference = single;
+        uint64_t expected;
+        std::memcpy(&expected, &reference, sizeof(expected));
+        Require(ppc_widen_single_bits(bits) == expected,
+                "Integer-only single widening differs from an exact finite conversion.");
+    }
+    for (unsigned bit = 0; bit < 23; ++bit) {
+        for (uint32_t sign : {0u, 0x80000000u}) {
+            const uint32_t value = sign | (1u << bit);
+            const uint64_t expected = (static_cast<uint64_t>(sign) << 32) |
+                                     (static_cast<uint64_t>(874u + bit) << 52);
+            Require(ppc_widen_single_bits(value) == expected,
+                    "Subnormal widening failed at a normalization boundary.");
+        }
+    }
+}
+
+void TestPairedLoads(bool indexed) {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    state.gpr[4] = 0xfffffffcu;
+    const auto* functions = indexed ? IndexedPairedLoadTestFunctions : PairedLoadTestFunctions;
+    const uint32_t entry = indexed ? 0x9000u : 0x8100u;
+    const uint32_t values[] = {0, 0x80000000u, 1, 0x7fffffu, 0x800000u,
+        0x3f800000u, 0x7f7fffffu, 0x7f800000u, 0xff800000u, 0x7f812345u, 0xffc12345u};
+    for (unsigned index = 0; index < 32; ++index) {
+        const unsigned quantization = index / 4;
+        const bool single = (index & 2u) != 0;
+        const bool update = (index & 1u) != 0;
+        for (uint32_t alias : {0u, 0x80000000u, 0xc0000000u}) {
+            for (uint32_t first : values) {
+                for (uint32_t second : values) {
+                    state.gqr.fill(0x00040000u);
+                    // Type zero ignores load scale and unrelated store quantization.
+                    state.gqr[quantization] = 0x3f00ffffu;
+                    state.gpr[3] = alias + 0x104u;
+                    state.gpr[0] = 0xdeadbeefu;
+                    state.fpr[3] = {UINT64_MAX, UINT64_MAX};
+                    auto expected = state.fpr;
+                    expected[3] = {ppc_widen_single_bits(first),
+                        single ? UINT64_C(0x3ff0000000000000) : ppc_widen_single_bits(second)};
+                    state.fpscr = 0xfedcba98u;
+                    state.cr = 0x12345678u;
+                    state.xer = 0xe0000000u;
+                    const auto gqr = state.gqr;
+                    ppc_write_u32(state, alias + 0x100u, first);
+                    ppc_write_u32(state, alias + 0x104u, second);
+                    functions[index](state);
+                    Require(state.fpr == expected && state.gqr == gqr &&
+                                state.gpr[3] == alias + (update ? 0x100u : 0x104u) &&
+                                state.gpr[0] == 0xdeadbeefu &&
+                                state.fpscr == 0xfedcba98u && state.cr == 0x12345678u &&
+                                state.xer == 0xe0000000u && state.pc == entry + 4u + index * 16u &&
+                                state.gpr[4] == 0xfffffffcu &&
+                                ppc_read_u32(state, alias + 0x100u) == first &&
+                                ppc_read_u32(state, alias + 0x104u) == second,
+                            "Paired load lost lanes, W/I/displacement fields, flags or base update.");
+                }
+            }
+        }
+        for (uint32_t address : {0x817ffffcu, 0x817ffff8u, 0xcc000000u, 0xfffffffcu}) {
+            state.gqr[quantization] = 0;
+            state.gpr[3] = address + 4u;
+            const auto before = state.fpr;
+            if (address < 0x81800000u && (address == 0x817ffff8u || single)) {
+                functions[index](state);
+            } else {
+                bool rejected = false;
+                try {
+                    functions[index](state);
+                } catch (const std::out_of_range&) {
+                    rejected = true;
+                }
+                Require(rejected && state.fpr == before && state.gpr[3] == address + 4u,
+                        "Out-of-range paired load partially updated a lane or its base.");
+            }
+        }
+        for (uint32_t type = 1; type < 4; ++type) {
+            state.gqr[quantization] = type << 16;
+            state.gpr[3] = 0x104u;
+            const auto before = state.fpr;
+            bool rejected = false;
+            try {
+                functions[index](state);
+            } catch (const std::runtime_error& error) {
+                Require(std::string(error.what()).find("quantized load type") != std::string::npos,
+                        "Unsupported paired quantization failed for an unexpected reason.");
+                rejected = true;
+            }
+            Require(rejected && state.fpr == before && state.gpr[3] == 0x104u,
+                    "Unsupported paired quantization silently succeeded or changed registers.");
+        }
+    }
+    state.gqr[0] = 0;
+    state.gpr[0] = 0xcc000000u;
+    ppc_write_u32(state, 0x100u, 0x3f800000u);
+    ppc_write_u32(state, 0x104u, 0xbf800000u);
+    ppc_00008400(state);
+    Require(state.fpr[3] == PpcFpr{UINT64_C(0x3ff0000000000000),
+                                  UINT64_C(0xbff0000000000000)},
+            "psq_l RA=0 did not use the architectural zero base.");
+    ppc_write_u32(state, 0x101u, 0x80000000u);
+    ppc_write_u32(state, 0x105u, 0x7f800001u);
+    state.gpr[3] = 0x105u;
+    const auto before = state.memory;
+    PairedLoadTestFunctions[0](state);
+    Require(state.fpr[3] == PpcFpr{UINT64_C(0x8000000000000000),
+                                  UINT64_C(0x7ff0000020000000)} && state.memory == before,
+            "Unquantized paired load did not preserve unaligned big-endian data and RAM guards.");
+}
+
+void TestPairedMoves() {
+    const uint64_t values[] = {0, UINT64_C(0x8000000000000000), 1,
+        UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff0000000000000),
+        UINT64_C(0xfff0000000000000), UINT64_C(0x7ff0000000001234),
+        UINT64_C(0xfff8123456789abc)};
+    for (unsigned index = 0; index < 48; ++index) {
+        const unsigned operation = index / 6;
+        const bool record = ((index / 3) & 1u) != 0;
+        const unsigned alias = index % 3;
+        const unsigned left = alias == 1 ? 3 : 4;
+        const unsigned right = alias == 2 ? 3 : 5;
+        for (uint64_t first : values) {
+            for (uint64_t second : values) {
+                PpcState state;
+                state.fpr[3] = {0x1234, 0x5678};
+                state.fpr[left] = {first, second};
+                state.fpr[right] = {second, first};
+                auto expected = state.fpr;
+                if (operation < 4) {
+                    const uint64_t sign = UINT64_C(0x8000000000000000);
+                    const auto transform = [operation, sign](uint64_t value) {
+                        return operation == 0 ? value : operation == 1 ? value ^ sign :
+                               operation == 2 ? value & ~sign : value | sign;
+                    };
+                    expected[3] = {transform(state.fpr[right].ps0), transform(state.fpr[right].ps1)};
+                } else {
+                    expected[3] = {
+                        operation < 6 ? state.fpr[left].ps0 : state.fpr[left].ps1,
+                        (operation & 1u) ? state.fpr[right].ps1 : state.fpr[right].ps0};
+                }
+                state.fpscr = 0x91234567u;
+                state.cr = 0x12345678u;
+                state.xer = 0xe0000000u;
+                PairedMoveTestFunctions[index](state);
+                Require(state.fpr == expected && state.fpscr == 0x91234567u &&
+                            state.cr == (record ? 0x19345678u : 0x12345678u) &&
+                            state.xer == 0xe0000000u && state.pc == 0x8504u + index * 16u,
+                        "Paired move/merge changed raw bits, alias order, FPSCR or CR1.");
+            }
+        }
+    }
+}
+
+uint64_t ReferenceDequantization(uint32_t raw, unsigned width, bool signedValue,
+                                  unsigned scale) {
+    const uint32_t mask = (1u << width) - 1;
+    const int value = signedValue && (raw & (1u << (width - 1))) != 0 ?
+        static_cast<int>(raw & mask) - static_cast<int>(1u << width) :
+        static_cast<int>(raw & mask);
+    const int exponent = scale < 32 ? -static_cast<int>(scale) :
+                                               64 - static_cast<int>(scale);
+    const double result = std::ldexp(static_cast<double>(value), exponent);
+    uint64_t bits;
+    std::memcpy(&bits, &result, sizeof(bits));
+    return bits;
+}
+
+void TestIntegerDequantization() {
+    const int rounding = std::fegetround();
+    for (uint32_t type = 4; type < 8; ++type) {
+        const unsigned width = (type & 1u) != 0 ? 16 : 8;
+        const bool signedValue = (type & 2u) != 0;
+        for (unsigned scale = 0; scale < 64; ++scale) {
+            for (uint32_t value = 0; value < (1u << width); ++value) {
+                Require(ppc_dequantize_integer_bits(value, type, scale) ==
+                            ReferenceDequantization(value, width, signedValue, scale),
+                        "Integer dequantization differs at an integer/scale/sign boundary.");
+            }
+        }
+    }
+    Require(std::fegetround() == rounding, "Integer dequantization changed host rounding mode.");
+}
+
+void TestCompiledQuantizedLoads(bool indexed) {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    state.gpr[4] = 0xfffffffcu;
+    const auto* functions = indexed ? IndexedPairedLoadTestFunctions : PairedLoadTestFunctions;
+    const uint32_t entry = indexed ? 0x9000u : 0x8100u;
+    const uint32_t values[] = {0, 1, 0x7f, 0x80, 0xff, 0x100,
+                              0x7fff, 0x8000, 0xffff, 0x1234, 0xfedc};
+    const auto write = [&](uint32_t address, uint32_t value, unsigned width) {
+        if (width == 16) {
+            ppc_write_u16(state, address, static_cast<uint16_t>(value));
+        } else {
+            ppc_write_u8(state, address, static_cast<uint8_t>(value));
+        }
+    };
+    for (unsigned index = 0; index < 32; ++index) {
+        const unsigned selector = index / 4;
+        const bool single = (index & 2u) != 0;
+        const bool update = (index & 1u) != 0;
+        for (uint32_t type = 4; type < 8; ++type) {
+            const unsigned width = (type & 1u) != 0 ? 16 : 8;
+            const bool signedValue = (type & 2u) != 0;
+            const uint32_t stride = width / 8;
+            for (unsigned scale = 0; scale < 64; ++scale) {
+                for (uint32_t alias : {0u, 0x80000000u, 0xc0000000u}) {
+                    for (uint32_t raw : values) {
+                        const uint32_t second = ~raw & ((1u << width) - 1u);
+                        const uint32_t target = alias + 0x101u;
+                        state.gqr.fill(0x00010000u);
+                        state.gqr[selector] = (scale << 24) | (type << 16) | 0xffffu;
+                        state.gpr[3] = target + 4u;
+                        state.gpr[0] = 0xdeadbeefu;
+                        state.fpr[3] = {UINT64_MAX, UINT64_MAX};
+                        state.cr = 0x12345678u;
+                        state.xer = 0xe0000000u;
+                        state.fpscr = 0xfedcba98u;
+                        const auto quantization = state.gqr;
+                        auto expected = state.fpr;
+                        expected[3] = {ReferenceDequantization(raw, width, signedValue, scale),
+                            single ? UINT64_C(0x3ff0000000000000) :
+                                     ReferenceDequantization(second, width, signedValue, scale)};
+                        write(target, raw, width);
+                        write(target + stride, second, width);
+                        const auto source = ppc_read_u32(state, target);
+                        functions[index](state);
+                        Require(state.fpr == expected && state.gqr == quantization &&
+                                    state.gpr[3] == target + (update ? 0u : 4u) &&
+                                    state.gpr[0] == 0xdeadbeefu &&
+                                    state.cr == 0x12345678u && state.xer == 0xe0000000u &&
+                                    state.fpscr == 0xfedcba98u &&
+                                    state.pc == entry + 4u + index * 16u &&
+                                    state.gpr[4] == 0xfffffffcu &&
+                                    ppc_read_u32(state, target) == source,
+                                "Compiled quantized load changed scaling, width, lanes, ABI or source.");
+                    }
+                }
+            }
+            state.gqr[selector] = type << 16;
+            const uint32_t bytes = single ? stride : stride * 2u;
+            const uint32_t last = 0x81800000u - bytes;
+            state.gpr[3] = last + 4u;
+            functions[index](state);
+            for (uint32_t address : {last + 1u, 0xcc000000u, 0xffffffffu}) {
+                state.gpr[3] = address + 4u;
+                const auto fpr = state.fpr;
+                bool rejected = false;
+                try {
+                    functions[index](state);
+                } catch (const std::out_of_range&) {
+                    rejected = true;
+                }
+                Require(rejected && state.fpr == fpr && state.gpr[3] == address + 4u,
+                        "Quantized load boundary error partially changed a lane or base.");
+            }
+        }
+    }
+    state.gqr[0] = 7u << 16;
+    ppc_write_u16(state, 0x100, 0x8000);
+    ppc_write_u16(state, 0x102, 0x7fff);
+    state.gpr[0] = 0xcc000000u;
+    ppc_00008400(state);
+    Require(state.fpr[3] == PpcFpr{UINT64_C(0xc0e0000000000000),
+                                  UINT64_C(0x40dfffc000000000)},
+            "Quantized RA=0 load did not preserve signed 16-bit extremes.");
+}
+
+void TestQuantizationRegisters() {
+    using Function = void (*)(PpcState&);
+    const Function functions[] = {ppc_00008000, ppc_00008010, ppc_00008020, ppc_00008030,
+                                  ppc_00008040, ppc_00008050, ppc_00008060, ppc_00008070};
+    for (unsigned reg = 0; reg < 8; ++reg) {
+        for (uint32_t value : {0u, 0xffffffffu, 0x12345678u, 0x80000000u}) {
+            PpcState state;
+            state.gqr.fill(0xdeadbeefu);
+            auto expected = state.gqr;
+            expected[reg] = value;
+            state.gpr[3] = value;
+            state.cr = 0x12345678u;
+            state.xer = 0xe0000000u;
+            functions[reg](state);
+            Require(state.gqr == expected && state.gpr[4] == value &&
+                        state.gpr[3] == value && state.cr == 0x12345678u &&
+                        state.xer == 0xe0000000u,
+                    "Quantization-register transfers changed the wrong SPR or flags.");
+        }
+    }
+}
+
+void TestHardwareControlRegisters() {
+    PpcState state;
+    state.memory.resize(64, 0xa5);
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    state.fpscr = 0xf1234567u;
+    const auto memory = state.memory;
+    for (uint32_t initial : {0u, 0x2000u, 0x30u, 0x2030u}) {
+        for (bool interrupts : {false, true}) {
+            state.msr = initial;
+            state.externalInterruptsEnabled = interrupts;
+            ppc_00009300(state);
+            Require(state.gpr[3] == (initial | (interrupts ? 0x8000u : 0u)),
+                    "mfmsr does not reflect the native interrupt mask.");
+            for (uint32_t mode : {0u, 0x2000u, 0x8000u, 0xa000u}) {
+                const uint32_t desired = mode | (initial & ~0xa000u);
+                state.gpr[3] = desired;
+                ppc_00009310(state);
+                ppc_00009300(state);
+                Require(state.gpr[3] == desired && state.msr == (desired & ~0x8000u) &&
+                            state.externalInterruptsEnabled == ((desired & 0x8000u) != 0),
+                        "Compiled MSR transfer did not preserve FP/EE state.");
+            }
+        }
+    }
+    for (uint32_t initial : {0u, 0x20000000u, 0x80000000u, 0xa0000000u}) {
+        state.hid2 = initial;
+        ppc_00009320(state);
+        Require(state.gpr[3] == initial, "mfspr HID2 did not read guest feature state.");
+        for (uint32_t desired : {0u, 0x20000000u, 0x80000000u, 0xa0000000u}) {
+            state.gpr[3] = desired;
+            ppc_00009330(state);
+            ppc_00009320(state);
+            Require(state.gpr[3] == desired && state.hid2 == desired,
+                    "Compiled HID2 transfer did not preserve PSE/LSQE state.");
+        }
+    }
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        const uint32_t flag = 1u << bit;
+        for (bool msr : {false, true}) {
+            const uint32_t allowed = msr ? 0xa000u : 0xa0000000u;
+            if ((flag & allowed) != 0) continue;
+            for (bool clearing : {false, true}) {
+                state.msr = clearing ? flag : 0u;
+                state.externalInterruptsEnabled = false;
+                state.hid2 = clearing ? flag : 0u;
+                state.gpr[3] = clearing ? 0u : flag;
+                const auto beforeMsr = state.msr;
+                const auto beforeHid2 = state.hid2;
+                bool rejected = false;
+                try {
+                    if (msr) ppc_00009310(state);
+                    else ppc_00009330(state);
+                } catch (const std::runtime_error&) {
+                    rejected = true;
+                }
+                Require(rejected && state.msr == beforeMsr && state.hid2 == beforeHid2 &&
+                            !state.externalInterruptsEnabled,
+                        "Unsupported control-register mode change was not rejected atomically.");
+            }
+        }
+    }
+    Require(state.cr == 0x12345678u && state.xer == 0xe0000000u &&
+                state.fpscr == 0xf1234567u && state.memory == memory,
+            "Control-register transfer changed flags, FPSCR or RAM.");
+}
+
+void TestCacheControlRegisters() {
+    PpcState state;
+    state.memory.resize(64, 0xa5);
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    state.fpscr = 0xf1234567u;
+    state.msr = 0x2030u;
+    state.hid2 = 0xa0000000u;
+    state.gqr.fill(0x12345678u);
+    state.fpr.fill({UINT64_MAX, UINT64_MAX});
+    const auto memory = state.memory;
+    const auto fpr = state.fpr;
+    const auto gqr = state.gqr;
+    for (uint32_t preserved : {0u, 0x00100000u}) {
+        for (uint32_t initial : {0u, 0x4000u, 0x8000u, 0xc000u}) {
+            state.hid0 = initial | preserved;
+            ppc_00009340(state);
+            Require(state.gpr[3] == (initial | preserved) && state.pc == 0x9344u,
+                    "Compiled HID0 read did not preserve cache/other state.");
+            for (unsigned combination = 0; combination < 8; ++combination) {
+                const uint32_t desired = ((combination & 3u) << 14) |
+                                         ((combination & 4u) << 9) | preserved;
+                for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                    state.gpr[3] = desired;
+                    ppc_00009350(state);
+                    Require(state.pc == 0x9354u && state.gpr[3] == desired &&
+                                state.hid0 == (desired & ~0x800u),
+                            "Compiled HID0 write failed enables, ICFI completion or repetition.");
+                    ppc_00009340(state);
+                    Require(state.gpr[3] == (desired & ~0x800u),
+                            "Instruction-cache invalidation did not self-clear on readback.");
+                }
+            }
+        }
+    }
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        const uint32_t flag = 1u << bit;
+        if ((flag & 0xc800u) != 0) continue;
+        for (bool clearing : {false, true}) {
+            state.hid0 = 0xc000u | (clearing ? flag : 0u);
+            const uint32_t before = state.hid0;
+            state.gpr[3] = 0x800u | (clearing ? 0u : flag);
+            bool rejected = false;
+            try {
+                ppc_00009350(state);
+            } catch (const std::runtime_error& error) {
+                rejected = std::string(error.what()).find("HID0") != std::string::npos;
+            }
+            Require(rejected && state.hid0 == before,
+                    "Unsupported HID0 change mutated cache enables before rejection.");
+        }
+    }
+    for (bool interrupts : {false, true}) {
+        state.externalInterruptsEnabled = interrupts;
+        const auto hid0 = state.hid0;
+        const auto registers = std::vector<uint32_t>(std::begin(state.gpr), std::end(state.gpr));
+        ppc_00009360(state);
+        Require(state.pc == 0x9364u, "Compiled sync did not advance to the next instruction.");
+        ppc_00009370(state);
+        Require(state.pc == 0x9374u && state.hid0 == hid0 &&
+                    state.externalInterruptsEnabled == interrupts &&
+                    std::equal(registers.begin(), registers.end(), std::begin(state.gpr)),
+                "Compiled barriers changed guest control/register state.");
+    }
+    Require(state.memory == memory && state.fpr == fpr && state.gqr == gqr &&
+                state.cr == 0x12345678u && state.xer == 0xe0000000u &&
+                state.fpscr == 0xf1234567u && state.msr == 0x2030u &&
+                state.hid2 == 0xa0000000u,
+            "Cache controls or barriers changed unrelated CPU state or RAM.");
+}
+
+void TestRegisterAddCarry() {
+    for (unsigned index = 0; index < 12; ++index) {
+        const bool extended = index >= 6;
+        const bool record = (index % 6) >= 3;
+        const unsigned destination = index % 3 == 0 ? 3 : index % 3 == 1 ? 4 : 5;
+        for (uint32_t left : {0u, 1u, 0x7fffffffu, 0x80000000u, UINT32_MAX}) {
+            for (uint32_t right : {0u, 1u, 0x7fffffffu, 0x80000000u, UINT32_MAX}) {
+                for (uint32_t xer : {0u, 0x20000000u, 0xc000007fu, 0xe000007fu}) {
+                    PpcState state;
+                    state.gpr[4] = left;
+                    state.gpr[5] = right;
+                    state.xer = xer;
+                    state.cr = 0x12345678u;
+                    const uint64_t sum = uint64_t{left} + right +
+                        (extended ? ((xer >> 29) & 1u) : 0u);
+                    const uint32_t result = static_cast<uint32_t>(sum);
+                    const uint32_t flags = (result == 0 ? 2u :
+                        (result & 0x80000000u) != 0 ? 8u : 4u) | (xer >> 31);
+                    AddCarryTestFunctions[index](state);
+                    Require(state.gpr[destination] == result &&
+                                state.xer == ((xer & ~0x20000000u) |
+                                    (sum > UINT32_MAX ? 0x20000000u : 0u)) &&
+                                state.cr == (record ? (0x02345678u | (flags << 28)) :
+                                                       0x12345678u) &&
+                                state.pc == 0x9404u + index * 16u &&
+                                (destination == 4 || state.gpr[4] == left) &&
+                                (destination == 5 || state.gpr[5] == right),
+                            "Compiled addc/adde lost carry, alias, CR0 or XER preservation.");
+                }
+            }
+        }
+    }
+}
+
+void TestL2ControlRegisters() {
+    PpcState state;
+    state.memory.resize(64, 0xa5);
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    const auto memory = state.memory;
+    for (uint32_t preserved : {0u, 0x10000000u}) {
+        state.l2cr = preserved | 0x80000000u;
+        for (uint32_t desired : {0u, 0x00200000u, 0x00200000u, 0u, 0x80000000u}) {
+            state.gpr[3] = desired | preserved;
+            ppc_00009390(state);
+            Require(state.l2cr == (desired | preserved) && state.pc == 0x9394u,
+                    "L2CR write lost configuration or invalidation request.");
+            ppc_00009380(state);
+            Require(state.gpr[3] == (desired | preserved) &&
+                        (state.gpr[3] & 1u) == 0 && state.pc == 0x9384u,
+                    "L2CR read did not report synchronous invalidation completion.");
+        }
+    }
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        const uint32_t flag = 1u << bit;
+        if ((flag & 0x80200000u) != 0) continue;
+        for (bool clearing : {false, true}) {
+            state.l2cr = clearing ? flag : 0u;
+            const uint32_t before = state.l2cr;
+            state.gpr[3] = 0x00200000u | (clearing ? 0u : flag);
+            bool rejected = false;
+            try {
+                ppc_00009390(state);
+            } catch (const std::runtime_error& error) {
+                rejected = std::string(error.what()).find("L2CR") != std::string::npos;
+            }
+            Require(rejected && state.l2cr == before,
+                    "Unsupported L2CR configuration changed before rejection.");
+        }
+    }
+    for (uint32_t initial : {0u, 0x00200000u, 0x80000000u}) {
+        state.l2cr = initial;
+        state.gpr[3] = 0x80200000u;
+        bool rejected = false;
+        try {
+            ppc_00009390(state);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("disabled") != std::string::npos;
+        }
+        Require(rejected && state.l2cr == initial,
+                "L2 invalidation while enabled was not rejected atomically.");
+    }
+    Require(state.cr == 0x12345678u && state.xer == 0xe0000000u &&
+                state.memory == memory,
+            "L2 control transfer changed flags or guest RAM.");
+}
+
+void TestIndexedPairedAddresses() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    ppc_write_u32(state, 0x100u, 0x3f800000u);
+    ppc_write_u32(state, 0x104u, 0xbf800000u);
+    const PpcFpr expected = {UINT64_C(0x3ff0000000000000),
+                             UINT64_C(0xbff0000000000000)};
+    const auto memory = state.memory;
+    state.gpr[0] = 0xcc000000u;
+    state.gpr[4] = 0x80000100u;
+    ppc_00009200(state);
+    Require(state.fpr[3] == expected && state.gpr[0] == 0xcc000000u &&
+                state.gpr[4] == 0x80000100u,
+            "Indexed paired RA=0 incorrectly used GPR0 or updated the index.");
+    for (uint32_t base : {0x80u, 0x80000080u, 0xc0000080u}) {
+        state.gpr[3] = base;
+        ppc_00009210(state);
+        Require(state.fpr[3] == expected && state.gpr[3] == base + base,
+                "Indexed paired update with RA=RB did not read both original base values.");
+    }
+    for (const auto& address : {std::pair<uint32_t, uint32_t>{0xf0u, 0x10u},
+                               {0xfffffff0u, 0x110u}, {0x80000120u, 0xffffffe0u}}) {
+        state.gpr[3] = address.first;
+        state.gpr[4] = address.second;
+        IndexedPairedLoadTestFunctions[1](state);
+        Require(state.fpr[3] == expected &&
+                    state.gpr[3] == address.first + address.second &&
+                    state.gpr[4] == address.second,
+                "Indexed paired load did not use 32-bit wrapped effective-address arithmetic.");
+    }
+    state.gpr[3] = 0xf0u;
+    state.gpr[0] = 0x10u;
+    ppc_00009220(state);
+    Require(state.fpr[3] == expected && state.gpr[3] == 0xf0u && state.gpr[0] == 0x10u,
+            "Indexed paired RB=0 did not read the actual GPR0 index.");
+    Require(state.memory == memory, "Indexed paired load wrote guest RAM.");
 }
 
 void TestCarryAndSpecialRegisters() {
@@ -300,9 +1136,11 @@ void TestTimeBaseAndConditionXor() {
         ppc_000030F0(state);
         const auto expected = (cr & ~(1u << 25)) |
                               ((((cr >> 24) ^ (cr >> 23)) & 1u) << 25);
-        Require(state.cr == expected, "crxor changed the wrong condition bit.");
+        Require(state.cr == expected && state.pc == 0x30f4u,
+                "crxor changed the wrong condition bit or did not advance PC.");
         ppc_00003100(state);
-        Require(state.cr == (expected & ~(1u << 25)), "crclr did not clear exactly CR bit 6.");
+        Require(state.cr == (expected & ~(1u << 25)) && state.pc == 0x3104u,
+                "crclr did not clear exactly CR bit 6 or advance PC.");
     }
     Require(GameCubeTicksFromNanoseconds(0) == 0 &&
                 GameCubeTicksFromNanoseconds(1000000000) == 40500000 &&
@@ -453,6 +1291,12 @@ void TestNativeDispatch() {
     unsigned previousCalls = 0;
     state.callGuest = [&previousCalls](uint32_t, PpcState&) { ++previousCalls; };
     for (const uint32_t entry : {0x4000u, 0x4060u}) {
+        state.gpr[3] = 0xc800u;
+        ppc_00009350(state);
+        ppc_00009360(state);
+        ppc_00009370(state);
+        Require(dispatcher.Contains(0x4020) && state.hid0 == 0xc000u,
+                "Cache invalidation removed a valid static native translation.");
         state.lr = 0x4ff0;
         state.ctr = 0x4020;
         state.gpr[3] = 10;
@@ -484,6 +1328,10 @@ void TestNativeDispatch() {
     }
     Require(previousCalls == 3, "Failed native execution did not restore the callback.");
     ppc_write_u32(state, 0x4020, 0);
+    state.gpr[3] = 0xc800u;
+    ppc_00009350(state);
+    ppc_00009360(state);
+    ppc_00009370(state);
     state.lr = 0x4ff0;
     Reject([&] { dispatcher.Execute(state, 0x4000); }, "code mismatch at 0x00004020");
     ppc_write_u32(state, 0x4020, module[0].expectedWords[0]);
@@ -531,6 +1379,23 @@ void TestNativeDispatch() {
 int main() {
     try {
         TestLogicalRegisters();
+        TestFloatingPointTransfers();
+        TestFloatingPointMoves();
+        TestFpscrWrites();
+        TestFpscrReads();
+        TestSingleWidening();
+        TestQuantizationRegisters();
+        TestIndexedPairedAddresses();
+        TestHardwareControlRegisters();
+        TestCacheControlRegisters();
+        TestL2ControlRegisters();
+        TestRegisterAddCarry();
+        TestPairedLoads(false);
+        TestPairedLoads(true);
+        TestIntegerDequantization();
+        TestCompiledQuantizedLoads(false);
+        TestCompiledQuantizedLoads(true);
+        TestPairedMoves();
         TestCarryAndSpecialRegisters();
         TestLinkedBranchAndMultiLoad();
         TestLocalIndirectBranches();

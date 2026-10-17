@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -280,8 +281,13 @@ constexpr uint32_t kArenaBottom = 0x80600000u;
 constexpr uint32_t kArenaSize = 0x10000u;
 constexpr uint32_t kHeap = 0x80315508u;
 constexpr uint32_t kNodes = 0x802fd4fcu;
+constexpr uint32_t kPool = 0x802fd4d0u;
+constexpr uint32_t kPoolNodes = 0x802fc8c4u;
+constexpr uint32_t kPoolBottom = 0x80410000u;
+constexpr uint32_t kPoolSize = 0x100000u;
 
-void InitializeOriginalHeap(PpcState& state, NativeDispatcher& dispatcher) {
+void InitializeOriginalHeap(PpcState& state, NativeDispatcher& dispatcher,
+                            uint32_t arenaSize = kArenaSize) {
     for (const auto& array : std::array<std::array<uint32_t, 3>, 2>{{
              {0x802fc8c4u, 128, 0x80179ee8u},
              {kNodes, 4096, 0x80179c90u}}}) {
@@ -293,13 +299,13 @@ void InitializeOriginalHeap(PpcState& state, NativeDispatcher& dispatcher) {
     }
     PrepareCall(state);
     state.gpr[3] = kArenaBottom;
-    state.gpr[4] = kArenaSize;
-    state.gpr[5] = kArenaBottom + kArenaSize;
-    state.gpr[6] = kArenaSize;
+    state.gpr[4] = arenaSize;
+    state.gpr[5] = kArenaBottom + arenaSize;
+    state.gpr[6] = arenaSize;
     dispatcher.Execute(state, 0x80178558u);
     CheckReturn(state);
-    Require(ppc_read_u32(state, kHeap) == kArenaBottom + kArenaSize &&
-                ppc_read_u32(state, kHeap + 4) == kArenaSize &&
+    Require(ppc_read_u32(state, kHeap) == kArenaBottom + arenaSize &&
+                ppc_read_u32(state, kHeap + 4) == arenaSize &&
                 ppc_read_u32(state, kHeap + 8) == kNodes &&
                 ppc_read_u16(state, kHeap + 12) == 4096 &&
                 ppc_read_u32(state, kHeap + 16) == kNodes &&
@@ -314,6 +320,22 @@ void InitializeOriginalHeap(PpcState& state, NativeDispatcher& dispatcher) {
                         (i == 4095 || i == 0 ? 0u : node + 24),
                 "Original heap metadata initialization/vtable/free chain mismatch.");
     }
+}
+
+void InitializeOriginalPool(PpcState& state, NativeDispatcher& dispatcher) {
+    PrepareCall(state);
+    state.gpr[3] = kPool;
+    state.gpr[4] = kPoolBottom;
+    state.gpr[5] = kPoolSize;
+    state.gpr[6] = kPoolNodes;
+    state.gpr[7] = 128;
+    dispatcher.Execute(state, 0x80178974u);
+    CheckReturn(state);
+    Require(ppc_read_u32(state, kPool + 16) == kPoolNodes &&
+                ppc_read_u32(state, kPoolNodes) == kPoolBottom &&
+                ppc_read_u32(state, kPoolNodes + 4) == kPoolSize &&
+                ppc_read_u32(state, kPoolNodes + 12) == 1,
+            "Original alternate allocation pool initialization differs.");
 }
 
 void TestOriginalAllocator(const std::filesystem::path& directory) {
@@ -1163,6 +1185,200 @@ void DvdResourceCallback(PpcState& state) {
     state.pc = state.lr;
 }
 
+void TestOriginalDvdClose(const UsModuleFixture& fixture, PpcState& state,
+                          NativeDispatcher& dispatcher, NativeDvdQueue& queue,
+                          uint32_t info, uint32_t path, uint32_t destination,
+                          const std::vector<uint8_t>& expected) {
+    constexpr uint32_t observer = 0x80001a00u;
+    const uint32_t length = static_cast<uint32_t>(expected.size());
+    const auto output = ppc_memory_offset(state, destination, length);
+    ppc_write_u32(state, 0x803496f0u, 0);
+    ppc_write_u32(state, 0x803496f4u, 0);
+    ppc_write_u32(state, 0x8034967cu, 0);
+    for (bool interrupts : {false, true}) {
+        state.externalInterruptsEnabled = interrupts;
+        std::fill(state.memory.begin() + output, state.memory.begin() + output + length, 0xa5);
+        ppc_write_u32(state, observer, 0x802c9ec0u);
+        ppc_write_u8(state, observer + 4, 0);
+        ppc_write_u32(state, info + 0x58, observer);
+        PrepareCall(state);
+        state.gpr[3] = info;
+        state.gpr[4] = destination;
+        state.gpr[5] = length;
+        state.gpr[6] = 0;
+        dispatcher.Execute(state, 0x8017b07cu);
+        CheckReturn(state);
+        Require(queue.pending() == 1, "Original close fixture did not queue a game read.");
+        const auto beforeClose = state.memory;
+        PrepareCall(state);
+        state.gpr[3] = info;
+        dispatcher.Execute(state, 0x8017aef8u);
+        CheckReturn(state);
+        Require(state.gpr[3] == 1 && queue.pending() == 0 &&
+                    ppc_read_u32(state, info + 0xc) == 10 &&
+                    ppc_read_u32(state, info + 0x20) == 0 &&
+                    ppc_read_u8(state, info + 0x55) == 0 &&
+                    ppc_read_u8(state, observer + 4) == 1 &&
+                    ppc_read_u32(state, info + 0x58) == 0 &&
+                    ppc_read_u8(state, info + 0x54) == 1 &&
+                    state.externalInterruptsEnabled == interrupts,
+                "Original game/SDK close did not synchronously cancel, notify or restore the mask.");
+        CheckInitializationWrites(fixture, beforeClose, {{info, 0x60}, {observer, 8}});
+        ppc_write_u8(state, observer + 4, 0);
+        const auto closed = state.memory;
+        PrepareCall(state);
+        state.gpr[3] = info;
+        dispatcher.Execute(state, 0x8017aef8u);
+        CheckReturn(state);
+        Require(state.gpr[3] == 1 && queue.pending() == 0 &&
+                    state.externalInterruptsEnabled == interrupts &&
+                    ppc_read_u8(state, observer + 4) == 0,
+                "Repeated original close failed or changed the interrupt mask.");
+        CheckInitializationWrites(fixture, closed);
+        state.externalInterruptsEnabled = true;
+        Require(!queue.Pump(), "Closed original read was still available for completion.");
+        state.externalInterruptsEnabled = interrupts;
+        CheckInitializationWrites(fixture, closed);
+        PrepareCall(state);
+        state.gpr[3] = info;
+        state.gpr[4] = path;
+        dispatcher.Execute(state, 0x8017ae48u);
+        CheckReturn(state);
+        Require(state.gpr[3] == 1 && ppc_read_u32(state, info + 0xc) == 0 &&
+                    ppc_read_u8(state, info + 0x54) == 1 &&
+                    ppc_read_u32(state, info + 0x50) == length,
+                "Original game reopen did not reset its canceled file state.");
+    }
+    state.externalInterruptsEnabled = true;
+    PrepareCall(state);
+    state.gpr[3] = info;
+    state.gpr[4] = destination;
+    state.gpr[5] = length;
+    state.gpr[6] = 0;
+    dispatcher.Execute(state, 0x8017b07cu);
+    CheckReturn(state);
+    const auto beforeReopen = state.memory;
+    PrepareCall(state);
+    state.gpr[3] = info;
+    state.gpr[4] = path;
+    dispatcher.Execute(state, 0x8017ae48u);
+    CheckReturn(state);
+    Require(state.gpr[3] == 1 && queue.pending() == 0 &&
+                ppc_read_u32(state, info + 0xc) == 0 &&
+                ppc_read_u8(state, info + 0x54) == 1,
+            "Original Open did not cancel its previous pending read before reopening.");
+    CheckInitializationWrites(fixture, beforeReopen, {{info, 0x60}});
+    PrepareCall(state);
+    state.gpr[3] = info;
+    state.gpr[4] = destination;
+    state.gpr[5] = length;
+    state.gpr[6] = 0;
+    dispatcher.Execute(state, 0x8017b07cu);
+    CheckReturn(state);
+    Require(queue.Pump(), "Reopened original file could not complete a read.");
+    Require(std::equal(expected.begin(), expected.end(), state.memory.begin() + output),
+            "Reopened original file read differs from the real disc payload and padding.");
+    const auto completed = state.memory;
+    PrepareCall(state);
+    state.gpr[3] = info;
+    dispatcher.Execute(state, 0x8017aef8u);
+    CheckReturn(state);
+    Require(state.gpr[3] == 1 && ppc_read_u32(state, info + 0xc) == 0 &&
+                ppc_read_u8(state, info + 0x55) == 1,
+            "Original close after completion changed its success or terminal status.");
+    CheckInitializationWrites(fixture, completed);
+    for (uint32_t terminal : {0xffffffffu, 0u, 10u}) {
+        ppc_write_u32(state, info + 0xc, terminal);
+        const auto beforeTerminal = state.memory;
+        PrepareCall(state);
+        state.gpr[3] = info;
+        dispatcher.Execute(state, 0x801ba734u);
+        CheckReturn(state);
+        Require(state.gpr[3] == 1 && ppc_read_u32(state, info + 0xc) == terminal,
+                "Original SDK close changed a terminal command state.");
+        CheckInitializationWrites(fixture, beforeTerminal);
+    }
+    ppc_write_u32(state, info + 0xc, 1);
+    const auto unowned = state.memory;
+    PrepareCall(state);
+    state.gpr[3] = info;
+    Reject([&] { dispatcher.Execute(state, 0x8017aef8u); }, "unowned active command");
+    Require(ppc_read_u8(state, info + 0x54) == 1 && queue.pending() == 0,
+            "Rejected close changed the file lifecycle or fabricated a pending request.");
+    CheckInitializationWrites(fixture, unowned);
+    ppc_write_u32(state, info + 0xc, 0);
+    auto cancel = std::move(state.cancelDvdRead);
+    state.cancelDvdRead = {};
+    const auto missingService = state.memory;
+    PrepareCall(state);
+    state.gpr[3] = info;
+    Reject([&] { dispatcher.Execute(state, 0x8017aef8u); }, "cancel service is not installed");
+    CheckInitializationWrites(fixture, missingService);
+    state.cancelDvdRead = std::move(cancel);
+    PrepareCall(state);
+    state.gpr[3] = info;
+    state.gpr[4] = 0;
+    dispatcher.Execute(state, 0x8017ae48u);
+    CheckReturn(state);
+    Require(state.gpr[3] == 0 && ppc_read_u8(state, info + 0x54) == 0 &&
+                ppc_read_u32(state, info + 0x50) == 0,
+            "Original null-path reopen did not produce the original closed-object state.");
+    const auto unopened = state.memory;
+    PrepareCall(state);
+    state.gpr[3] = info;
+    dispatcher.Execute(state, 0x8017aef8u);
+    CheckReturn(state);
+    Require(state.gpr[3] == 1, "Original close on an unopened object failed.");
+    CheckInitializationWrites(fixture, unopened);
+}
+
+void TestOriginalDvdWakeup(const std::filesystem::path& directory) {
+    auto fixture = LoadUsModuleFixture(directory);
+    auto& state = fixture.state;
+    NativeDispatcher dispatcher;
+    dispatcher.Register(0, state, UsDvdCloseTranslations());
+    dispatcher.Register(1, state, UsInterruptServices());
+    constexpr uint32_t waitQueue = 0x803496f0u;
+    constexpr uint32_t first = 0x80007000u;
+    constexpr uint32_t last = 0x80007400u;
+    for (bool enabled : {false, true}) {
+        for (uint32_t thread : {first, last}) {
+            ppc_write_u16(state, thread + 0x2c8, 4);
+            ppc_write_u32(state, thread + 0x2cc, 1);
+            ppc_write_u32(state, thread + 0x2e0, thread == first ? last : 0);
+            ppc_write_u32(state, thread + 0x2e4, thread == first ? 0 : first);
+        }
+        ppc_write_u32(state, waitQueue, first);
+        ppc_write_u32(state, waitQueue + 4, last);
+        ppc_write_u32(state, 0x8034967cu, 0);
+        state.externalInterruptsEnabled = enabled;
+        const auto before = state.memory;
+        PrepareCall(state);
+        state.gpr[3] = waitQueue;
+        dispatcher.Execute(state, 0x801b7a40u);
+        CheckReturn(state);
+        Require(ppc_read_u32(state, waitQueue) == 0 &&
+                    ppc_read_u32(state, waitQueue + 4) == 0 &&
+                    ppc_read_u16(state, first + 0x2c8) == 1 &&
+                    ppc_read_u16(state, last + 0x2c8) == 1 &&
+                    ppc_read_u32(state, last + 0x2e4) == 0 &&
+                    state.externalInterruptsEnabled == enabled,
+                "Original wakeup did not drain suspended waiters or restore the interrupt mask.");
+        CheckInitializationWrites(fixture, before, {
+            {first + 0x2c8, 2}, {last + 0x2c8, 2}, {last + 0x2e4, 4}, {waitQueue, 8}});
+        const auto empty = state.memory;
+        PrepareCall(state);
+        state.gpr[3] = waitQueue;
+        dispatcher.Execute(state, 0x801b7a40u);
+        CheckReturn(state);
+        CheckInitializationWrites(fixture, empty);
+    }
+    ppc_write_u32(state, 0x8034967cu, 1);
+    PrepareCall(state);
+    state.gpr[3] = waitQueue;
+    Reject([&] { dispatcher.Execute(state, 0x801b7a40u); }, "0x801B6E7C");
+}
+
 void TestOriginalDiscDvd(const std::filesystem::path& directory,
                          const std::filesystem::path& rvz) {
     RvzImage disc(rvz);
@@ -1181,6 +1397,7 @@ void TestOriginalDiscDvd(const std::filesystem::path& directory,
     dispatcher.Register(5, state, UsDvdHostServices());
     dispatcher.Register(7, state, UsGameDvdReadTranslations());
     dispatcher.Register(8, state, UsInterruptServices());
+    dispatcher.Register(9, state, UsDvdCloseTranslations());
     constexpr uint32_t fst = 0x80400000u;
     constexpr uint32_t path = 0x80001000u;
     constexpr uint32_t info = 0x80001400u;
@@ -1324,13 +1541,413 @@ void TestOriginalDiscDvd(const std::filesystem::path& directory,
                 "Native queued cancellation did not use the original SDK callback with -3 then cancel result 0.");
         CheckInitializationWrites(fixture, beforeCancel, {{info, 0x3c}, {log, 4 + 16 * 12}});
         TestOriginalGameDvdRead(state, dispatcher, queue, disc, fixture, info, destination, rounded);
+        TestOriginalDvdClose(fixture, state, dispatcher, queue, info, path, destination, expected);
     }
     state.submitDvdRead = {};
     state.cancelDvdRead = {};
     std::cout << "Original game async DVD read, callbacks, observer and cancellation verified; "
+                 "compiled close/synchronous cancel, wakeup and reopen passed; "
                  "DVDOpen verified all 1660 disc files; original game DvdFile -> "
                  "compiled DVDReadAsyncPrio -> native queued RVZ read -> original SDK callback -> "
                  "compiled CLZ/U8 initialization passed; queued cancellation delivered -3 then 0.\n";
+}
+
+void DecodeQueueObserver(PpcState& state) {
+    const uint32_t object = state.gpr[3], request = state.gpr[4];
+    Require(ppc_read_u8(state, request + 5) == 1,
+            "Decode observer ran before its tracked resource finished.");
+    ppc_write_u32(state, object + 4, ppc_read_u32(state, object + 4) + 1);
+    ppc_write_u32(state, object + 8, ppc_read_u32(state, request));
+    state.pc = state.lr;
+}
+
+void TestOriginalDecodeQueue(const std::filesystem::path& directory,
+                             const std::filesystem::path& rvz = {}, bool usePool = false) {
+    auto fixture = LoadUsModuleFixture(directory);
+    auto& state = fixture.state;
+    NativeDispatcher dispatcher;
+    dispatcher.Register(0, state, UsRelDolTranslations());
+    dispatcher.Register(1, state, UsAllocatorTranslations());
+    dispatcher.Register(2, state, UsClzTranslations());
+    dispatcher.Register(3, state, UsArchiveTranslations());
+    dispatcher.Register(4, state, UsDecodeQueueTranslations());
+    dispatcher.Register(5, state, UsDvdTranslations());
+    dispatcher.Register(6, state, UsDvdAsyncTranslations());
+    dispatcher.Register(7, state, UsDvdHostServices());
+    auto gameReads = UsGameDvdReadTranslations();
+    gameReads.erase(std::remove_if(gameReads.begin(), gameReads.end(),
+        [](const NativeTranslation& entry) {
+            return entry.address == 0x80235ed4u || entry.address == 0x80235f20u;
+        }), gameReads.end());
+    dispatcher.Register(8, state, gameReads);
+    dispatcher.Register(9, state, UsInterruptServices());
+    constexpr uint32_t queue = 0x80004000u;
+    constexpr uint32_t request = 0x80006000u;
+    constexpr uint32_t manager = 0x80006200u;
+    constexpr uint32_t observer = 0x80006300u;
+    constexpr uint32_t vtable = 0x80006400u;
+    constexpr uint32_t callback = 0x80002400u;
+    constexpr uint32_t info = 0x80001400u;
+    constexpr uint32_t path = 0x80001000u;
+    constexpr uint32_t fst = 0x80400000u;
+    constexpr uint32_t arenaSize = 0x800000u;
+    for (const auto& range : std::vector<std::pair<uint32_t, uint32_t>>{
+             {queue, 0x418}, {request, 8}, {manager, 0x44}, {info, 0x60}}) {
+        const auto offset = ppc_memory_offset(state, range.first, range.second);
+        std::fill(state.memory.begin() + offset,
+                  state.memory.begin() + offset + range.second, 0);
+    }
+    InitializeOriginalHeap(state, dispatcher, arenaSize);
+    InitializeOriginalPool(state, dispatcher);
+    state.readTimeBase = MakeNativeTimeBase();
+    ppc_write_u32(state, 0x8034919cu, manager);
+    ppc_write_u32(state, 0x80349210u, manager);
+    ppc_write_u32(state, callback, 0x4e800020u);
+    dispatcher.Register(10, state, {{callback, DecodeQueueObserver, {0x4e800020u}}});
+    ppc_write_u32(state, vtable + 0xc, callback);
+    ppc_write_u32(state, observer, vtable);
+    ppc_write_u32(state, observer + 4, 0);
+    ppc_write_u32(state, observer + 8, 0);
+    ppc_write_u32(state, queue + 8, 9);
+    PrepareCall(state);
+    state.gpr[3] = queue;
+    dispatcher.Execute(state, 0x8019a5e0u);
+    CheckReturn(state);
+    Require(ppc_read_u32(state, queue + 8) == 0,
+            "Original decode queue reset did not clear its count.");
+    ppc_write_u8(state, queue + 0x414, 1);
+    const auto empty = state.memory;
+    PrepareCall(state);
+    state.gpr[3] = queue;
+    dispatcher.Execute(state, 0x8019a610u);
+    CheckReturn(state);
+    Require(ppc_read_u8(state, queue + 0x414) == 0,
+            "Original empty decode queue did not become idle.");
+    CheckInitializationWrites(fixture, empty, {{queue + 0x414, 1}});
+    std::vector<uint8_t> compressed{'C', 'L', 'Z', 0, 0, 0, 0, 3,
+                                   0, 0, 0, 0, 0, 0, 0, 3, 0, 'a', 'b', 'c'};
+    std::vector<uint8_t> expected = DecodeClz(compressed, arenaSize);
+    std::unique_ptr<RvzImage> disc;
+    if (!rvz.empty()) {
+        disc = std::make_unique<RvzImage>(rvz);
+        const auto executables = ReadGameCubeExecutables(*disc);
+        VerifyUsExecutables(executables);
+        compressed = ReadGameCubeFile(*disc, "roomcommon.arc.clz").bytes;
+        expected = DecodeClz(compressed, arenaSize);
+        const auto offset = ppc_memory_offset(state, fst, executables[1].bytes.size());
+        std::copy(executables[1].bytes.begin(), executables[1].bytes.end(),
+                  state.memory.begin() + offset);
+        ppc_write_u32(state, 0x80000038u, fst);
+        ppc_write_u32(state, 0x803496e8u, 0);
+        ppc_write_u32(state, 0x803496ecu, 1);
+        PrepareCall(state);
+        dispatcher.Execute(state, 0x801ba340u);
+        CheckReturn(state);
+        WriteGuestString(state, path, "/roomcommon.arc.clz");
+        PrepareCall(state);
+        state.gpr[3] = info;
+        state.gpr[4] = path;
+        state.gpr[5] = 2;
+        dispatcher.Execute(state, 0x8017ad8cu);
+        CheckReturn(state);
+    }
+    const uint32_t rounded = (static_cast<uint32_t>(compressed.size()) + 31) & ~31u;
+    PrepareCall(state);
+    state.gpr[3] = rounded;
+    state.gpr[4] = 0;
+    state.gpr[5] = 0;
+    dispatcher.Execute(state, 0x80178ff8u);
+    CheckReturn(state);
+    const uint32_t source = state.gpr[3];
+    Require(source >= kArenaBottom && source + rounded <= kArenaBottom + arenaSize,
+            "Original decode source allocation is outside its fixture arena.");
+    if (disc) {
+        NativeDvdReader reader(*disc);
+        NativeDvdQueue dvd(reader, dispatcher, state);
+        state.submitDvdRead = [&](PpcState& guest) { dvd.Submit(guest); };
+        state.cancelDvdRead = [&](PpcState& guest) { dvd.Cancel(guest); };
+        PrepareCall(state);
+        state.gpr[3] = info;
+        state.gpr[4] = source;
+        state.gpr[5] = rounded;
+        state.gpr[6] = 0;
+        dispatcher.Execute(state, 0x8017b07cu);
+        CheckReturn(state);
+        Require(state.gpr[3] == 1 && dvd.pending() == 1 &&
+                    ppc_read_u8(state, info + 0x55) == 0,
+                "Decode input was not submitted through the original game DVD entry.");
+        Require(dvd.Pump() && ppc_read_u8(state, info + 0x55) == 1,
+                "Original game DVD completion did not make the decode input available.");
+        state.submitDvdRead = {};
+        state.cancelDvdRead = {};
+    } else {
+        const auto input = ppc_memory_offset(state, source, compressed.size());
+        std::copy(compressed.begin(), compressed.end(), state.memory.begin() + input);
+    }
+    ppc_write_u32(state, request, source);
+    ppc_write_u8(state, request + 4, 1);
+    ppc_write_u8(state, request + 5, 1);
+    ppc_write_u8(state, request + 6, usePool ? 0 : 1);
+    const auto beforeEnqueue = state.memory;
+    PrepareCall(state);
+    state.gpr[3] = queue;
+    state.gpr[4] = request;
+    dispatcher.Execute(state, 0x8019a5ecu);
+    CheckReturn(state);
+    Require(ppc_read_u32(state, queue + 8) == 1 &&
+                ppc_read_u32(state, queue + 0xc) == request &&
+                ppc_read_u8(state, request + 5) == 0,
+            "Original decode enqueue did not register and clear the completion flag.");
+    CheckInitializationWrites(fixture, beforeEnqueue, {{queue + 8, 8}, {request + 5, 1}});
+    // Starting the original queue still requires real OS thread services, never a success stub.
+    PrepareCall(state);
+    state.gpr[3] = queue;
+    Reject([&] { dispatcher.Execute(state, 0x8019a610u); }, "0x8019A668");
+    PrepareCall(state);
+    state.gpr[3] = queue;
+    state.gpr[4] = observer;
+    state.gpr[5] = request;
+    dispatcher.Execute(state, 0x8019a65cu);
+    CheckReturn(state);
+    const auto beforeDecode = state.memory;
+    // All inputs are ready; invoke the original worker directly, not its OS thread launcher.
+    PrepareCall(state);
+    state.gpr[3] = queue;
+    dispatcher.Execute(state, 0x8019a6bcu);
+    CheckReturn(state);
+    const uint32_t output = ppc_read_u32(state, request);
+    const auto offset = ppc_memory_offset(state, output, expected.size());
+    Require(state.gpr[3] == 0 && output != source &&
+                (usePool ? output >= kPoolBottom && output + expected.size() <= kPoolBottom + kPoolSize :
+                           output >= kArenaBottom && output + expected.size() <= source) &&
+                ppc_read_u8(state, request + 5) == 1 &&
+                ppc_read_u32(state, queue + 4) == 1 &&
+                ppc_read_u8(state, queue + 0x414) == 0 &&
+                ppc_read_u32(state, queue + 0x40c) == 0 &&
+                ppc_read_u32(state, observer + 4) == 1 &&
+                ppc_read_u32(state, observer + 8) == output &&
+                ppc_read_u32(state, 0x80349494u) == (usePool ? 0u : 1u) &&
+                ppc_read_u32(state, 0x8034948cu) == (usePool ? 1u : 0u) &&
+                std::equal(expected.begin(), expected.end(), state.memory.begin() + offset),
+            "Original decode worker allocation, source release, callback, bytes or flags differ.");
+    CheckInitializationWrites(fixture, beforeDecode, {
+        {queue, 0x418}, {request, 8}, {observer, 12},
+        {kPoolNodes, 128 * 24}, {kPool, 32},
+        {kNodes, 4096 * 24}, {kHeap, 32}, {0x8034948cu, 16},
+        {output, static_cast<uint32_t>(expected.size())}});
+    const auto completed = state.memory;
+    PrepareCall(state);
+    state.gpr[3] = queue;
+    dispatcher.Execute(state, 0x8019a6bcu);
+    CheckReturn(state);
+    Require(ppc_read_u32(state, observer + 4) == 1 &&
+                ppc_read_u32(state, request) == output,
+            "Completed original decode worker replayed its callback or allocation.");
+    CheckInitializationWrites(fixture, completed);
+    if (disc) {
+        PrepareCall(state);
+        state.gpr[3] = output;
+        state.gpr[4] = 0x80001600u;
+        dispatcher.Execute(state, 0x80203b4cu);
+        CheckReturn(state);
+        Require(state.gpr[3] == 1, "Original decode queue output failed original U8 initialization.");
+    }
+    PrepareCall(state);
+    state.gpr[3] = manager;
+    state.gpr[4] = output;
+    dispatcher.Execute(state, 0x80190944u);
+    CheckReturn(state);
+    Require(ppc_read_u32(state, 0x80349494u) == 0 &&
+                ppc_read_u32(state, 0x8034948cu) == 0 &&
+                ppc_read_u32(state, kPool + 16) == kPoolNodes &&
+                ppc_read_u32(state, kPoolNodes + 4) == kPoolSize &&
+                ppc_read_u32(state, kPoolNodes + 12) == 1 &&
+                ppc_read_u32(state, kPoolNodes + 8) == 0 &&
+                ppc_read_u32(state, kHeap + 16) == kNodes &&
+                ppc_read_u32(state, kNodes + 4) == arenaSize &&
+                ppc_read_u32(state, kNodes + 12) == 1 &&
+                ppc_read_u32(state, kNodes + 8) == 0,
+            "Original decode queue allocation lifecycle did not coalesce the complete arena.");
+    std::cout << (disc ? "Real RVZ game DVD read -> " : "Synthetic CLZ -> ")
+              << "original decode worker, " << (usePool ? "alternate pool" : "normal heap")
+              << ", source release and observer passed.\n";
+}
+
+void DecodeBatchObserver(PpcState& state) {
+    const uint32_t object = state.gpr[3], request = state.gpr[4];
+    const uint32_t queue = ppc_read_u32(state, object + 12);
+    const uint32_t completed = ppc_read_u32(state, queue + 4);
+    const uint32_t expected = ppc_read_u32(state, object + 16);
+    Require(completed == expected && ppc_read_u8(state, request + 5) == 1 &&
+                ppc_read_u32(state, queue + 0x40c) == 0,
+            "Original decode observer timing or one-shot detachment differs.");
+    for (uint32_t index = 0; index < 4; ++index) {
+        const uint32_t entry = ppc_read_u32(state, queue + 12 + index * 4);
+        Require(ppc_read_u8(state, entry + 5) == (index < completed ? 1u : 0u),
+                "Original decode worker completed requests out of enqueue order.");
+    }
+    ppc_write_u32(state, object + 4, ppc_read_u32(state, object + 4) + 1);
+    state.pc = state.lr;
+}
+
+void TestOriginalDecodeBatch(const std::filesystem::path& directory) {
+    auto fixture = LoadUsModuleFixture(directory);
+    auto& state = fixture.state;
+    NativeDispatcher dispatcher;
+    dispatcher.Register(0, state, UsRelDolTranslations());
+    dispatcher.Register(1, state, UsAllocatorTranslations());
+    dispatcher.Register(2, state, UsClzTranslations());
+    dispatcher.Register(3, state, UsArchiveTranslations());
+    dispatcher.Register(4, state, UsDecodeQueueTranslations());
+    constexpr uint32_t queue = 0x80004000u;
+    constexpr uint32_t requests = 0x80006000u;
+    constexpr uint32_t manager = 0x80006200u;
+    constexpr uint32_t observer = 0x80006300u;
+    constexpr uint32_t callback = 0x80002400u;
+    constexpr uint32_t vtable = 0x80006400u;
+    ppc_write_u32(state, callback, 0x4e800020u);
+    dispatcher.Register(5, state, {{callback, DecodeBatchObserver, {0x4e800020u}}});
+    state.readTimeBase = MakeNativeTimeBase();
+    for (uint32_t tracked : {0u, 3u, 4u}) {
+        InitializeOriginalHeap(state, dispatcher);
+        InitializeOriginalPool(state, dispatcher);
+        for (const auto& range : std::vector<std::pair<uint32_t, uint32_t>>{
+                 {queue, 0x418}, {requests, 32}, {manager, 0x44}, {observer, 20}}) {
+            const auto offset = ppc_memory_offset(state, range.first, range.second);
+            std::fill(state.memory.begin() + offset,
+                      state.memory.begin() + offset + range.second, 0);
+        }
+        ppc_write_u32(state, 0x8034919cu, manager);
+        ppc_write_u32(state, 0x80349210u, manager);
+        ppc_write_u32(state, observer, vtable);
+        ppc_write_u32(state, vtable + 12, callback);
+        ppc_write_u32(state, observer + 12, queue);
+        ppc_write_u32(state, observer + 16, tracked + 1);
+        std::array<uint32_t, 4> sources{};
+        for (uint32_t index = 0; index < 4; ++index) {
+            const uint32_t request = requests + index * 8;
+            PrepareCall(state);
+            state.gpr[3] = 32;
+            state.gpr[4] = 0;
+            state.gpr[5] = 0;
+            dispatcher.Execute(state, index % 2 == 0 ? 0x8017860cu : 0x80178ff8u);
+            CheckReturn(state);
+            sources[index] = state.gpr[3];
+            const std::vector<uint8_t> bytes{'C', 'L', 'Z', 0, 0, 0, 0, 1,
+                                            0, 0, 0, 0, 0, 0, 0, 1, 0,
+                                            static_cast<uint8_t>('a' + index)};
+            const auto input = ppc_memory_offset(state, sources[index], bytes.size());
+            std::copy(bytes.begin(), bytes.end(), state.memory.begin() + input);
+            ppc_write_u32(state, request, sources[index]);
+            ppc_write_u8(state, request + 4, 1);
+            ppc_write_u8(state, request + 6, index % 2 == 0 ? 1 : 0);
+            PrepareCall(state);
+            state.gpr[3] = queue;
+            state.gpr[4] = request;
+            dispatcher.Execute(state, 0x8019a5ecu);
+            CheckReturn(state);
+            Require(ppc_read_u32(state, queue + 8) == index + 1 &&
+                        ppc_read_u32(state, queue + 12 + index * 4) == request,
+                    "Original batch enqueue lost its order or count.");
+        }
+        PrepareCall(state);
+        state.gpr[3] = queue;
+        state.gpr[4] = tracked < 4 ? observer : 0;
+        state.gpr[5] = tracked < 4 ? requests + tracked * 8 : 0;
+        dispatcher.Execute(state, 0x8019a65cu);
+        CheckReturn(state);
+        ppc_write_u8(state, queue + 0x414, 1);
+        const auto before = state.memory;
+        PrepareCall(state);
+        state.gpr[3] = queue;
+        dispatcher.Execute(state, 0x8019a6bcu);
+        CheckReturn(state);
+        Require(ppc_read_u32(state, queue + 4) == 4 &&
+                    ppc_read_u8(state, queue + 0x414) == 0 &&
+                    ppc_read_u32(state, observer + 4) == (tracked < 4 ? 1u : 0u) &&
+                    ppc_read_u32(state, 0x8034948cu) == 2 &&
+                    ppc_read_u32(state, 0x80349494u) == 2,
+                "Original mixed-pool decode batch counts, idle state or observer differ.");
+        std::vector<RelMemoryRange> writes{
+            {queue, 0x418}, {requests, 32}, {observer, 20},
+            {kPoolNodes, 128 * 24}, {kPool, 32}, {kNodes, 4096 * 24},
+            {kHeap, 32}, {0x8034948cu, 16}};
+        for (uint32_t index = 0; index < 4; ++index) {
+            writes.push_back({ppc_read_u32(state, requests + index * 8), 1});
+        }
+        CheckInitializationWrites(fixture, before, writes);
+        for (uint32_t index : {1u, 3u, 0u, 2u}) {
+            const uint32_t output = ppc_read_u32(state, requests + index * 8);
+            const bool normal = index % 2 == 0;
+            Require(output != sources[index] &&
+                        output >= (normal ? kArenaBottom : kPoolBottom) &&
+                        output + 1 <= (normal ? kArenaBottom + kArenaSize : kPoolBottom + kPoolSize) &&
+                        ppc_read_u8(state, output) == 'a' + index &&
+                        ppc_read_u8(state, requests + index * 8 + 5) == 1,
+                    "Original mixed-pool batch output bytes, allocation route or flags differ.");
+            const auto beforeFree = state.memory;
+            PrepareCall(state);
+            state.gpr[3] = manager;
+            state.gpr[4] = output;
+            dispatcher.Execute(state, 0x80190944u);
+            CheckReturn(state);
+            CheckInitializationWrites(fixture, beforeFree, {
+                {kPoolNodes, 128 * 24}, {kPool, 32}, {kNodes, 4096 * 24},
+                {kHeap, 32}, {0x8034948cu, 16}});
+        }
+        Require(ppc_read_u32(state, 0x8034948cu) == 0 &&
+                    ppc_read_u32(state, 0x80349494u) == 0 &&
+                    ppc_read_u32(state, kPool + 16) == kPoolNodes &&
+                    ppc_read_u32(state, kPoolNodes + 4) == kPoolSize &&
+                    ppc_read_u32(state, kPoolNodes + 8) == 0 &&
+                    ppc_read_u32(state, kPoolNodes + 12) == 1 &&
+                    ppc_read_u32(state, kHeap + 16) == kNodes &&
+                    ppc_read_u32(state, kNodes + 4) == kArenaSize &&
+                    ppc_read_u32(state, kNodes + 8) == 0 &&
+                    ppc_read_u32(state, kNodes + 12) == 1,
+                "Original mixed-pool release did not reclaim both complete arenas.");
+    }
+    PrepareCall(state);
+    state.gpr[3] = kPoolSize;
+    state.gpr[4] = 0;
+    state.gpr[5] = 0;
+    dispatcher.Execute(state, 0x8017860cu);
+    CheckReturn(state);
+    Require(state.gpr[3] == kPoolBottom, "Original alternate pool exact allocation failed.");
+    PrepareCall(state);
+    state.gpr[3] = 32;
+    state.gpr[4] = 0;
+    state.gpr[5] = 0;
+    dispatcher.Execute(state, 0x80178ff8u);
+    CheckReturn(state);
+    const uint32_t source = state.gpr[3];
+    const std::vector<uint8_t> bytes{'C', 'L', 'Z', 0, 0, 0, 0, 1,
+                                    0, 0, 0, 0, 0, 0, 0, 1, 0, 'z'};
+    const auto input = ppc_memory_offset(state, source, bytes.size());
+    std::copy(bytes.begin(), bytes.end(), state.memory.begin() + input);
+    ppc_write_u32(state, requests, source);
+    ppc_write_u8(state, requests + 4, 1);
+    ppc_write_u8(state, requests + 5, 0);
+    ppc_write_u8(state, requests + 6, 0);
+    ppc_write_u32(state, queue + 4, 0);
+    ppc_write_u32(state, queue + 8, 1);
+    ppc_write_u32(state, queue + 12, requests);
+    ppc_write_u8(state, queue + 0x414, 1);
+    ppc_write_u32(state, observer + 4, 0);
+    ppc_write_u32(state, queue + 0x40c, observer);
+    ppc_write_u32(state, queue + 0x410, requests);
+    const auto exhausted = state.memory;
+    PrepareCall(state);
+    state.gpr[3] = queue;
+    Reject([&] { dispatcher.Execute(state, 0x8019a6bcu); }, "0x801770A8");
+    Require(state.lr == 0x80178b54u && ppc_read_u32(state, requests) == source &&
+                ppc_read_u8(state, requests + 5) == 0 &&
+                ppc_read_u32(state, queue + 4) == 0 &&
+                ppc_read_u32(state, observer + 4) == 0,
+            "Exhausted original alternate pool lost input or reported decode success.");
+    CheckInitializationWrites(fixture, exhausted, {{0x8034948cu, 8}});
+    std::cout << "Original four-entry mixed-pool decode batches, first/last/null observers "
+                 "and alternate-pool exhaustion passed.\n";
 }
 
 void TestClzSemantics(const std::filesystem::path& directory) {
@@ -1705,12 +2322,18 @@ int main(int argc, char** argv) {
         TestOriginalArchives(argv[1]);
         TestOriginalDvdPaths(argv[1]);
         TestOriginalDvdReadHelpers(argv[1]);
+        TestOriginalDvdWakeup(argv[1]);
         TestClzSemantics(argv[1]);
+        TestOriginalDecodeQueue(argv[1]);
+        TestOriginalDecodeQueue(argv[1], {}, true);
+        TestOriginalDecodeBatch(argv[1]);
         std::cout << "Original compiled CLZ header, literals, overlapping/distant references "
                      "and padded multi-block semantics passed.\n";
         if (argc == 4) {
             TestOriginalDiscArchive(argv[1], argv[3]);
             TestOriginalDiscDvd(argv[1], argv[3]);
+            TestOriginalDecodeQueue(argv[1], argv[3]);
+            TestOriginalDecodeQueue(argv[1], argv[3], true);
             TestOriginalClz(argv[1], argv[3]);
             std::cout << "Original disc RVZ -> FST file read -> compiled U8/game getters passed; "
                          "all five resource payloads and nested animation archive verified.\n";
