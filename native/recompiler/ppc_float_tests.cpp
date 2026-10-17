@@ -443,6 +443,88 @@ void TestReciprocalSqrtEstimate() {
     }
 }
 
+void TestReciprocalEstimate() {
+    PpcState state;
+    const std::pair<uint64_t, uint64_t> known[] = {
+        {0x3ff0000000000000, 0x3fefff0000000000},
+        {0x4000000000000000, 0x3fdfff0000000000},
+        {0xbff0000000000000, 0xbfefff0000000000},
+        {0, 0x7ff0000000000000}, {0x8000000000000000, 0xfff0000000000000},
+        {0x7ff0000000000000, 0}, {0xfff0000000000000, 0x8000000000000000},
+        {0x7ff0000000001234, 0x7ff8000000001234},
+        {0xfff8000023456789, 0xfff8000023456789},
+        {1, 0x47efffffe0000000}, {0x8000000000000001, 0xc7efffffe0000000},
+        {0x37efffffffffffff, 0x47efffffe0000000},
+        {0x37f0000000000000, 0x47efff0000000000},
+        {0x47d0000000000000, 0}, {0xc7d0000000000000, 0x8000000000000000}
+    };
+    for (unsigned index = 0; index < std::size(known); ++index) {
+        for (unsigned mode = 0; mode < 4; ++mode) {
+            state.fpr[1] = {known[index].first, 0x123456789abcdef0};
+            state.fpscr = 0x60000 | mode;
+            PpcFloatReciprocalEstimate(state, 1, 1);
+            const auto flag = index == 3 || index == 4 ? 0x04000000u :
+                              index == 7 ? 0x01000000u : 0;
+            Require(state.fpr[1] == PpcFpr{known[index].second, known[index].second} &&
+                        (state.fpscr & 0x1ff80703u) == (flag | mode) &&
+                        (state.fpscr & 0x60000u) == (index < 3 || index >= 9 ? 0x60000u : 0),
+                    "Reciprocal estimate anchor, saturation, aliases, flags or FR/FI differs.");
+        }
+    }
+    for (unsigned index = 0; index < 32768; ++index) {
+        for (const uint64_t tail : {UINT64_C(0), (UINT64_C(1) << 37) - 1}) {
+            const auto input = UINT64_C(0x3ff0000000000000) | (uint64_t(index) << 37) | tail;
+            state.fpr[1].ps0 = input;
+            state.fpscr = 0;
+            PpcFloatReciprocalEstimate(state, 2, 1);
+            Require(std::abs(Bits<double>(state.fpr[2].ps0) * Bits<double>(input) - 1) < 1.0 / 4096,
+                    "Reciprocal estimate exceeds the 1/4096 relative-error bound.");
+        }
+    }
+    for (const uint32_t mode : {4u, 8u, 16u, 32u, 64u, 128u}) {
+        state.fpscr = mode;
+        state.fpr[1] = {1, 0x123456789abcdef0};
+        const auto before = state.fpr;
+        bool rejected = false;
+        try { PpcFloatReciprocalEstimate(state, 1, 1); }
+        catch (const std::runtime_error&) { rejected = true; }
+        Require(rejected && state.fpr == before && state.fpscr == mode,
+                "Unsupported reciprocal estimate mode did not fail atomically.");
+    }
+    for (bool second : {false, true}) {
+        for (bool ordered : {false, true}) {
+            for (const auto nan : {UINT64_C(0x7ff8000000000001), UINT64_C(0x7ff0000000000001)}) {
+                state.fpr[1] = second ? PpcFpr{0, nan} : PpcFpr{nan, 0};
+                state.fpr[2] = {0, 0};
+                state.cr = 0x12345678;
+                state.fpscr = 0;
+                PpcFloatCompare(state, 7, 1, 2, ordered, second);
+                Require(state.cr == 0x12345671 &&
+                            (state.fpscr & 0x01080000u) ==
+                                ((ordered ? 0x80000u : 0) |
+                                 (nan == UINT64_C(0x7ff0000000000001) ? 0x01000000u : 0)),
+                        "Paired ordered/unordered NaN comparison lost lane-specific exceptions.");
+            }
+        }
+        state.fpr[1] = second ? PpcFpr{0x7ff0000000000001, 0} : PpcFpr{0, 0x7ff0000000000001};
+        state.fpr[2] = {0x8000000000000000, 0x8000000000000000};
+        state.fpscr = 0;
+        PpcFloatCompare(state, 0, 1, 2, true, second);
+        Require(state.fpscr == 0x2000, "Paired comparison inspected the unselected lane or distinguished signed zero.");
+        for (const uint32_t mode : {4u, 8u, 16u, 32u, 64u, 128u}) {
+            state.fpr[1] = {1, 1};
+            state.fpscr = mode;
+            state.cr = 0x12345678;
+            const auto before = state.fpr;
+            bool rejected = false;
+            try { PpcFloatCompare(state, 0, 1, 2, true, second); }
+            catch (const std::runtime_error&) { rejected = true; }
+            Require(rejected && state.fpr == before && state.fpscr == mode && state.cr == 0x12345678,
+                    "Unsupported paired comparison mode did not preserve CR/FPSCR and registers.");
+        }
+    }
+}
+
 void TestRoundSingleAndMultiplier() {
     PpcState state;
     for (unsigned mode = 0; mode < 4; ++mode) {
@@ -557,6 +639,7 @@ int main() {
         TestPairedArithmetic();
         TestFusedAndSums();
         TestReciprocalSqrtEstimate();
+        TestReciprocalEstimate();
         TestRoundSingleAndMultiplier();
         TestDifferentialFinite();
     } catch (const std::exception& error) {

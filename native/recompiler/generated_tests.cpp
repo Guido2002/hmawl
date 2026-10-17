@@ -70,6 +70,39 @@ void TestRelocatedOperands() {
 }
 
 void TestFloatingPointArithmetic() {
+    for (unsigned index = 0; index < 4; ++index) {
+        PpcState state;
+        state.fpr[4] = {0x3ff0000000000000, 0x123456789abcdef0};
+        state.fpscr = 0x60004;
+        state.cr = 0x12345678;
+        ReciprocalTestFunctions[index](state);
+        Require(state.fpr[index % 2 ? 4 : 3] ==
+                    PpcFpr{0x3fefff0000000000, 0x3fefff0000000000} &&
+                    state.fpscr == 0x64004 &&
+                    state.cr == (index >= 2 ? 0x10345678u : 0x12345678u),
+                "Compiled fres destination alias, both result lanes, status or record bit differs.");
+    }
+    for (unsigned index = 0; index < 32; ++index) {
+        PpcState state;
+        state.fpr[4] = {0x3ff0000000000000, 0x4000000000000000};
+        state.fpr[5] = {0x4000000000000000, 0x3ff0000000000000};
+        state.cr = 0x12345678;
+        const auto before = state.fpr;
+        const auto field = index % 8;
+        const uint32_t condition = index >= 16 ? 4 : 8;
+        PairedCompareTestFunctions[index](state);
+        Require(state.fpr == before &&
+                    state.cr == ((0x12345678u & ~(15u << (28 - field * 4))) |
+                                 (condition << (28 - field * 4))) &&
+                    state.fpscr == condition << 12,
+                "Compiled paired compare selected the wrong lane, CR field or FPSCR condition.");
+        state.fpr[4] = {0x7ff8000000000001, 0x7ff8000000000001};
+        state.fpscr = 0;
+        PairedCompareTestFunctions[index](state);
+        Require(((state.cr >> (28 - field * 4)) & 15) == 1 &&
+                    (state.fpscr & 0x00080000u) == ((index / 8) % 2 ? 0x00080000u : 0),
+                "Compiled paired comparison decoded ordered/unordered NaN behavior incorrectly.");
+    }
     for (unsigned index = 0; index < 24; ++index) {
         PpcState state;
         state.fpr[4] = {0x4018000000000000, 0x4018000000000000};

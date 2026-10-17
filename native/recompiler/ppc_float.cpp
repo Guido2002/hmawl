@@ -445,6 +445,55 @@ void PpcFloatReciprocalSqrtEstimate(PpcState& state, unsigned destination, unsig
     state.fpr[destination].ps0 = result.bits;
 }
 
+void PpcFloatReciprocalEstimate(PpcState& state, unsigned destination, unsigned source) {
+    if (destination >= 32 || source >= 32) {
+        throw std::runtime_error("Invalid PowerPC reciprocal estimate register.");
+    }
+    if (state.fpscr & 0xf8u) {
+        throw std::runtime_error("PowerPC reciprocal estimate enabled exceptions are not implemented.");
+    }
+    const auto bits = state.fpr[source].ps0;
+    const auto value = Unpack(bits);
+    Result result{bits & Sign};
+    const auto exponent = unsigned((bits >> 52) & 0x7ff);
+    if (value.nan) {
+        result.bits = bits | Quiet;
+        if (value.signaling) result.flags = 0x01000000u;
+    } else if (!value.special && value.significand == 0) {
+        result.bits |= UINT64_C(0x7ff0000000000000);
+        result.flags = 0x04000000u;
+    } else if (!value.special) {
+        if ((state.fpscr & 4) && value.exponent < -1022) {
+            throw std::runtime_error("PowerPC non-IEEE denormal reciprocal estimate input is not implemented.");
+        }
+        if (exponent < 895) {
+            result.bits |= UINT64_C(0x47efffffe0000000);
+        } else if (exponent < 1149) {
+            // Measured Gekko estimate ROM base/decrement data; see ORIGINAL_STARTUP.md.
+            constexpr uint32_t bases[] = {
+                0x7ff800, 0x783800, 0x70ea00, 0x6a0800, 0x638800, 0x5d6200, 0x579000, 0x520800,
+                0x4cc800, 0x47ca00, 0x430800, 0x3e8000, 0x3a2c00, 0x360800, 0x321400, 0x2e4a00,
+                0x2aa800, 0x272c00, 0x23d600, 0x209e00, 0x1d8800, 0x1a9000, 0x17ae00, 0x14f800,
+                0x124400, 0x0fbe00, 0x0d3800, 0x0ade00, 0x088400, 0x065000, 0x041c00, 0x020c00
+            };
+            constexpr uint32_t decrements[] = {
+                0x3e1, 0x3a7, 0x371, 0x340, 0x313, 0x2ea, 0x2c4, 0x2a0,
+                0x27f, 0x261, 0x245, 0x22a, 0x212, 0x1fb, 0x1e5, 0x1d1,
+                0x1be, 0x1ac, 0x19b, 0x18b, 0x17c, 0x16e, 0x15b, 0x15b,
+                0x143, 0x143, 0x12d, 0x12d, 0x11a, 0x11a, 0x108, 0x106
+            };
+            const unsigned index = unsigned((bits & Fraction) >> 37);
+            const auto fraction = bases[index / 1024] -
+                (decrements[index / 1024] * (index % 1024) + 1) / 2;
+            result.bits |= (uint64_t(2045 - exponent) << 52) | (uint64_t(fraction) << 29);
+        }
+    }
+    const auto preserved = !value.special && value.significand ? state.fpscr & 0x60000u : 0;
+    CommitStatus(state, result, result.flags);
+    state.fpscr |= preserved;
+    state.fpr[destination] = {result.bits, result.bits};
+}
+
 void PpcFloatRoundSingle(PpcState& state, unsigned destination, unsigned source) {
     if (destination >= 32 || source >= 32) {
         throw std::runtime_error("Invalid PowerPC round-to-single register.");
@@ -479,14 +528,16 @@ void PpcPairedSum(PpcState& state, unsigned destination, unsigned left, unsigned
     state.fpr[destination] = sumInSecond ? PpcFpr{copy, sum.bits} : PpcFpr{sum.bits, copy};
 }
 
-void PpcFloatCompare(PpcState& state, unsigned field, unsigned left, unsigned right, bool ordered) {
+void PpcFloatCompare(PpcState& state, unsigned field, unsigned left, unsigned right,
+                     bool ordered, bool secondLane) {
     if (field >= 8 || left >= 32 || right >= 32) {
         throw std::runtime_error("Invalid PowerPC floating-point comparison register.");
     }
     if ((state.fpscr & 0xf8u) != 0) {
         throw std::runtime_error("PowerPC comparison with enabled FP exceptions is not implemented.");
     }
-    const auto x = state.fpr[left].ps0, y = state.fpr[right].ps0;
+    const auto x = secondLane ? state.fpr[left].ps1 : state.fpr[left].ps0;
+    const auto y = secondLane ? state.fpr[right].ps1 : state.fpr[right].ps0;
     const auto a = Unpack(x), b = Unpack(y);
     if ((state.fpscr & 4) && ((!a.special && a.significand && a.exponent < -1022) ||
                             (!b.special && b.significand && b.exponent < -1022))) {

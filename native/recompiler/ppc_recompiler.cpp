@@ -385,6 +385,16 @@ std::string RecompileFunction(uint32_t address,
         case 4: {
             const uint32_t extendedOpcode = Bits(instruction, 1, 10);
             const uint32_t arithmetic = Bits(instruction, 1, 5);
+            if (extendedOpcode == 0 || extendedOpcode == 32 ||
+                extendedOpcode == 64 || extendedOpcode == 96) {
+                if ((instruction & 0x00600001u) != 0) {
+                    throw std::runtime_error("Invalid paired comparison at " + Hex(pc) + ".");
+                }
+                output << "    PpcFloatCompare(state, " << (rt >> 2) << ", " << ra << ", " << rb
+                       << ", " << ((extendedOpcode & 32) ? "true" : "false")
+                       << ", " << ((extendedOpcode & 64) ? "true" : "false") << ");\n";
+                break;
+            }
             if (arithmetic == 10 || arithmetic == 11) {
                 output << "    PpcPairedSum(state, " << rt << ", " << ra << ", " << rb << ", "
                        << Bits(instruction, 6, 5) << ", "
@@ -496,6 +506,14 @@ std::string RecompileFunction(uint32_t address,
                        << (arithmetic == 18 ? "Divide" : arithmetic == 20 ? "Subtract" :
                            arithmetic == 21 ? "Add" : "Multiply")
                        << ", " << (opcode == 59 ? "true" : "false") << ");\n";
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
+            }
+            if (opcode == 59 && arithmetic == 24) {
+                if (ra != 0 || Bits(instruction, 6, 5) != 0) {
+                    throw std::runtime_error("Invalid fres encoding at " + Hex(pc) + ".");
+                }
+                output << "    PpcFloatReciprocalEstimate(state, " << rt << ", " << rb << ");\n";
                 EmitFpscrRecord(output, (instruction & 1u) != 0);
                 break;
             }

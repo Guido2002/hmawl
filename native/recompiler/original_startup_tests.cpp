@@ -9,6 +9,8 @@
 #include <chrono>
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -1274,6 +1276,18 @@ int main(int argc, char** argv) {
                 std::array<std::vector<uint32_t>, 3> taskMethods;
                 std::array<std::vector<uint32_t>, 3> taskObjects;
                 unsigned taskPass = 0;
+                std::vector<uint32_t> deferredMethods, cleanupMethods;
+                std::vector<uint32_t> updateQueue, sceneQueue, renderQueue;
+                const auto queuedObjects = [&](uint32_t list) {
+                    std::vector<uint32_t> objects;
+                    auto node = ppc_read_u32(pcmState, list + 4);
+                    while (node != list + 0x14) {
+                        Require(objects.size() < 8, "Original deferred task queue is cyclic or exceeds its bound.");
+                        objects.push_back(ppc_read_u32(pcmState, node + 0xc));
+                        node = ppc_read_u32(pcmState, node + 4);
+                    }
+                    return objects;
+                };
                 SceneConstructors sceneConstructors;
                 const auto transfer = pcmState.transferDisc;
                 pcmState.transferDisc = [&](const std::array<uint32_t, 3>& command, uint32_t length) {
@@ -1305,6 +1319,23 @@ int main(int argc, char** argv) {
                 };
                 bindPcmTest(pcmState, pcmTicks, submittedFrames);
                 const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 50000000, 128, [&](uint32_t pc) {
+                    if (pc == 0x8017d018u) {
+                        const auto tasks = ppc_read_u32(pcmState, 0x8034923cu);
+                        updateQueue = queuedObjects(tasks + 0x74);
+                        sceneQueue = queuedObjects(tasks + 0x48);
+                    }
+                    if (pc == 0x8017cf70u) {
+                        renderQueue = queuedObjects(ppc_read_u32(pcmState, 0x8034923cu) + 0x48);
+                    }
+                    if (pc == 0x80235d7cu &&
+                        (pcmState.lr == 0x8017d29cu || pcmState.lr == 0x8017d2fcu)) {
+                        const auto descriptor = pcmState.gpr[12];
+                        const auto vtable = ppc_read_u32(pcmState, pcmState.gpr[3] +
+                            ppc_read_u32(pcmState, descriptor) + ppc_read_u32(pcmState, descriptor + 8));
+                        auto& methods = pcmState.lr == 0x8017d29cu ? deferredMethods : cleanupMethods;
+                        Require(methods.size() < 2, "Original deferred update or cleanup repeated unexpectedly.");
+                        methods.push_back(ppc_read_u32(pcmState, vtable + ppc_read_u32(pcmState, descriptor + 4)));
+                    }
                     if (pc == 0x8000ac80u || pc == 0x8000ac8cu || pc == 0x8000ac98u) {
                         Require(taskPass < 3 && pc == 0x8000ac80u + taskPass * 12,
                                 "Original main did not complete its three task passes in order.");
@@ -1410,11 +1441,13 @@ int main(int argc, char** argv) {
                           << " thread context returns=" << pcmState.threadContextReturns
                           << " archive handles=" << archiveHandles << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            sceneProlog != 0 && pcmResult.pc == 0x8012ab20u && pcmResult.lr == 0x8017d29cu &&
+                            sceneProlog != 0 && pcmResult.pc == 0x80181e7cu && pcmResult.lr == 0x8017d180u &&
                             pcmResult.sceneModuleLinked && pcmResult.scenePrologEntered &&
                             pcmResult.sceneInitializationEntered && pcmResult.scenePrologReturned &&
                             pcmResult.sceneConstructorsReturned == 28 && pcmResult.systemTaskReturned &&
                             pcmResult.taskPassesReturned == 3 &&
+                            pcmResult.deferredUpdatesReturned && pcmResult.deferredUpdateQueueCleared &&
+                            pcmResult.screenPreparationReturned && pcmResult.renderQueuePrepared &&
                             sceneConstructors.returned == 28 && !sceneConstructors.active &&
                             !dispatcher.Contains(sceneProlog) &&
                             pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
@@ -1474,25 +1507,74 @@ int main(int argc, char** argv) {
                             ppc_read_u32(pcmState, fade + 0x60) == 1 &&
                             ppc_read_u32(pcmState, fade + 0x14) == 0x10000,
                         "Original asset update did not enter its first fade state and register the fade task.");
-                const auto queuedObjects = [&](uint32_t list) {
-                    std::vector<uint32_t> objects;
-                    auto node = ppc_read_u32(pcmState, list + 4);
-                    while (node != list + 0x14) {
-                        Require(objects.size() < 8, "Original deferred task queue is cyclic or exceeds its bound.");
-                        objects.push_back(ppc_read_u32(pcmState, node + 0xc));
-                        node = ppc_read_u32(pcmState, node + 4);
-                    }
-                    return objects;
-                };
                 const auto tasks = ppc_read_u32(pcmState, 0x8034923cu);
-                Require(queuedObjects(tasks + 0x74) ==
+                Require(updateQueue ==
                             std::vector<uint32_t>{taskObjects[0][1] + 0x30, taskObjects[0][5] + 0x30} &&
-                            queuedObjects(tasks + 0x48) ==
-                            std::vector<uint32_t>{taskObjects[0][5] + 0x18, taskObjects[0][4] + 0x18} &&
-                            pcmResult.argument3 == taskObjects[0][1] + 0x30,
+                            sceneQueue ==
+                            std::vector<uint32_t>{taskObjects[0][5] + 0x18, taskObjects[0][4] + 0x18},
                         "Original updates did not build the ordered audio/camera and camera/scene deferred queues.");
+                Require(deferredMethods == std::vector<uint32_t>{0x8012ab20u, 0x8008661cu} &&
+                            cleanupMethods == std::vector<uint32_t>{0x800094c8u, 0x800094c8u} &&
+                            queuedObjects(tasks + 0x74).empty() &&
+                            ppc_read_u32(pcmState, updateQueue[0]) == 0 &&
+                            ppc_read_u32(pcmState, updateQueue[0] + 4) == 0 &&
+                            ppc_read_u32(pcmState, updateQueue[1]) == 0 &&
+                            ppc_read_u32(pcmState, updateQueue[1] + 4) == 0,
+                        "Original deferred audio/camera callbacks did not return and unlink their queue nodes.");
+                Require(renderQueue == std::vector<uint32_t>{
+                            0x80315534u, 0x80315558u, 0x8031557cu, 0x803155a0u,
+                            0x803155c4u, sceneQueue[0], 0x803155e8u, sceneQueue[1]} &&
+                            pcmResult.argument3 == renderQueue.front(),
+                        "Original kernel did not merge its six render tasks with camera/scene in sorted order.");
+                const auto listener = ppc_read_u32(pcmState, taskObjects[0][1] + 0x54) + 0x84;
+                const std::array<uint32_t, 12> listenerInverse = {
+                    0xbf800000u, 0x80000000u, 0, 0x80000000u, 0x3f800000u, 0x80000000u,
+                    0, 0, 0xbf800000u, 0, 0, 0};
+                for (unsigned index = 0; index < listenerInverse.size(); ++index) {
+                    Require(ppc_read_u32(pcmState, listener + 0x50 + index * 4) == listenerInverse[index],
+                            "Original audio listener did not publish its inverse orientation/translation.");
+                }
+                Require(ppc_read_u32(pcmState, listener + 0x8c) == 0x3f800000u,
+                        "Original listener did not normalize its original 127-volume input to one.");
                 TestScenePlacements(image, sceneBytes);
                 const auto camera = returnedObjects.front();
+                const auto readFloat = [&](uint32_t address) {
+                    const auto bits = ppc_read_u32(pcmState, address);
+                    float value;
+                    std::memcpy(&value, &bits, sizeof(value));
+                    return double(value);
+                };
+                const auto view = ppc_read_u32(pcmState, 0x80349238u);
+                Require(ppc_read_u32(pcmState, view + 8) == camera + 0x9c &&
+                            ppc_read_u8(pcmState, view + 4) == 1,
+                        "Original camera did not publish its active view matrix.");
+                for (unsigned row = 0; row < 3; ++row) {
+                    double origin = readFloat(camera + 0x9c + row * 16 + 12);
+                    double direction = 0;
+                    for (unsigned column = 0; column < 3; ++column) {
+                        const auto coefficient = readFloat(camera + 0x9c + row * 16 + column * 4);
+                        origin += coefficient * readFloat(view + 0xc + column * 4);
+                        direction += coefficient * readFloat(view + 0x18 + column * 4);
+                    }
+                    Require(std::abs(origin) < 0.00001 &&
+                                std::abs(direction - readFloat(0x8026aa40u + row * 4)) < 0.00001,
+                            "Original inverse camera origin/direction does not map back through its source matrix.");
+                }
+                const auto gxData = ppc_read_u32(pcmState, pcmState.gpr[2] - 0x5f48u);
+                const auto nearPlane = readFloat(0x8034a644u);
+                const auto farPlane = readFloat(0x8034a66cu);
+                const std::array<double, 6> projection = {
+                    1.0 / 320, 0, -1.0 / 224, 0,
+                    -1.0 / (farPlane - nearPlane), -farPlane / (farPlane - nearPlane)};
+                const std::array<unsigned, 6> projectionOffsets = {0, 12, 20, 28, 40, 44};
+                Require(ppc_read_u32(pcmState, gxData + 0x4d8) == 1,
+                        "Original camera did not select the orthographic GX projection.");
+                for (unsigned index = 0; index < projection.size(); ++index) {
+                    Require(std::abs(readFloat(camera + 0x5c + projectionOffsets[index]) - projection[index]) < 0.000001 &&
+                                ppc_read_u32(pcmState, gxData + 0x4dc + index * 4) ==
+                                    ppc_read_u32(pcmState, camera + 0x5c + projectionOffsets[index]),
+                            "Original camera projection differs from its bounds or original GX projection state.");
+                }
                 Require(ppc_read_u32(pcmState, 0x80349228u) == camera &&
                             ppc_read_u32(pcmState, camera + 0x10) == 0x802aba5cu &&
                             ppc_read_u32(pcmState, camera + 0x28) == 0x802aba78u &&
@@ -1576,6 +1658,8 @@ int main(int argc, char** argv) {
                             plainResult.scenePrologEntered && plainResult.sceneInitializationEntered &&
                             plainResult.scenePrologReturned && plainResult.sceneConstructorsReturned == 28 &&
                             plainResult.systemTaskReturned && plainResult.taskPassesReturned == 3 &&
+                            plainResult.deferredUpdatesReturned && plainResult.deferredUpdateQueueCleared &&
+                            plainResult.screenPreparationReturned && plainResult.renderQueuePrepared &&
                             !dispatcher.Contains(sceneProlog) &&
                             plainResult.startupObjectsReturned == pcmResult.startupObjectsReturned &&
                             plainResult.resourceReadNotifications == pcmResult.resourceReadNotifications &&

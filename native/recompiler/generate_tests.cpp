@@ -446,6 +446,25 @@ int main(int argc, char** argv) {
             output << "};\n";
             Emit(output, 0xf280, {(63u << 26) | (3u << 21) | (4u << 11) | (15u << 1) | 1u});
             Emit(output, 0xf290, {(63u << 26) | (3u << 23) | (4u << 16) | (5u << 11) | (32u << 1)});
+            for (unsigned index = 0; index < 4; ++index) {
+                Emit(output, 0x11000u + index * 16,
+                     {(59u << 26) | ((index % 2 ? 4u : 3u) << 21) |
+                      (4u << 11) | (24u << 1) | (index / 2)});
+            }
+            output << "static void (*const ReciprocalTestFunctions[])(PpcState&) = {\n"
+                      "ppc_00011000, ppc_00011010, ppc_00011020, ppc_00011030};\n";
+            for (unsigned kind = 0; kind < 4; ++kind) {
+                for (unsigned field = 0; field < 8; ++field) {
+                    Emit(output, 0x11200u + kind * 128 + field * 16,
+                         {(4u << 26) | (field << 23) | (4u << 16) | (5u << 11) | (kind * 32u << 1)});
+                }
+            }
+            output << "static void (*const PairedCompareTestFunctions[])(PpcState&) = {\n";
+            for (unsigned index = 0; index < 32; ++index) {
+                output << "ppc_000" << std::hex << std::uppercase << (0x11200u + index * 16)
+                       << ",\n" << std::dec;
+            }
+            output << "};\n";
             Emit(output, 0xb400u, {0x38630001u, 0x4200fffcu, 0x38800001u}, {true, true});
             Emit(output, 0xb420u, {0x48000000u, 0x38800001u}, {true, true});
             Emit(output, 0xb430u, {0x4e800420u, 0x38800001u}, {true, true});

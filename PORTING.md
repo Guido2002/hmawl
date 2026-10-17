@@ -78,8 +78,10 @@ Its relocatable native prolog executes all 28 original C++ constructors, loads
 mode-41 scene assets and returns to SystemTask at `0x80177C88`.
 SystemTask and all three original task-list passes now return to main. The first
 scene/asset update registers the original fade task and builds real deferred queues.
-With `--max-blocks 50000000`, the next untranslated deferred audio callback is
-`PC=0x8012AB20`, LR `0x8017D29C`.
+Deferred audio/camera updates and queue cleanup now return, followed by original
+Screen frame preparation and the kernel's sorted render-task insertion.
+With `--max-blocks 50000000`, the next untranslated render-state callback is
+`PC=0x80181E7C`, LR `0x8017D180`.
 The original main loop enters its first iteration and its reset/update/resource/
 audio preparation returns, but no complete iteration or rendered frame is verified.
 The default one-million-block limit can expire earlier.
@@ -766,6 +768,20 @@ queue. Full runtime scheduling and device services are still needed.
   audio/camera and camera/scene deferred queues. Preserve full observed/unobserved
   CPU/RAM, interrupt, PCM and DSP parity. Main reaches the deferred audio callback
   at `0x8012AB20`, LR `0x8017D29C`; rendering and a completed loop remain unverified.
+- [x] Complete original deferred audio/camera updates and prepare the render queue.
+  Compile the connected listener/vector/inverse-matrix preparation, camera inverse,
+  orthographic projection, queue-node cleanup and kernel render-task insertion.
+  Add statically compiled paired comparisons and scalar `fres` using the existing
+  checked floating-point core and measured Gekko estimate-ROM data, not host
+  reciprocal substitution. Verify NaNs, selected lanes, rounding modes, aliases,
+  CR/FPSCR, the 1/4096 estimate error bound and atomic rejection of unsupported modes.
+  Verify the original listener matrix, inverse camera origin/direction and GX
+  projection against the actual camera bounds. Check both deferred callbacks,
+  node unlinking, the empty update queue and all eight sorted render entries.
+  Full observed/unobserved CPU/RAM/interrupt/PCM/DSP parity remains required.
+  Screen frame preparation returns; main enters the first kernel render-state
+  callback at `0x80181E7C`, LR `0x8017D180`, where translation remains missing.
+  No draw, displayed frame, completed loop or audible music is claimed.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -978,13 +994,15 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue the original deferred audio callback from `0x8012AB20`,
-   LR `0x8017D29C`, through the queued camera/scene work toward Screen and a
-   completed main-loop iteration.
+1. Continue the original render-state callback from `0x80181E7C`,
+   LR `0x8017D180`, through the sorted kernel/camera/scene render queue toward
+   real geometry and a completed main-loop iteration.
    The genuine relocated `wlp1.rel` prolog now executes all 28 constructors,
    followed by original scene/asset loading and 31 completed DVD reads.
    Its prolog now returns with the loader queue drained; SystemTask and all three
    task-list passes return with real deferred queues and the first fade registered.
+   Deferred audio/camera updates now finish, their queue clears and original
+   Screen frame preparation returns before the kernel schedules six render tasks.
    Scope discovery to the actual transition and
    indirect targets instead of lifting the existing compiler safety bound. The first
    game-system initialization now returns to main in the Windows runner; original

@@ -222,8 +222,9 @@ SystemTask transition at `0x8017755C`. It now loads and links the original scene
 executes all 28 module constructors and enters mode-41 scene initialization.
 Manager initialization, resource loading and SystemTask now return. All three
 original task-list passes execute, including the first scene/asset update and
-fade registration. The next dependency is the deferred audio callback
-at `0x8012AB20`, LR `0x8017D29C`.
+fade registration. Deferred audio/camera updates, queue cleanup and Screen frame
+preparation now return. The kernel schedules its original render tasks; the next
+dependency is its first render-state callback at `0x80181E7C`, LR `0x8017D180`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -397,8 +398,10 @@ and a real 128-byte resource read. Its original main loop enters the first itera
 reset dispatch, update-mask calculation and resource/audio preparation return.
 SystemTask now loads and links `wlp1.rel` through the original SDK `OSLink`.
 The relocated prolog executes its 28 constructors, loads scene assets and returns.
-SystemTask and the three original task-list passes now return. The next
-untranslated deferred audio callback is `PC=0x8012AB20`, LR `0x8017D29C`;
+SystemTask and the three original task-list passes now return. Deferred
+audio/camera updates, queue cleanup, Screen frame preparation and kernel render
+scheduling return. The next untranslated render-state callback is
+`PC=0x80181E7C`, LR `0x8017D180`;
 DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier.
 Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
@@ -508,9 +511,18 @@ relocations. The original asset changes state 0 to 1, starts its fade and regist
 the fade task, which participates in the later passes. The task-list manager
 toggles its active list; its constructor reset is checked separately before update.
 The deferred queues contain the actual audio/camera and camera/scene subobjects
-in sorted order. Their first audio callback is the next untranslated dependency:
-`0x8012AB20`, LR `0x8017D29C`. No deferred queue completion, completed loop
-iteration or rendered scene is verified. No runtime PPC decoder or
+in sorted order. Both deferred callbacks now return: the audio listener publishes
+its original orientation, inverse matrix and normalized volume, and the camera
+publishes its active view and orthographic GX projection. The fixture independently
+checks that inverse camera origin/direction map back through the source matrix and
+that projection coefficients match the original 640x448 bounds and depth planes.
+Original cleanup invokes both node callbacks, unlinks the nodes and empties the
+update queue. Screen's draw-sync check and frame preparation return.
+The original kernel inserts six render-state tasks; tests verify all eight resulting
+entries, including camera and scene, in exact sorted order. The first original
+render-state callback is the next untranslated dependency:
+`0x80181E7C`, LR `0x8017D180`. No completed render pass, main-loop iteration
+or rendered scene is verified. No runtime PPC decoder or
 replacement linker is involved in the original startup path.
 An independent `BUILD_TESTING=OFF` Windows build reaches the same dependency;
 production execution does not depend on the test generator or fixture bindings.
@@ -591,6 +603,16 @@ replacing the intermediate with binary32 would lose the console's extra bit.
 `frsp` supplies checked round-to-single conversion, preserving the undefined ps1
 lane in this profile. `cror` supports the original camera comparison sequence.
 
+Paired ordered/unordered comparisons select lane 0 or 1 and share the scalar
+comparison's checked CR/FPSCR and NaN handling. Unselected lanes are untouched.
+`fres` fills both destination lanes using the 32 measured reciprocal-ROM
+base/decrement pairs, integer interpolation and the console's small/large-input
+saturation thresholds, not an exact host reciprocal. Tests verify anchors, all
+32768 interpolation steps at both tail endpoints with relative error below
+1/4096, saturation endpoints, signed zeros/infinities/NaNs, aliases, CR1 and
+unsupported-mode atomicity. Finite nonzero `fres` preserves FR/FI in this profile;
+zero and special inputs clear them.
+
 `frsqrte` uses integer normalization, exponent-parity selection and piecewise
 linear interpolation of the 32 measured Gekko estimate-ROM base/decrement pairs.
 The factual ROM data is recorded in Dolphin's
@@ -602,12 +624,12 @@ no emulator runtime, host square-root substitution or copied emulator implementa
 is linked. Tests check exact estimate anchors, every 11-bit interpolation step
 of all 32 segments against the required relative-error bound of 1/4096, binary64
 endpoint normalization, signed zero/infinity/NaN handling, flags and CR1.
-FR/FI are architecturally undefined for estimates; this profile clears them.
+FR/FI are architecturally undefined for estimates; this profile clears them for `frsqrte`.
 20,000 strict host fused-reference iterations and 20,000 independent 25-bit
 multiplier/conversion iterations complement rounding, alias and failure tests.
 Original startup NI mode works for normal inputs/results; denormal NI behavior
 and enabled FP exceptions still fail explicitly before mutation. Broadcast fused
-forms and reciprocal estimates other than scalar `frsqrte` remain unsupported.
+forms and paired reciprocal estimates remain unsupported.
 
 ### Checked EFB clear and XFB RAM copy
 

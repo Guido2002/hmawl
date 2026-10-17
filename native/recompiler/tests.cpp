@@ -411,6 +411,11 @@ void TestInvalidFloatingPointInstructions() {
         (4u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (13u << 1),
         (63u << 26) | (1u << 16) | (12u << 1),
         (63u << 26) | (1u << 16) | (26u << 1),
+        (59u << 26) | (1u << 16) | (24u << 1),
+        (59u << 26) | (1u << 6) | (24u << 1),
+        (4u << 26) | (1u << 21) | (32u << 1),
+        (4u << 26) | (64u << 1) | 1u,
+        (4u << 26) | (2u << 21) | (96u << 1),
         0x4c401383u // CR logical instructions reserve the record/link bit.
     };
     for (uint32_t instruction : instructions) {
