@@ -853,8 +853,12 @@ std::string RecompileFunction(uint32_t address,
                 expression = "state.gpr[" + std::to_string(rt) + "] & " +
                     (extendedOpcode == 60 ? "~" : "") + right;
                 break;
+            case 535:
+            case 567:
             case 599:
             case 631:
+            case 663:
+            case 695:
             case 727:
             case 759: {
                 if (record) {
@@ -865,8 +869,8 @@ std::string RecompileFunction(uint32_t address,
                     ra == 0 ? "0u" : "state.gpr[" + std::to_string(ra) + "]";
                 EmitFloatingTransfer(output, pc, rt, ra,
                     base + " + state.gpr[" + std::to_string(rb) + "]",
-                    extendedOpcode == 599 || extendedOpcode == 631,
-                    extendedOpcode == 631 || extendedOpcode == 759);
+                    extendedOpcode < 663, (extendedOpcode & 32u) != 0,
+                    (extendedOpcode & 64u) == 0);
                 emitted = true;
                 break;
             }
@@ -973,6 +977,11 @@ std::string RecompileFunction(uint32_t address,
             case 11:
                 expression = "static_cast<uint32_t>((static_cast<uint64_t>(" +
                              left + ") * " + right + ") >> 32)";
+                break;
+            case 75:
+                expression = "static_cast<uint32_t>(static_cast<uint64_t>("
+                             "static_cast<int64_t>(static_cast<int32_t>(" + left +
+                             ")) * static_cast<int32_t>(" + right + ")) >> 32)";
                 break;
             case 459:
                 expression = "ppc_divide_unsigned32(" + left + ", " + right + ")";

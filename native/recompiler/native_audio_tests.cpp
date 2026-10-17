@@ -225,6 +225,96 @@ void TestDspTaskLoader() {
             "Restarted native loader retained parameters/registers or erased historical DMA evidence.");
 }
 
+void TestPcmDma() {
+    for (uint32_t rateBit : {0u, 0x40u}) {
+        uint64_t ticks = 0;
+        auto state = AudioState(ticks);
+        *state.aiControl = rateBit;
+        state.pcm.emplace();
+        auto& pcm = *state.pcm;
+        std::vector<std::vector<int16_t>> submitted;
+        bool stopped = false;
+        state.submitPcm = [&](const std::vector<int16_t>& samples, uint32_t rate) {
+            Require(rate == (rateBit ? 32028u : 48043u), "PCM backend received the wrong DSP sample rate.");
+            submitted.push_back(samples);
+        };
+        state.stopPcm = [&] { stopped = true; };
+        ppc_write_u16(state, 0xcc005032u, 32);
+        ppc_write_u16(state, 0x80000020u, 0x1234);
+        ppc_write_u16(state, 0x80000022u, 0x8000);
+        ppc_write_u16(state, 0x80000024u, 0xffff);
+        const auto ram = state.memory;
+        ppc_write_u16(state, 0xcc005036u, 0x8002);
+        Require(pcm.active && pcm.starts == 1 && pcm.submittedFrames == 16 && pcm.remainingBlocks == 2 &&
+                    submitted.size() == 1 && submitted[0].size() == 32 &&
+                    submitted[0][0] == 0x1234 && submitted[0][1] == INT16_MIN && submitted[0][2] == -1 &&
+                    state.memory == ram && pcm.completedBuffers == 0 && (*state.dspControl & 8) == 0,
+                "PCM enable did not submit actual endian-decoded RAM or fabricated a completion.");
+        const uint64_t blockTicks = rateBit ? 10116 : 6744;
+        auto coarse = state, fine = state;
+        coarse.submitPcm = fine.submitPcm = [](const std::vector<int16_t>&, uint32_t) {};
+        NativePcmAdvance(coarse, 7 * blockTicks + 3);
+        for (uint64_t tick = 1; tick <= 7 * blockTicks + 3; ++tick) NativePcmAdvance(fine, tick);
+        Require(coarse.pcm->completedBuffers == 3 && coarse.pcm->submittedFrames == 64 &&
+                    coarse.pcm->remainingBlocks == 1 && coarse.pcm->phase == 3 &&
+                    coarse.pcm->lastTicks == fine.pcm->lastTicks && coarse.pcm->phase == fine.pcm->phase &&
+                    coarse.pcm->completedBuffers == fine.pcm->completedBuffers &&
+                    coarse.pcm->submittedFrames == fine.pcm->submittedFrames &&
+                    coarse.pcm->remainingBlocks == fine.pcm->remainingBlocks,
+                "PCM rational timing depends on dispatcher sampling granularity.");
+        auto broken = state;
+        broken.submitPcm = [](const std::vector<int16_t>&, uint32_t) { throw std::runtime_error("Reload failed."); };
+        Reject([&] { NativePcmAdvance(broken, 2 * blockTicks); });
+        Require(broken.pcm->lastTicks == 0 && broken.pcm->remainingBlocks == 2 &&
+                    broken.pcm->submittedFrames == 16 && broken.pcm->completedBuffers == 0 &&
+                    (*broken.dspControl & 8u) == 0,
+                "Rejected PCM reload fabricated time, DMA completion, IRQ or backend acceptance.");
+        NativePcmAdvance(state, blockTicks - 1);
+        Require(ppc_read_u16(state, 0xcc00503a) == 2 && pcm.phase == blockTicks - 1,
+                "PCM progressed before its rational block boundary.");
+        NativePcmAdvance(state, blockTicks);
+        Require(pcm.remainingBlocks == 1 && submitted.size() == 1, "PCM block countdown/remainder is incorrect.");
+        ppc_write_u16(state, 0x80000020u, 0x5678);
+        NativePcmAdvance(state, 2 * blockTicks);
+        Require(pcm.completedBuffers == 1 && pcm.remainingBlocks == 2 && pcm.submittedFrames == 32 &&
+                    submitted.size() == 2 && submitted[0][0] == 0x1234 && submitted[1][0] == 0x5678 &&
+                    (*state.dspControl & 8) && ppc_pi_interrupt_cause(state) == 0,
+                "PCM reload missed actual RAM changes or failed to latch independently of its interrupt mask.");
+        ppc_write_u16(state, 0xcc00500a, 0x14);
+        Require(ppc_pi_interrupt_cause(state) == 0x40, "PCM DMA interrupt used the wrong PI source.");
+        ppc_write_u16(state, 0xcc00500a, 0x1c);
+        Require(ppc_pi_interrupt_cause(state) == 0, "PCM DMA interrupt W1C failed.");
+        const auto control = *state.aiControl;
+        Reject([&] { NativeAiWrite(state, 0xcc006c00, control ^ 0x40u, 4); });
+        Require(*state.aiControl == control, "Live PCM rate change partially committed AI state.");
+        const auto before = pcm;
+        Reject([&] { NativePcmAdvance(state, 2 * blockTicks - 1); });
+        Require(pcm.lastTicks == before.lastTicks && pcm.remainingBlocks == before.remainingBlocks,
+                "Backwards PCM time partially committed.");
+        ticks = 2 * blockTicks;
+        ppc_write_u16(state, 0xcc005036, 2);
+        NativePcmAdvance(state, 100 * blockTicks);
+        Require(stopped && !pcm.active && pcm.remainingBlocks == 0 && pcm.completedBuffers == 1 &&
+                    submitted.size() == 2 && ppc_read_u16(state, 0xcc005036) == 2,
+                "Disabled PCM retained DMA progress or did not stop the backend.");
+        state.submitPcm = [](const std::vector<int16_t>&, uint32_t) { throw std::runtime_error("Playback failure."); };
+        Reject([&] { ppc_write_u16(state, 0xcc005036, 0x8002); });
+        Require(!pcm.active && pcm.starts == 1 && pcm.submittedFrames == 32 &&
+                    ppc_read_u16(state, 0xcc005036) == 2,
+                "Failed playback fabricated enabled DMA or sample submission.");
+        state.submitPcm = [&](const std::vector<int16_t>& samples, uint32_t) { submitted.push_back(samples); };
+        ppc_write_u16(state, 0xcc005030, 0x3ff);
+        Reject([&] { ppc_write_u16(state, 0xcc005036, 0x8002); });
+        Require(!pcm.active && submitted.size() == 2, "Unmapped PCM buffer reached its output backend.");
+        ppc_write_u16(state, 0xcc005030, 0);
+        Reject([&] { ppc_write_u16(state, 0xcc005036, 0x8000); });
+        state.stopPcm = {};
+        Reject([&] { ppc_write_u16(state, 0xcc005036, 0x8002); });
+        Require(!pcm.active && pcm.starts == 1 && submitted.size() == 2,
+                "Missing stop backend or empty DMA buffer reported PCM success.");
+    }
+}
+
 void TestAramRegistersAndTransfers() {
     uint64_t ticks = 0;
     auto state = AudioState(ticks);
@@ -289,6 +379,17 @@ void TestAramRegistersAndTransfers() {
     ppc_write_u32(state, 0xcc005024u, 0x3ffffe0);
     ppc_write_u32(state, 0xcc005028u, 32);
     Require(dsp.dmaAramAddress == 0 && dsp.absentAramWrites == 2, "ARAM DMA address did not wrap to register width.");
+    dsp.task.emplace();
+    dsp.task->mode = NativeDspTaskMode::Running;
+    state.executeDspTask = [](PpcState&) { throw std::runtime_error("Test must not execute a synthetic DSP task."); };
+    *state.dspControl = 0;
+    dsp.programHalted = false;
+    ppc_write_u32(state, 0xcc005020u, 0);
+    ppc_write_u32(state, 0xcc005024u, 0);
+    ppc_write_u32(state, 0xcc005028u, 32);
+    Require(dsp.aram[0] == state.memory[0] && (*state.dspControl & 0x20) &&
+                !dsp.programHalted && dsp.executedInstructions == 0,
+            "ARAM bus DMA with a compiled live DSP task lost bytes or fabricated task execution.");
 }
 
 } // namespace
@@ -299,7 +400,9 @@ int main() {
         TestAiRegistersAndDmaGuards();
         TestAramRegistersAndTransfers();
         TestDspTaskLoader();
-        std::cout << "Native AI/ARAM/task-loader tests passed; no PCM playback or synthetic task execution claimed.\n";
+        TestPcmDma();
+        std::cout << "Native AI/ARAM/task-loader/PCM DMA tests passed with explicit test output sinks; "
+                     "no audible game audio claimed.\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Native audio test failure: " << error.what() << '\n';

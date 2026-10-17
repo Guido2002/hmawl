@@ -578,6 +578,7 @@ int main(int argc, char** argv) {
                         discResult.screenInitReturned && discResult.arInitReturned &&
                         discResult.arqInitReturned && discResult.aiInitReturned &&
                         discResult.dspInitReturned && discResult.dspTaskAdded && discResult.audioTaskInitReturned &&
+                        !discResult.pcmDmaStartReturned && !discResult.gameInitializationReturned &&
                         !discState.callGuest && !discState.callException &&
                         discResult.reason == "Audio DMA enable requires a native PCM playback backend." &&
                         discState.discInterface->completedTransfers == 1 &&
@@ -1048,7 +1049,77 @@ int main(int argc, char** argv) {
                             ppc_read_msr(interrupted) == ppc_read_msr(resumedState),
                         "Original AI handler did not acknowledge the sample interrupt and restore context.");
                 std::cout << "Test AI sample threshold executed the original AI handler and exception return; "
-                             "production startup does not request PCM playback.\n";
+                             "this library fixture deliberately has no PCM backend.\n";
+            }
+            {
+                auto pcmState = CreateOriginalStartupState(image);
+                InstallOriginalStartupDisc(pcmState, disc);
+                pcmState.pcm.emplace();
+                uint64_t pcmTicks = 1000000;
+                uint64_t submittedFrames = 0;
+                unsigned pcmHandlers = 0, pcmCallbacks = 0;
+                const auto bindPcmTest = [](PpcState& guest, uint64_t& ticks, uint64_t& frames) {
+                    guest.readTimeBase = [&guest, &ticks] {
+                        return ticks += ((*guest.aiControl & 1u) || guest.pcm->active) ? 8 : 1000;
+                    };
+                    guest.writeConsole = [](const std::string&) {};
+                    guest.submitPcm = [&frames](const std::vector<int16_t>& samples, uint32_t rate) {
+                        Require(rate == 32028 && samples.size() == 320, "Original PCM buffer shape or DSP rate changed.");
+                        if (!frames) {
+                            Require(std::all_of(samples.begin(), samples.end(), [](int16_t sample) { return sample == 0; }),
+                                    "Original zero-initialized PCM buffer changed.");
+                        }
+                        frames += samples.size() / 2;
+                    };
+                    guest.stopPcm = [] { throw std::runtime_error("Unexpected PCM stop in original first-command fixture."); };
+                };
+                bindPcmTest(pcmState, pcmTicks, submittedFrames);
+                const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 1000000, 128, [&](uint32_t pc) {
+                    if (pc == 0x801c1bc0u) ++pcmHandlers;
+                    if (pc == 0x801f2ab8u) ++pcmCallbacks;
+                });
+                std::cout << "PCM integration: PC=" << std::hex << pcmResult.pc << " LR=" << pcmResult.lr << std::dec
+                          << " reason=" << pcmResult.reason << " frames=" << submittedFrames
+                          << " periods=" << pcmState.pcm->completedBuffers << " handlers=" << pcmHandlers
+                          << " callbacks=" << pcmCallbacks << " DSP PC=" << pcmState.dspHardware->instructionPc << '\n';
+                Require(pcmResult.stop == OriginalStartupStop::Dependency &&
+                            pcmResult.pc == 0x801f2e50 && pcmResult.lr == 0x801f2e50 &&
+                            pcmResult.reason == "Native DSP task needs a translation at word 79 (instruction 33280)." &&
+                            pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
+                            pcmState.pcm->active && pcmState.pcm->starts == 1 &&
+                            pcmState.pcm->completedBuffers == 1 && pcmState.pcm->submittedFrames == submittedFrames &&
+                            submittedFrames == 320 && pcmHandlers == 1 && pcmCallbacks == 1 &&
+                            pcmState.dspHardware->task->cpuMailSent == 11 &&
+                            pcmState.dspHardware->task->cpuMailConsumed == 10 &&
+                            pcmState.dspHardware->toDspMailbox == 0xbabe0024u &&
+                            pcmState.dspHardware->instructionPc == 0x4f &&
+                            pcmState.dspHardware->completedPrograms == 1 &&
+                            !pcmState.systemCallActive && pcmState.externalInterrupt->active &&
+                            pcmState.externalInterrupt->inHandler,
+                        "Original PCM IRQ/callback did not reach its real DSP command or fabricated mixing/return.");
+                auto plainPcm = CreateOriginalStartupState(image);
+                InstallOriginalStartupDisc(plainPcm, disc);
+                plainPcm.pcm.emplace();
+                uint64_t plainTicks = 1000000, plainFrames = 0;
+                bindPcmTest(plainPcm, plainTicks, plainFrames);
+                const auto plainResult = RunOriginalStartup(dispatcher, plainPcm);
+                Require(plainResult.pc == pcmResult.pc && plainResult.lr == pcmResult.lr &&
+                            plainResult.reason == pcmResult.reason && plainTicks == pcmTicks &&
+                            plainFrames == submittedFrames && plainPcm.memory == pcmState.memory &&
+                            std::equal(std::begin(plainPcm.gpr), std::end(plainPcm.gpr), std::begin(pcmState.gpr)) &&
+                            plainPcm.fpr == pcmState.fpr &&
+                            plainPcm.cr == pcmState.cr && plainPcm.xer == pcmState.xer &&
+                            plainPcm.ctr == pcmState.ctr && plainPcm.lr == pcmState.lr &&
+                            plainPcm.srr0 == pcmState.srr0 && plainPcm.srr1 == pcmState.srr1 &&
+                            ppc_read_msr(plainPcm) == ppc_read_msr(pcmState) &&
+                            plainPcm.pcm->remainingBlocks == pcmState.pcm->remainingBlocks &&
+                            plainPcm.pcm->lastTicks == pcmState.pcm->lastTicks &&
+                            plainPcm.pcm->phase == pcmState.pcm->phase &&
+                            plainPcm.pcm->completedBuffers == pcmState.pcm->completedBuffers &&
+                            plainPcm.dspHardware->executedInstructions == pcmState.dspHardware->executedInstructions &&
+                            plainPcm.externalInterrupt->delivered == pcmState.externalInterrupt->delivered &&
+                            plainPcm.externalInterrupt->returned == pcmState.externalInterrupt->returned,
+                        "PCM observation changed CPU/RAM, DMA timing, original interrupts or native DSP execution.");
             }
             auto damagedConstructor = CreateOriginalStartupState(image);
             InstallOriginalStartupDisc(damagedConstructor, disc);

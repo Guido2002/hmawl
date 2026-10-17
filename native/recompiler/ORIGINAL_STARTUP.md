@@ -119,6 +119,7 @@ threshold-crossing test verifies the original handler acknowledgement, SDK mask
 restoration, exception return and complete interrupted CPU register preservation.
 This clock produces no PCM data or sound. Disabled PCM-DMA address/block registers
 retain configuration; enabling playback explicitly fails without a PCM backend.
+The Windows CLI now binds the actual output backend described below.
 
 The bounded DSP compiler emits native C++ for the init subset, not a runtime
 instruction decoder. Instruction/data-ROM load loops can be eliminated only when
@@ -142,6 +143,39 @@ task; reset clears the live protocol, and the explicit loader profile starts fre
 parameters/registers. Unsupported instructions, stack accesses, task memory or
 mailbox overwrites fail explicitly. Command processing next needs translation at
 DSP word `0x4F`; command-list DMA and mixing are not implemented.
+
+### Windows PCM output and DMA
+
+On Windows, the CLI binds a lazily opened default `waveOut` device, not a silent
+sink. Device/open/prepare/write/reset/queue errors propagate to the runner.
+Packets retain their signed-16 stereo sample storage and prepared header until
+Windows marks them done; stop/exit resets the device and releases its packets.
+Cleanup failures are reported. A full 256-packet queue fails rather than discarding
+an incoming buffer. Other hosts and the default library state have no
+output backend and retain the explicit AIStartDMA dependency error.
+
+The native DMA profile snapshots a full programmed buffer from actual big-endian
+RAM on start/reload, converts sample byte order, and commits enable/accounting only
+after its output backend accepts the buffer. This is explicitly buffer-granular,
+not certification of the hardware's intra-buffer memory-fetch timing. Native
+remaining-length reads count 32-byte blocks (eight stereo frames); the exact NTSC
+clock advances a block per 10116 or 6744 time-base ticks, selected by AIDFR.
+Start/stop, preserved pending configuration, reload, independently latched DSP
+DMA IRQ, masks and W1C are stateful. The Windows format uses the closest integer
+rates, 32028 or 48043 Hz; there is no sample-accurate host/DSP synchronization claim.
+Live rate changes, missing/failed backends and excessive catch-up fail explicitly.
+This is not yet certified glitch-free continuous playback.
+
+Actual DMA periods enter the original AI DMA handler at `0x801C1BC0` and original
+buffer callback at `0x801F2AB8`. Original ARAM/ARQ transfers also run alongside the
+compiled task, with real copies and original completion callbacks. The cache-sync
+`sc/rfi` inside the audio callback preserves the outer external-interrupt state;
+general nested external interrupts remain unsupported rather than dropped.
+Indexed single-float transfers and signed high multiplication execute the original
+audio parameter/command preparation. The resulting CPU mail is the actual
+`0xBABE0024` header, not an injected test command or synthesized DSP completion.
+Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
+game audio, completed DSP mixing, a game window or a rendered frame.
 
 ### Native console SRAM
 
@@ -181,9 +215,11 @@ The external vector separately verifies unpatched DOL source words at registrati
 and exception-number-patched installed words at runtime. Its first rfi enters the
 original handler; original OSLoadContext's final rfi restores the interrupted
 context and abandons the handler's nested native call chain. Both exception
-stages retain shared dispatch budgets. Nested exceptions and thread switches fail
-explicitly. This is not an arbitrary MMU: other BAT mappings, protection regions,
-non-SI/DI interrupt delivery and context-switching rfi remain unsupported. Native MI setup
+stages retain shared dispatch budgets. A system call from an already-entered external
+handler is supported separately; nested external interrupts and arbitrary thread
+switches fail explicitly. This is not an arbitrary MMU: other BAT mappings,
+protection regions and unsupported interrupt/context-switch paths remain explicit
+dependencies. Native MI setup
 supports only all-readable/writable permissions, interrupt acknowledgement and
 the address-error interrupt mask; missing devices and other settings fail.
 The recompiler's
@@ -281,7 +317,7 @@ bytes, including the corresponding low-memory total. Five ARAM DMA transfers
 include two reads and one write to the explicitly disconnected expansion.
 Original AI calibration advances four sample-clock steps and resets the counter
 five times in the deterministic regression. Volume is zero and final control is
-`0x46`; PCM DMA remains disabled with 20 blocks configured.
+`0x46`; in the no-output library fixture PCM DMA remains disabled with 20 blocks configured.
 The audio-engine/voice setup reaches 178 real heap allocations without overlaps
 or escaped arena bounds. Original `DCStoreRangeNoSync` executes checked `dcbst`
 operations against coherent RAM.
@@ -291,17 +327,25 @@ The original task clears its accumulators, initializes DRAM, writes its init mai
 asserts DSP IRQ and waits. The original CPU DSP interrupt handler and init callback
 each execute once, setting the actual task-initialized guest flag; original
 audio-task initialization returns at `0x801F0FC4`.
-The next dependency is `PC=0x801C165C`, LR `0x801F2CAC`, SP `0x8035CEC8`:
+Without a PCM backend, the next dependency is `PC=0x801C165C`, LR `0x801F2CAC`, SP `0x8035CEC8`:
 original AIStartDMA enables playback without a native PCM backend. This fails
 explicitly before enabling DMA. The task remains running/waiting at DSP word
 `0x4A`, not halted or completed. The only completed DSP program remains the earlier
 initializer. Total DSP output/consumption is 3/3: the initializer's real message,
 the explicit native loader greeting and the task's actual init message. The task
 has asserted exactly one IRQ. No ROM bytes or task-ready/completion messages are
-fabricated. The steady-clock runner observes 16880 total DSP steps in a measured
-run; polling counts depend on elapsed host time.
+fabricated. This no-PCM library profile retains its independently checked boundary.
+With the real Windows backend bound, original AIStartDMA returns. Actual timed
+reloads execute the original handler/callback and its cache-sync system call, then
+send `0xBABE0024`. A measured runner execution reaches `PC=LR=0x801F2E50`,
+SP `0x8035CAB8`, DSP PC `0x4F`, where the original `CMP` needs translation.
+That run submits 3040 actual RAM frames at 32028 Hz, completes 18 DMA periods and
+enters the original handler/callback twice. These steady-clock counts depend on
+host elapsed time. Host timing can also expose other untranslated startup paths;
+the next scene constructor at `0x80086044` is not bound yet. No mixed or audible
+game audio, renderer, scanout or main loop is claimed.
 The inquiry result remains `0x8001` and the entire real FST is intact.
-The deterministic regression uses 1000 ticks per clock sample when AI is stopped,
+The no-PCM deterministic regression uses 1000 ticks per clock sample when AI is stopped,
 and 8 while its sample clock is running, resolving the SDK's sub-sample calibration
 window without modifying guest code or injecting a calibration result.
 It executes exactly 17507 total DSP steps, returns 170 external exceptions
@@ -313,8 +357,14 @@ Real-disc tests verify every constructor in original table order and preservatio
 of its stack, SDA and nonvolatile integer/floating registers. Traced and untraced
 startup produce identical RAM, CPU state, AI/DSP/ARAM state, output and sampled time; damaged
 constructor words fail integrity validation without claiming later milestones.
+The separate deterministic PCM fixture uses 8 ticks while either AI sampling or PCM
+DMA is active. One actual timed DMA period submits the second 160-frame buffer and
+executes exactly one original handler/callback. It reaches the same real DSP command
+boundary with 320 submitted frames, eleven CPU mail words sent/ten consumed, no
+completed task and no finished outer interrupt. Observed and unobserved executions
+match RAM/CPU state, clock samples, DMA phase/counts and interrupt/DSP steps.
 The game main loop, GX renderer,
-general scheduled game-thread execution, PCM playback, input and saves have not run.
+general scheduled game-thread execution, input and saves have not run.
 
 The next connected milestone is native execution of the original DSP bootstrap/task
 handoff, then completion of original audio/game initialization. PCM DMA still needs
@@ -472,6 +522,9 @@ and execution backend plus modified DSP program rejection,
 complete original task IRAM bytes and guards, host/DSP mailbox counts, actual
 task interrupt and CPU callback, running/waiting versus completed program state,
 and corrupt-task rejection before IRAM upload or init callback,
+original PCM start/remaining/reload/handler/buffer callback, real first DSP header,
+system-call return inside the active interrupt and complete observed/unobserved
+PCM-path equivalence using an explicitly test-only output sink,
 original real-mode BAT/SRR state, five MI handler slots, exact native RAM metadata,
 complete poisoned arena clearing and its exclusive upper guard, integer kernel
 reports and absent memory/BAT/reset-profile failures,

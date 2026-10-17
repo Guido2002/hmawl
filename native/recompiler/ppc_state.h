@@ -7,6 +7,7 @@
 #include "native_aram.h"
 #include "native_ai.h"
 #include "native_dsp_task.h"
+#include "native_pcm.h"
 
 #include <algorithm>
 #include <array>
@@ -177,6 +178,9 @@ struct PpcState {
     std::function<void(PpcState&)> executeDspInitialization;
     std::function<void(PpcState&)> executeDspTask;
     std::function<void(const PpcState&, uint32_t, uint16_t, uint16_t, uint16_t)> validateDspTask;
+    std::optional<NativePcm> pcm;
+    std::function<void(const std::vector<int16_t>&, uint32_t)> submitPcm;
+    std::function<void()> stopPcm;
     std::optional<uint32_t> aiControl;
     std::optional<NativeAi> audio;
     std::optional<uint32_t> diConfiguration;
@@ -525,6 +529,7 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
         if (address == 0xcc005030u) return static_cast<uint16_t>(dsp.audioDmaAddress >> 16);
         if (address == 0xcc005032u) return static_cast<uint16_t>(dsp.audioDmaAddress);
         if (address == 0xcc005036u) return dsp.audioDmaBlocks;
+        if (address == 0xcc00503au) return state.pcm ? state.pcm->remainingBlocks : 0;
         if (address == 0xcc005000u) return static_cast<uint16_t>(dsp.toDspMailbox >> 16);
         if (address == 0xcc005002u) return static_cast<uint16_t>(dsp.toDspMailbox);
         if (address == 0xcc005004u) return static_cast<uint16_t>(dsp.fromDspMailbox >> 16);
@@ -888,19 +893,8 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
     }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
         auto& dsp = *state.dspHardware;
-        if (address == 0xcc005030u) {
-            dsp.audioDmaAddress = (dsp.audioDmaAddress & 0xffffu) | (uint32_t(value & 0x3ffu) << 16);
-            return;
-        }
-        if (address == 0xcc005032u) {
-            dsp.audioDmaAddress = (dsp.audioDmaAddress & 0xffff0000u) | (value & 0xffe0u);
-            return;
-        }
-        if (address == 0xcc005036u) {
-            if (value & 0x8000u) {
-                throw std::runtime_error("Audio DMA enable requires a native PCM playback backend.");
-            }
-            dsp.audioDmaBlocks = value;
+        if (address == 0xcc005030u || address == 0xcc005032u || address == 0xcc005036u) {
+            NativePcmWrite(state, address, value);
             return;
         }
         if (NativeAramAddress(address)) {
@@ -1199,7 +1193,7 @@ inline void ppc_call_guest(PpcState& state, uint32_t address) {
 inline void ppc_system_call(PpcState& state, uint32_t next) {
     if (state.memoryMap != PpcMemoryMap::GameCubeRam || state.systemCallActive ||
         (state.ramBats && state.ramBats->realModeActive) ||
-        (state.externalInterrupt && state.externalInterrupt->active) ||
+        (state.externalInterrupt && state.externalInterrupt->active && !state.externalInterrupt->inHandler) ||
         !state.callException || (ppc_read_msr(state) & ~0xa032u) != 0) {
         throw std::runtime_error("Unsupported or nested native PowerPC system-call context.");
     }
@@ -1215,9 +1209,9 @@ inline void ppc_system_call(PpcState& state, uint32_t next) {
 }
 
 inline void ppc_return_from_system_call(PpcState& state) {
-    if (state.externalInterrupt && state.externalInterrupt->active) {
+    if (state.externalInterrupt && state.externalInterrupt->active && !state.systemCallActive) {
         auto& interrupt = *state.externalInterrupt;
-        if (state.systemCallActive || (state.srr0 & 3u) != 0 ||
+        if ((state.srr0 & 3u) != 0 ||
             (state.srr1 & ~0xa032u) != 0) {
             throw std::runtime_error("Unsupported external interrupt rfi state.");
         }

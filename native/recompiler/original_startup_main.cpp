@@ -1,5 +1,6 @@
 #include "original_startup.h"
 #include "native_sram.h"
+#include "native_windows_audio.h"
 
 #include <charconv>
 #include <iostream>
@@ -60,6 +61,9 @@ int RunCli(int argc, Character** argv) {
             InstallOriginalStartupDisc(state, *disc);
         }
         BindNativeSram(state, LoadOrCreateNativeSram(sramPath));
+#ifdef _WIN32
+        BindNativeWindowsPcm(state);
+#endif
         NativeDispatcher dispatcher;
         RegisterOriginalStartup(dispatcher, state);
         std::cout << "Executing hash-verified original USA DOL entry 0x80003154 "
@@ -71,7 +75,7 @@ int RunCli(int argc, Character** argv) {
                      "empty memory-card slots/SP1 and disconnected controllers, native console "
                      "(bounded strings/32-bit integers), persisted SRAM reads (writes/RTC/ROM unimplemented); "
                      "16 MiB ARAM, explicit disconnected expansion, synchronous DMA, native AI sample clock/volume "
-                     "(no PCM playback), explicit BIOS-free DSP task loader and compiled original task startup "
+                     "(PCM requires a bound output device), explicit BIOS-free DSP task loader and compiled original task startup "
                      "(DSP ROM execution/mixing unimplemented); "
                      "162 MHz bus/486 MHz CPU metadata, steady-clock 40.5 MHz time base.\n";
         std::cout << "Native SRAM profile: " << sramPath.u8string() << '\n';
@@ -80,7 +84,11 @@ int RunCli(int argc, Character** argv) {
                       << "Drive: native RVZ virtual drive, revision 1, no console firmware/date; "
                          "checked read/inquiry DMA, original DVD interrupts; expired timer exceptions unsupported.\n";
         }
-        const auto result = RunOriginalStartup(dispatcher, state, blocks, depth);
+        uint64_t pcmHandlers = 0, pcmCallbacks = 0;
+        const auto result = RunOriginalStartup(dispatcher, state, blocks, depth, [&](uint32_t pc) {
+            if (pc == 0x801c1bc0u) ++pcmHandlers;
+            if (pc == 0x801f2ab8u) ++pcmCallbacks;
+        });
         std::cerr << DescribeOriginalStartupStop(result) << '\n';
         if (state.dspHardware) {
             const auto& dsp = *state.dspHardware;
@@ -102,7 +110,16 @@ int RunCli(int argc, Character** argv) {
             const auto& ai = *state.audio;
             std::cerr << "Native AI: volume=0x" << std::hex << ai.volume << " control=0x"
                       << state.aiControl.value() << std::dec << ", " << ai.advancedSamples
-                      << " timed sample-clock steps, " << ai.resets << " counter resets. No PCM playback.\n";
+                      << " timed sample-clock steps, " << ai.resets << " counter resets; "
+                      << "PCM playback is reported separately.\n";
+        }
+        if (state.pcm) {
+            const auto& pcm = *state.pcm;
+            std::cerr << "Native Windows PCM: active=" << pcm.active << ", rate=" << pcm.sampleRate
+                      << ", submitted frames=" << pcm.submittedFrames << ", completed DMA periods="
+                      << pcm.completedBuffers << ", remaining blocks=" << pcm.remainingBlocks
+                      << ", original handler/callback entries=" << pcmHandlers << "/" << pcmCallbacks
+                      << ". Submitted RAM data, not proof of DSP mixing or audible game audio.\n";
         }
         if (state.graphics) {
             const auto& gx = *state.graphics;

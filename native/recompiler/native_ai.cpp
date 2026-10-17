@@ -50,6 +50,9 @@ void NativeAiWrite(PpcState& state, uint32_t address, uint32_t value, unsigned w
     if (address < 0xcc006c00u || address > 0xcc006c0cu) {
         throw std::runtime_error("Unknown native AI register write.");
     }
+    if (address == 0xcc006c00u && state.pcm && state.pcm->active && ((*state.aiControl ^ value) & 0x40u)) {
+        throw std::runtime_error("Native PCM live rate changes are not implemented.");
+    }
     if (!state.readTimeBase) throw std::runtime_error("Native AI requires a time-base backend.");
     const auto ticks = state.readTimeBase();
     NativeAiAdvance(state, ticks);

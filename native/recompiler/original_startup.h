@@ -37,6 +37,8 @@ struct OriginalStartupResult {
     bool dspInitReturned = false;
     bool dspTaskAdded = false;
     bool audioTaskInitReturned = false;
+    bool pcmDmaStartReturned = false;
+    bool gameInitializationReturned = false;
     uint32_t constructorsReturned = 0;
 };
 
@@ -46,7 +48,8 @@ void InstallOriginalStartupDisc(PpcState& state, RvzImage& disc);
 void RegisterOriginalStartup(NativeDispatcher& dispatcher, const PpcState& state);
 OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState& state,
                                         size_t blockBudget = 1000000,
-                                        size_t maxCallDepth = 128);
+                                        size_t maxCallDepth = 128,
+                                        const std::function<void(uint32_t)>& onBlock = {});
 std::string DescribeOriginalStartupStop(const OriginalStartupResult& result);
 
 #endif

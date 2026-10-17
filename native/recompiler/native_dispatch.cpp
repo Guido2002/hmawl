@@ -135,6 +135,10 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
     state.pc = address;
     do {
         NativeDspAdvanceTask(state);
+        if (state.pcm && state.pcm->active) {
+            if (!state.readTimeBase) throw std::runtime_error("Native PCM requires a time-base backend.");
+            NativePcmAdvance(state, state.readTimeBase());
+        }
         if (state.audio && state.aiControl && (*state.aiControl & 1u)) {
             if (!state.readTimeBase) throw std::runtime_error("Native AI requires a time-base backend.");
             NativeAiAdvance(state, state.readTimeBase());

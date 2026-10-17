@@ -421,25 +421,27 @@ void TestFloatingPointTransfers() {
 
 void TestSingleTransfers() {
     using Transfer = void (*)(PpcState&);
-    const Transfer transfers[] = {ppc_0000B700, ppc_0000B710, ppc_0000B720, ppc_0000B730};
+    const Transfer transfers[] = {ppc_0000B700, ppc_0000B710, ppc_0000B720, ppc_0000B730,
+                                  ppc_0000B760, ppc_0000B770, ppc_0000B780, ppc_0000B790};
     for (uint32_t bits : {0u, 0x80000000u, 1u, 0x807fffffu, 0x00800000u, 0x3f800000u,
                           0xbf800000u, 0x7f7fffffu, 0x7f800000u, 0xff800000u,
                           0x7fc12345u, 0xff812345u}) {
-        for (unsigned operation = 0; operation < 4; ++operation) {
+        for (unsigned operation = 0; operation < 8; ++operation) {
             PpcState state;
             state.memoryMap = PpcMemoryMap::GameCubeRam;
             state.memory.resize(kGameCubeRamSize, 0xcc);
             state.gpr[3] = 0xc0000104u;
+            state.gpr[4] = 0xfffffffcu;
             state.fpr[3] = {ppc_widen_single_bits(bits), UINT64_C(0xdeadbeef12345678)};
             state.fpscr = 0x12345678u;
             state.cr = 0x87654321u;
-            ppc_write_u32(state, 0x80000100u, operation < 2 ? bits : 0xa5a5a5a5u);
+            ppc_write_u32(state, 0x80000100u, operation % 4 < 2 ? bits : 0xa5a5a5a5u);
             const auto before = state;
             transfers[operation](state);
             Require(state.gpr[3] == (operation % 2 ? 0xc0000100u : before.gpr[3]) &&
                         state.fpscr == before.fpscr && state.cr == before.cr &&
                         state.fpr[3].ps0 == ppc_widen_single_bits(bits) &&
-                        state.fpr[3].ps1 == (operation < 2 ? ppc_widen_single_bits(bits) :
+                        state.fpr[3].ps1 == (operation % 4 < 2 ? ppc_widen_single_bits(bits) :
                                                           before.fpr[3].ps1) &&
                         ppc_read_u32(state, 0x100u) == bits,
                     "Compiled single transfer lost raw bits, paired lane, alias, update or FPSCR state.");
@@ -451,12 +453,13 @@ void TestSingleTransfers() {
             Require(state.memory == expected, "Compiled single transfer wrote outside its four-byte destination.");
         }
     }
-    for (unsigned operation = 0; operation < 4; ++operation) {
+    for (unsigned operation = 0; operation < 8; ++operation) {
         for (uint32_t base : {0x80000105u, 0x81800004u, 0xfffffffcu}) {
             PpcState state;
             state.memoryMap = PpcMemoryMap::GameCubeRam;
             state.memory.resize(kGameCubeRamSize, 0xcc);
             state.gpr[3] = base;
+            state.gpr[4] = 0xfffffffcu;
             state.fpr[3] = {UINT64_C(0x3ff0000000000000), UINT64_C(0x4000000000000000)};
             const auto before = state;
             bool failed = false;
@@ -485,6 +488,21 @@ void TestSingleTransfers() {
     Require(ppc_read_u32(absolute, 0x100u) == 0x3f800000u &&
                 ppc_read_u32(absolute, 0x104u) == 0xa5a5a5a5u,
             "Single store did not truncate the mantissa or wrote eight bytes.");
+    absolute.gpr[4] = 0x100;
+    ppc_0000B7A0(absolute);
+    Require(absolute.fpr[3].ps0 == UINT64_C(0x3ff0000000000000),
+            "Indexed single load used nonzero GPR0.");
+    absolute.fpr[3].ps0 = UINT64_C(0xbff0000000000000);
+    ppc_0000B7B0(absolute);
+    Require(ppc_read_u32(absolute, 0x100) == 0xbf800000u, "Indexed single store used nonzero GPR0.");
+    absolute.gpr[3] = 0x80;
+    ppc_0000B7C0(absolute);
+    Require(absolute.gpr[3] == 0x100 && absolute.fpr[3].ps0 == UINT64_C(0xbff0000000000000),
+            "Indexed single update load lost an aliased address register.");
+    absolute.gpr[3] = 0x80;
+    ppc_0000B7D0(absolute);
+    Require(absolute.gpr[3] == 0x100 && ppc_read_u32(absolute, 0x100) == 0xbf800000u,
+            "Indexed single update store lost an aliased address register.");
 }
 
 void TestFloatingPointMoves() {
@@ -2331,6 +2349,23 @@ void TestCompiledSystemCall() {
                     state.cr == 0x12345678u && state.xer == 0xe0000000u &&
                     !state.callGuest && !state.callException,
                 "Compiled sc/rfi did not restore MSR, EE, continuation, LR or callback ownership.");
+        state.externalInterrupt.emplace();
+        state.externalInterrupt->active = true;
+        state.externalInterrupt->inHandler = true;
+        state.externalInterrupt->resume = 0x9000;
+        state.externalInterrupt->savedMsr = 0x8032;
+        state.externalInterrupt->delivered = 3;
+        state.externalInterrupt->returned = 2;
+        dispatcher.Execute(state, 0xb5b0u);
+        Require(!state.systemCallActive && state.externalInterrupt->active &&
+                    state.externalInterrupt->inHandler && state.externalInterrupt->resume == 0x9000 &&
+                    state.externalInterrupt->savedMsr == 0x8032 && state.externalInterrupt->delivered == 3 &&
+                    state.externalInterrupt->returned == 2 && state.pc == 0xf000u &&
+                    ppc_read_msr(state) == mode && state.lr == 0xf000u,
+                "System call inside a guest interrupt handler prematurely returned the outer exception.");
+        state.externalInterrupt->inHandler = false;
+        Reject([&] { dispatcher.Execute(state, 0xb5b0u); }, "system-call context");
+        state.externalInterrupt.reset();
         Reject([&] { dispatcher.Execute(state, 0xb5b0u, 2); }, "budget exceeded");
         Require(!state.callException && !state.callGuest && !state.systemCallActive,
                 "Exception dispatch did not share the block budget or restore its callbacks.");
@@ -2479,6 +2514,32 @@ void TestMultiplyHighUnsigned() {
                             state.gpr[5] == right && state.xer == 0xe0000000u &&
                             state.cr == (record ? (field << 28) | 0x02345678u : 0x12345678u),
                         "Unsigned high multiply result, record flags or input preservation differs.");
+            }
+        }
+    }
+}
+
+void TestMultiplyHighSigned() {
+    using Function = void (*)(PpcState&);
+    const Function functions[] = {ppc_0000B7E0, ppc_0000B7F0, ppc_0000B800, ppc_0000B810};
+    for (uint32_t left : {0u, 1u, 0x55555556u, 0x7fffffffu, 0x80000000u, UINT32_MAX}) {
+        for (uint32_t right : {0u, 1u, 3u, 0x7fffffffu, 0x80000000u, UINT32_MAX}) {
+            for (unsigned operation = 0; operation < 4; ++operation) {
+                PpcState state;
+                state.gpr[4] = left;
+                state.gpr[5] = right;
+                state.cr = 0x12345678;
+                state.xer = 0xe0000000;
+                const auto product = int64_t(static_cast<int32_t>(left)) * static_cast<int32_t>(right);
+                const auto expected = static_cast<uint32_t>(static_cast<uint64_t>(product) >> 32);
+                functions[operation](state);
+                const unsigned destination = operation < 2 ? 3 : operation == 2 ? 4 : 5;
+                const uint32_t field = expected == 0 ? 3u : expected & 0x80000000u ? 9u : 5u;
+                Require(state.gpr[destination] == expected && state.xer == 0xe0000000 &&
+                            state.cr == (operation & 1 ? (field << 28) | 0x02345678u : 0x12345678u) &&
+                            (destination == 4 || state.gpr[4] == left) &&
+                            (destination == 5 || state.gpr[5] == right),
+                        "Signed high multiply lost sign, aliased input or CR/XER state.");
             }
         }
     }
@@ -3945,6 +4006,7 @@ int main() {
         TestExiInitializationRegisters();
         TestExiImmediateTransactions();
         TestMultiplyHighUnsigned();
+        TestMultiplyHighSigned();
         TestSiStartupHardwareAndArithmetic();
         TestSiTransactionsAndPendingInterrupt();
         TestDiscDmaAndDeadline();

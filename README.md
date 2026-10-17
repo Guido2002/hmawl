@@ -115,11 +115,17 @@ also return in the runner. An explicit BIOS-free native loader accepts the origi
 mail protocol and validates/copies 6624 actual task bytes into DSP instruction RAM.
 The build-time-compiled task itself writes its init mail and asserts its interrupt;
 the original CPU handler and task-init callback execute. No DSP ROM is executed.
-The runner stops with **exit code 3** at
-`PC=0x801C165C`, `LR=0x801F2CAC`: original AIStartDMA requires a native PCM
-playback backend. The task is waiting for CPU commands at DSP word `0x4A`, not
-completed; command-list DMA and mixing remain untranslated. There is no PCM playback.
-No ROM bytes, task-ready mail or task completion are fabricated.
+The Windows runner now binds a real `waveOut` PCM backend. Original AIStartDMA
+returns after actual RAM samples are accepted by Windows; timed DMA reloads assert
+their IRQ and execute the original CPU audio handler and buffer callback. Checked
+ARAM/ARQ transfers also continue with the live compiled DSP task. The original audio
+callback sends its first real DSP command, `0xBABE0024`.
+With an available output device, a verified runner execution stops with **exit code 3**
+at `PC=LR=0x801F2E50`, DSP word `0x4F`: the task's command-processing `CMP` still
+needs translation, followed by command-list DMA and mixing. Initial PCM buffers
+contain original zero samples, not intro music. Device/queue errors fail explicitly;
+hosts or library callers without a PCM backend retain the AIStartDMA dependency error.
+No ROM bytes, task-ready mail, mixed samples or task completion are fabricated.
 Draws, unsupported copy modes and texture DMA still fail
 explicitly. Pixel scanout, a game window/intro and the game main loop have not run.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices

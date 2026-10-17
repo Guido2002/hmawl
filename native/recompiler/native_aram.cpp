@@ -5,9 +5,10 @@ namespace {
 
 void Transfer(PpcState& state, uint32_t count) {
     auto& dsp = *state.dspHardware;
-    if (!state.dspControl || (*state.dspControl & 4u) == 0 ||
+    const bool compiledTask = dsp.task && dsp.task->mode == NativeDspTaskMode::Running && state.executeDspTask;
+    if (!state.dspControl || ((*state.dspControl & 4u) == 0 && !compiledTask) ||
         (count & ~0x83ffffe0u) != 0 || (count & 0x03ffffe0u) == 0) {
-        throw std::runtime_error("ARAM DMA requires halted DSP and a nonzero aligned transfer length.");
+        throw std::runtime_error("ARAM DMA requires a halted or compiled DSP and a nonzero aligned transfer length.");
     }
     const auto length = count & 0x03ffffe0u;
     const auto offset = ppc_memory_offset(state, dsp.dmaMainAddress, length);

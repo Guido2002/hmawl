@@ -33,6 +33,7 @@ add_library(hmawl_recompiler_core
     native_ai.cpp
     native_dsp_task.cpp
     dsp_task_recompiler.cpp
+    native_pcm.cpp
 )
 target_compile_features(hmawl_recompiler_core PUBLIC cxx_std_17)
 target_include_directories(hmawl_recompiler_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -58,6 +59,10 @@ if(HMAWL_ORIGINAL_US_DOL)
     target_link_libraries(hmawl_original_startup_runtime PUBLIC hmawl_recompiler_core)
     add_executable(hmawl_original_startup original_startup_main.cpp)
     target_link_libraries(hmawl_original_startup PRIVATE hmawl_original_startup_runtime)
+    if(WIN32)
+        target_sources(hmawl_original_startup PRIVATE native_windows_audio.cpp)
+        target_link_libraries(hmawl_original_startup PRIVATE winmm)
+    endif()
     if(BUILD_TESTING)
         add_executable(hmawl_original_startup_tests original_startup_tests.cpp)
         target_link_libraries(hmawl_original_startup_tests PRIVATE hmawl_original_startup_runtime)

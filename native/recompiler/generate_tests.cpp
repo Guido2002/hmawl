@@ -620,6 +620,18 @@ int main(int argc, char** argv) {
             }
             Emit(output, 0xb740u, {(48u << 26) | (3u << 21) | 0x100u});
             Emit(output, 0xb750u, {(52u << 26) | (3u << 21) | 0x100u});
+            unsigned indexedSingle = 0;
+            for (unsigned opcode : {535u, 567u, 663u, 695u}) {
+                Emit(output, 0xb760u + indexedSingle++ * 16u, {XForm(3, 3, 4, opcode)});
+            }
+            Emit(output, 0xb7a0u, {XForm(3, 0, 4, 535)});
+            Emit(output, 0xb7b0u, {XForm(3, 0, 4, 663)});
+            Emit(output, 0xb7c0u, {XForm(3, 3, 3, 567)});
+            Emit(output, 0xb7d0u, {XForm(3, 3, 3, 695)});
+            Emit(output, 0xb7e0u, {XForm(3, 4, 5, 75)});
+            Emit(output, 0xb7f0u, {XForm(3, 4, 5, 75, true)});
+            Emit(output, 0xb800u, {XForm(4, 4, 5, 75)});
+            Emit(output, 0xb810u, {XForm(5, 4, 5, 75, true)});
             unsigned unary = 0;
             for (unsigned opcode : {72u, 40u, 264u, 136u}) {
                 for (bool record : {false, true}) {

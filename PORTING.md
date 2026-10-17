@@ -62,9 +62,14 @@ Original DSPInit, DSPAddTask and audio-task initialization now return in the run
 The explicit BIOS-free native loader validates/copies 6624 original DSP task bytes;
 their statically compiled startup sends its own init mail and interrupt. The original
 CPU DSP handler and init callback execute, without running or fabricating DSP ROM.
-The next runner boundary is original AIStartDMA at `PC=0x801C165C`, LR `0x801F2CAC`,
-SP `0x8035CEC8`: no native PCM playback backend is bound. The task remains waiting
-for CPU commands at DSP word `0x4A`; command-list DMA and mixing remain untranslated.
+The Windows runner now binds actual `waveOut` PCM playback and continues through
+AIStartDMA, timed RAM-DMA reloads and original AI interrupt/buffer callbacks.
+Original ARAM/ARQ completion callbacks also execute with the live DSP task.
+Its first real DSP command `0xBABE0024` reaches DSP word `0x4F`; the current measured
+runner boundary is `PC=LR=0x801F2E50`, SP `0x8035CAB8`, on that untranslated `CMP`.
+Command-list DMA and mixing remain untranslated. The original initial PCM buffers
+contain zero samples; Windows buffer acceptance is not proof of audible game audio.
+Callers without a PCM backend still fail explicitly at original AIStartDMA.
 No task-ready message or completed audio task is synthesized.
 Pixel scanout, the main loop and a rendered game frame remain unfinished.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
@@ -624,6 +629,25 @@ queue. Full runtime scheduling and device services are still needed.
   LR `0x801F2CAC`, SP `0x8035CEC8`, explicitly requiring a PCM backend.
   The task is running/waiting at word `0x4A`, not completed; ROM execution,
   command-list DMA, DSP mixing, sound and a game frame remain unimplemented.
+- [x] Continue the connected chain through real Windows PCM submission, DMA timing,
+  original AI/ARAM/ARQ interrupt callbacks and the first original DSP command.
+  Decode actual big-endian stereo signed-16 RAM buffers and submit them to checked
+  `waveOut` packets with retained lifetime, completion reclamation and explicit
+  device/prepare/write/stop/queue failures. Model bounded per-buffer snapshots,
+  exact rational block timing, remaining-length reads, reloads and DMA IRQ/W1C.
+  Native register timing is not certification of cycle-exact fetch or glitch-free
+  continuous output. The Windows sample rate is the nearest integer to the actual
+  NTSC rate; live rate changes are explicitly rejected.
+  Permit checked ARAM bus transfers with an active compiled DSP task, register
+  original completion/free callbacks, add indexed single-float memory transfers
+  and signed high multiplication, and let the original cache-sync system call
+  return inside an already-entered external handler without completing that handler.
+  Deterministic real-DOL tests submit 320 frames through an explicit test sink and
+  execute one original PCM handler/callback, reaching real pending mail `0xBABE0024`
+  and the DSP `CMP` boundary at word `0x4F`. Observed/unobserved runs match complete
+  RAM/CPU state, clock, DMA and interrupt/DSP counts. The real Windows runner also
+  reaches this boundary after actual device submissions; host-time counts vary.
+  No original mixing, audible game music, intro frame or main loop is claimed.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -836,14 +860,14 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue the connected audio chain beyond original AIStartDMA at `0x801C165C`:
-   bind actual Windows PCM playback, model RAM DMA progression/completion interrupts,
-   then execute the original CPU audio callback and DSP command-mail path. The
-   initialized task currently waits at DSP word `0x4A`; its next command instruction
-   at `0x4F`, command-list DMA and subsequent mixing still need native translations.
+1. Continue the original DSP command chain beyond word `0x4F`: implement its compare/
+   conditional control flow, actual RAM-to-DSP command-list DMA and the following
+   original processing/mixing instructions together. Windows PCM submission, DMA
+   timing/interrupts, the original CPU callback and real `0xBABE0024` command already
+   execute in the runner; output buffers still contain original zero samples.
    Do not discard samples, fabricate callback completion or substitute a native
    mixer for the original task. OSInit, all 93 DOL constructors, Screen and DSP
-   audio-task initialization already return in the production runner; the original
+   audio-task initialization already return in the production runner; the remaining
    game initialization and main loop, real GX draws and intro frame remain the goal.
 2. Expand the recompiler's opcode coverage, extend the tested REL/native-function
    bridge with function discovery and module lifetime management, implement

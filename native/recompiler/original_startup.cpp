@@ -133,7 +133,8 @@ void RegisterOriginalStartup(NativeDispatcher& dispatcher, const PpcState& state
 }
 
 OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState& state,
-                                        size_t blockBudget, size_t maxCallDepth) {
+                                        size_t blockBudget, size_t maxCallDepth,
+                                        const std::function<void(uint32_t)>& onBlock) {
     if (state.pc != 0x80003154u || state.callGuest || state.callException ||
         blockBudget == 0 || maxCallDepth == 0) {
         throw std::runtime_error("Original startup requires a fresh entry state and nonzero execution limits.");
@@ -156,6 +157,7 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x801b7cc8u) ++result.constructorsReturned;
             if (pc == 0x800032a0u) result.userInitReturned = true;
             if (pc == 0x8000aa54u) result.gameMainEntered = true;
+            if (pc == 0x8000aa6cu) result.gameInitializationReturned = true;
             if (pc == 0x8000ad5cu) result.memoryInitialized = true;
             if (pc == 0x8017a3e0u) result.screenInitEntered = true;
             if (pc == 0x801cb378u) result.gxInitEntered = true;
@@ -171,6 +173,8 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x801f2da0u) result.dspInitReturned = true;
             if (pc == 0x801f2dacu) result.dspTaskAdded = true;
             if (pc == 0x801f0fc4u) result.audioTaskInitReturned = true;
+            if (pc == 0x801f2cacu) result.pcmDmaStartReturned = true;
+            if (onBlock) onBlock(pc);
         });
     } catch (const std::exception& error) {
         const std::string reason = error.what();
@@ -213,6 +217,8 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.dspInitReturned) text << "Original DSPInit returned using the explicit native loader contract. ";
     if (result.dspTaskAdded) text << "Original DSPAddTask returned after IRAM upload. ";
     if (result.audioTaskInitReturned) text << "Original DSP audio-task initialization returned. ";
+    if (result.pcmDmaStartReturned) text << "Original AIStartDMA returned with a bound PCM backend. ";
+    if (result.gameInitializationReturned) text << "Original initial game-system initialization returned to main. ";
     text << "This is NOT a game boot; no game main loop or renderer ran.";
     return text.str();
 }
