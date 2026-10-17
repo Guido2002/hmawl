@@ -71,10 +71,13 @@ Original initialization, additive sample loops, stereo interleave and output DMA
 execute through the task's own completion mail/IRQ and original CPU control reply.
 Bounded nested external interrupts let DSP completion interrupt the original audio
 handler and restore both contexts. The first game-system initialization now returns
-to main. The measured Windows runner boundary is the next unbound game-object
-constructor at `PC=0x80086044`, LR `0x8000AA94`; DSP PC `0x4A` waits for another list.
-A deterministic disc fixture completes four lists, 95 data DMAs/27292 bytes and
-four original PCM callbacks. Real Windows timing changes these totals.
+to main. Eight subsequent original startup objects now return, and an actual
+128-byte resource read completes through original SDK/game DVD callbacks.
+With `--max-blocks 10000000`, the measured Windows runner boundary is the next
+unbound constructor at `PC=0x800154A0`, LR `0x8000ABAC`; DSP PC `0x4A` waits for another list.
+The default one-million-block limit can expire earlier.
+A deterministic disc fixture completes 19 lists, 575 data DMAs/172972 bytes and
+19 original PCM callbacks. Real Windows timing changes these totals.
 General voice mixing/ADPCM remains untranslated. The original PCM buffers contain
 zero samples; Windows buffer acceptance is not proof of audible game audio.
 Callers without a PCM backend still fail explicitly at original AIStartDMA.
@@ -686,6 +689,18 @@ queue. Full runtime scheduling and device services are still needed.
   The Windows runner now returns from the first game-system initialization and
   reaches the next unbound constructor `0x80086044`, LR `0x8000AA94`.
   General voice mixing/ADPCM, a game frame and the main loop remain unfinished.
+- [x] Execute the post-system-init object/resource chain.
+  Compile eight original constructors and their direct dependencies as bounded
+  roots, without pulling in the entire main-loop graph or raising the compiler's
+  code-discovery safety bound. Add the original 13-status DVD read-eligibility
+  and cancellation tables with explicit target checks, low-level read and actual
+  SDK/game/file notification callbacks. The real-disc test checks all eight
+  constructor returns in main's order, camera vtables/projection bounds and exact
+  128-byte disc-to-RAM payload before resource processing changes it. The original
+  file callback sets its real completed-read flag. Observed/unobserved executions
+  match full CPU/RAM, DSP/PCM timing and disc-transfer counts.
+  The Windows runner with `--max-blocks 10000000` reaches the next unbound
+  constructor `0x800154A0`, LR `0x8000ABAC`; no main loop or game frame ran.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -898,8 +913,9 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue the original game-object construction at `0x80086044` and its connected
-   dependencies toward the remaining game initialization and main loop. The first
+1. Continue the original game-object construction at `0x800154A0` and its connected
+   dependencies toward the remaining game initialization and main loop. Eight
+   post-system-init objects and a real resource read now complete. The first
    game-system initialization now returns to main in the Windows runner; original
    DSP lists reach their own output/completion and resume waiting for new work.
    Output buffers still contain original zero samples, and general voice processing,

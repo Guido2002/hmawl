@@ -1060,6 +1060,28 @@ int main(int argc, char** argv) {
                 unsigned pcmHandlers = 0, pcmCallbacks = 0;
                 unsigned commandHandshakes = 0;
                 uint32_t commandAddress = 0;
+                const std::array<uint32_t, 8> objectReturns = {
+                    0x8000aa94u, 0x8000aaccu, 0x8000aaecu, 0x8000ab0cu,
+                    0x8000ab2cu, 0x8000ab4cu, 0x8000ab6cu, 0x8000ab8cu};
+                std::vector<uint32_t> returnedObjects;
+                unsigned resourceReads = 0, fileCallbacks = 0, readNotifications = 0;
+                uint64_t resourceBytes = 0;
+                uint32_t pendingReadAddress = 0;
+                std::vector<uint8_t> pendingRead;
+                const auto transfer = pcmState.transferDisc;
+                pcmState.transferDisc = [&](const std::array<uint32_t, 3>& command, uint32_t length) {
+                    auto bytes = transfer(command, length);
+                    if (command[0] == 0xa8000000u) {
+                        Require(pendingRead.empty(), "Original resource DMA was not observed before another read.");
+                        Require(bytes == disc.Read(uint64_t(command[1]) * 4, length),
+                                "Original resource read differs from actual disc bytes.");
+                        pendingRead = bytes;
+                        pendingReadAddress = pcmState.discInterface->dmaAddress;
+                        ++resourceReads;
+                        resourceBytes += length;
+                    }
+                    return bytes;
+                };
                 const auto bindPcmTest = [](PpcState& guest, uint64_t& ticks, uint64_t& frames) {
                     guest.readTimeBase = [&guest, &ticks] {
                         return ticks += ((*guest.aiControl & 1u) || guest.pcm->active) ? 8 : 1000;
@@ -1074,7 +1096,25 @@ int main(int argc, char** argv) {
                     guest.stopPcm = [] { throw std::runtime_error("Unexpected PCM stop in original first-command fixture."); };
                 };
                 bindPcmTest(pcmState, pcmTicks, submittedFrames);
-                const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 1000000, 128, [&](uint32_t pc) {
+                const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 10000000, 128, [&](uint32_t pc) {
+                    if (!pendingRead.empty()) {
+                        const auto offset = ppc_memory_offset(pcmState, pendingReadAddress, pendingRead.size());
+                        Require(std::equal(pendingRead.begin(), pendingRead.end(), pcmState.memory.begin() + offset),
+                                "Original resource DMA did not write exact disc bytes into guest RAM.");
+                        pendingRead.clear();
+                    }
+                    if (std::find(objectReturns.begin(), objectReturns.end(), pc) != objectReturns.end()) {
+                        Require(returnedObjects.size() < objectReturns.size() &&
+                                    pc == objectReturns[returnedObjects.size()] && pcmState.gpr[3] != 0,
+                                "Original startup objects did not return in main's original order.");
+                        returnedObjects.push_back(pcmState.gpr[3]);
+                    }
+                    if (pc == 0x8017acf0u) ++fileCallbacks;
+                    if (pc == 0x8017b558u) ++readNotifications;
+                    if (pc == 0x8017ad4cu) {
+                        Require(pcmState.gpr[3] == 0 && ppc_read_u8(pcmState, pcmState.gpr[31] + 0x55) == 1,
+                                "Original DVD notification did not set the file's completed-read flag.");
+                    }
                     if (pc == 0x801c1bc0u) ++pcmHandlers;
                     if (pc == 0x801f2ab8u) ++pcmCallbacks;
                     if (pc == 0x801f2e64u) commandAddress = pcmState.gpr[31];
@@ -1091,29 +1131,49 @@ int main(int argc, char** argv) {
                           << " DSP mail=" << pcmState.dspHardware->sentMail << "/" << pcmState.dspHardware->consumedMail
                           << " task IRQ=" << pcmState.dspHardware->task->interrupts
                           << " active IRQ=" << pcmState.externalInterrupt->active
-                          << " suspended IRQ=" << pcmState.externalInterrupt->suspended.size() << '\n';
+                          << " suspended IRQ=" << pcmState.externalInterrupt->suspended.size()
+                          << " objects=" << returnedObjects.size()
+                          << " reads=" << resourceReads << "/" << resourceBytes
+                          << " file callbacks=" << fileCallbacks << "/" << readNotifications << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            pcmResult.pc == 0x80086044 && pcmResult.lr == 0x8000aa94 &&
-                            pcmResult.reason == "No native translation registered at 0x80086044." &&
+                            pcmResult.pc == 0x800154a0 && pcmResult.lr == 0x8000abac &&
+                            pcmResult.reason == "No native translation registered at 0x800154A0." &&
                             pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
                             pcmResult.gameInitializationReturned &&
                             pcmState.pcm->active && pcmState.pcm->starts == 1 &&
-                            pcmState.pcm->completedBuffers == 4 && pcmState.pcm->submittedFrames == submittedFrames &&
-                            submittedFrames == 800 && pcmHandlers == 4 && pcmCallbacks == 4 &&
-                            commandAddress != 0 && commandHandshakes == 4 &&
-                            pcmState.dspHardware->task->cpuMailSent == 22 &&
-                            pcmState.dspHardware->task->cpuMailConsumed == 22 &&
+                            pcmState.pcm->completedBuffers == 19 && pcmState.pcm->submittedFrames == submittedFrames &&
+                            submittedFrames == 3200 && pcmHandlers == 19 && pcmCallbacks == 19 &&
+                            commandAddress != 0 && commandHandshakes == 19 &&
+                            pcmState.dspHardware->task->cpuMailSent == 67 &&
+                            pcmState.dspHardware->task->cpuMailConsumed == 67 &&
                             !(pcmState.dspHardware->toDspMailbox & 0x80000000u) &&
-                            pcmState.dspHardware->task->dataTransfers == 95 &&
-                            pcmState.dspHardware->task->transferredBytes == 27292 &&
+                            pcmState.dspHardware->task->dataTransfers == 575 &&
+                            pcmState.dspHardware->task->transferredBytes == 172972 &&
                             pcmState.dspHardware->instructionPc == 0x4a &&
-                            pcmState.dspHardware->task->interrupts == 5 &&
-                            pcmState.dspHardware->sentMail == 7 && pcmState.dspHardware->consumedMail == 7 &&
+                            pcmState.dspHardware->task->interrupts == 20 &&
+                            pcmState.dspHardware->sentMail == 22 && pcmState.dspHardware->consumedMail == 22 &&
                             pcmState.dspHardware->task->mode == NativeDspTaskMode::Running &&
                             pcmState.dspHardware->completedPrograms == 1 &&
                             !pcmState.systemCallActive && !pcmState.externalInterrupt->active &&
                             pcmState.externalInterrupt->suspended.empty(),
-                        "Original DSP output/completion did not return game-system initialization to the next constructor.");
+                        "Original startup objects and resource loading did not reach the next constructor.");
+                Require(returnedObjects.size() == objectReturns.size() &&
+                            pcmResult.startupObjectsReturned == objectReturns.size() &&
+                            pcmResult.resourceReadNotifications == readNotifications &&
+                            resourceReads == 1 && resourceBytes == 128 &&
+                            fileCallbacks == resourceReads && readNotifications == resourceReads && pendingRead.empty(),
+                        "Original startup resource reads did not complete through the real DVD callback chain.");
+                const auto camera = returnedObjects.front();
+                Require(ppc_read_u32(pcmState, 0x80349228u) == camera &&
+                            ppc_read_u32(pcmState, camera + 0x10) == 0x802aba5cu &&
+                            ppc_read_u32(pcmState, camera + 0x28) == 0x802aba78u &&
+                            ppc_read_u32(pcmState, camera + 0x40) == 0x802aba8cu &&
+                            ppc_read_u32(pcmState, camera + 0x48) == 0x802abaa0u &&
+                            ppc_read_u32(pcmState, camera + 0x4c) == 0xc3600000u &&
+                            ppc_read_u32(pcmState, camera + 0x50) == 0x43600000u &&
+                            ppc_read_u32(pcmState, camera + 0x54) == 0xc3a00000u &&
+                            ppc_read_u32(pcmState, camera + 0x58) == 0x43a00000u,
+                        "Original camera construction did not preserve its vtables and 640x448 projection bounds.");
                 for (unsigned i = 0; i < 18; ++i) {
                     Require(pcmState.dspHardware->dataRam[0xc00 + i] == ppc_read_u16(pcmState, commandAddress + i * 2),
                             "DSP command-list DMA differs from original CPU RAM.");
@@ -1123,7 +1183,7 @@ int main(int argc, char** argv) {
                 plainPcm.pcm.emplace();
                 uint64_t plainTicks = 1000000, plainFrames = 0;
                 bindPcmTest(plainPcm, plainTicks, plainFrames);
-                const auto plainResult = RunOriginalStartup(dispatcher, plainPcm);
+                const auto plainResult = RunOriginalStartup(dispatcher, plainPcm, 10000000);
                 Require(plainResult.pc == pcmResult.pc && plainResult.lr == pcmResult.lr &&
                             plainResult.reason == pcmResult.reason && plainTicks == pcmTicks &&
                             plainFrames == submittedFrames && plainPcm.memory == pcmState.memory &&
@@ -1147,8 +1207,24 @@ int main(int argc, char** argv) {
                             plainPcm.externalInterrupt->delivered == pcmState.externalInterrupt->delivered &&
                             plainPcm.externalInterrupt->returned == pcmState.externalInterrupt->returned &&
                             !plainPcm.externalInterrupt->active && plainPcm.externalInterrupt->suspended.empty() &&
-                            plainResult.gameInitializationReturned,
+                            plainResult.gameInitializationReturned &&
+                            plainResult.startupObjectsReturned == pcmResult.startupObjectsReturned &&
+                            plainResult.resourceReadNotifications == pcmResult.resourceReadNotifications &&
+                            plainPcm.discInterface->completedTransfers == pcmState.discInterface->completedTransfers,
                         "PCM observation changed CPU/RAM, DMA timing, original interrupts or native DSP execution.");
+                auto damagedCamera = CreateOriginalStartupState(image);
+                InstallOriginalStartupDisc(damagedCamera, disc);
+                damagedCamera.pcm.emplace();
+                uint64_t damagedTicks = 1000000, damagedFrames = 0;
+                bindPcmTest(damagedCamera, damagedTicks, damagedFrames);
+                ppc_write_u32(damagedCamera, 0x80086044u, 0);
+                const auto damagedObject = RunOriginalStartup(dispatcher, damagedCamera, 10000000);
+                Require(damagedObject.stop == OriginalStartupStop::Dependency &&
+                            damagedObject.pc == 0x80086044u && damagedObject.gameInitializationReturned &&
+                            damagedObject.reason.find("code mismatch") != std::string::npos &&
+                            damagedObject.startupObjectsReturned == 0 && damagedObject.resourceReadNotifications == 0 &&
+                            !damagedCamera.callGuest && !damagedCamera.callException,
+                        "Corrupt original camera code fabricated constructor or resource-read completion.");
             }
             auto damagedConstructor = CreateOriginalStartupState(image);
             InstallOriginalStartupDisc(damagedConstructor, disc);

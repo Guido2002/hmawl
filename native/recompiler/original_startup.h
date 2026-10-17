@@ -40,6 +40,8 @@ struct OriginalStartupResult {
     bool pcmDmaStartReturned = false;
     bool gameInitializationReturned = false;
     uint32_t constructorsReturned = 0;
+    uint32_t startupObjectsReturned = 0;
+    uint32_t resourceReadNotifications = 0;
 };
 
 DolImage LoadOriginalUsDol(const std::filesystem::path& path);

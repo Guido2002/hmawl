@@ -80,6 +80,31 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
         leaders.insert(target);
         pending.push_back(target);
     }
+    // DVD read eligibility switch, guarded by the original command-status range check.
+    for (unsigned index = 0; index < 13; ++index) {
+        const auto target = ppc_read_u32(source, 0x802c9da4u + index * 4);
+        if (target != 0x8017b0f4u && target != 0x8017b0fcu) {
+            throw std::runtime_error("Original DVD read-status table exceeds its bounded case range.");
+        }
+        leaders.insert(target);
+        pending.push_back(target);
+    }
+    // Original DVD cancellation/completed-read switch, also guarded to 13 statuses.
+    for (unsigned index = 0; index < 13; ++index) {
+        const auto target = ppc_read_u32(source, 0x802e0f68u + index * 4);
+        if ((target & 3u) != 0 || target < 0x801bd21cu || target > 0x801bd420u) {
+            throw std::runtime_error("Original DVD cancellation table exceeds its bounded case range.");
+        }
+        leaders.insert(target);
+        pending.push_back(target);
+    }
+    // Post-system-init object constructors, without pulling in the entire main-loop graph.
+    for (uint32_t target : {0x80086044u, 0x8017cd5cu, 0x801770f8u, 0x801548a4u,
+                            0x80140b20u, 0x8012f3e0u, 0x8012ac64u, 0x80197150u, 0x80174d64u,
+                            0x80175530u, 0x80175548u}) {
+        leaders.insert(target);
+        pending.push_back(target);
+    }
     // Indirect constructors, reset vtables and interrupt callbacks are original code.
     for (uint32_t target : {0x8000ad40u, 0x80199eecu, 0x8001b920u, 0x80022790u, 0x800226f0u,
                             0x8002b80cu, 0x8002f27cu, 0x8002f100u, 0x8002efbcu,
@@ -94,7 +119,8 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
                             0x801c20ecu, 0x801c3a5cu,
                             0x801f1decu,
                             0x8018101cu,
-                            0x801be410u, 0x801bde64u, 0x801c0044u,
+                            0x801be410u, 0x801bde64u, 0x801c0044u, 0x801b9a68u,
+                            0x801baa9cu, 0x801bd4f4u, 0x8017acf0u, 0x8017b30cu, 0x8017b558u,
                             0x8000c9c4u, 0x8000c920u, 0x8000c82cu, 0x8000c788u,
                             0x80021ab0u, 0x80021ef8u, 0x80021f48u, 0x80022004u,
                             0x80022158u, 0x800222acu, 0x801809b0u, 0x801809c8u,

@@ -158,6 +158,10 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x800032a0u) result.userInitReturned = true;
             if (pc == 0x8000aa54u) result.gameMainEntered = true;
             if (pc == 0x8000aa6cu) result.gameInitializationReturned = true;
+            if (pc == 0x8000aa94u || pc == 0x8000aaccu || pc == 0x8000aaecu ||
+                pc == 0x8000ab0cu || pc == 0x8000ab2cu || pc == 0x8000ab4cu ||
+                pc == 0x8000ab6cu || pc == 0x8000ab8cu) ++result.startupObjectsReturned;
+            if (pc == 0x8017ad4cu && state.gpr[3] == 0) ++result.resourceReadNotifications;
             if (pc == 0x8000ad5cu) result.memoryInitialized = true;
             if (pc == 0x8017a3e0u) result.screenInitEntered = true;
             if (pc == 0x801cb378u) result.gxInitEntered = true;
@@ -219,6 +223,8 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.audioTaskInitReturned) text << "Original DSP audio-task initialization returned. ";
     if (result.pcmDmaStartReturned) text << "Original AIStartDMA returned with a bound PCM backend. ";
     if (result.gameInitializationReturned) text << "Original initial game-system initialization returned to main. ";
+    if (result.startupObjectsReturned) text << result.startupObjectsReturned << " original post-system-init objects returned. ";
+    if (result.resourceReadNotifications) text << result.resourceReadNotifications << " original DVD resource-read notifications completed. ";
     text << "This is NOT a game boot; no game main loop or renderer ran.";
     return text.str();
 }

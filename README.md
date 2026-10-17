@@ -47,7 +47,7 @@ blocks only, not a PowerPC interpreter or replacement OSInit.
 ```powershell
 cmake -S . -B build\native "-DHMAWL_ORIGINAL_US_DOL:FILEPATH=$PWD\build\game-us-r0\main.dol"
 cmake --build build\native --config Release --target hmawl_original_startup hmawl_original_startup_tests
-.\build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup .\build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz"
+.\build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup .\build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz" --max-blocks 10000000
 ```
 
 The verified runner now completes original EXIInit and SIInit, including actual immediate
@@ -128,9 +128,12 @@ original CPU handler replies through the original scheduler-control table, leavi
 the task waiting for another list. Bounded nested external interrupts preserve the
 outer audio-handler context. **The first game-system initialization now returns
 to main in the Windows runner.** With an available output device, a verified run
-stops with **exit code 3** at the next game-object constructor,
-`PC=0x80086044`, `LR=0x8000AA94`, which has no native binding yet.
-A deterministic disc test completes four lists and 95 DSP data DMAs/27292 bytes.
+now executes eight subsequent original object constructors, including the camera,
+and a real 128-byte resource read through original SDK/game DVD completion callbacks.
+With `--max-blocks 10000000`, it stops with **exit code 3** at the next constructor,
+`PC=0x800154A0`, `LR=0x8000ABAC`, which has no native binding yet.
+The default one-million-block safety limit can expire before this milestone.
+A deterministic disc test completes 19 lists and 575 DSP data DMAs/172972 bytes.
 Windows timing changes these counts. Submitted PCM is still original zero samples,
 not intro music; general voice mixing/ADPCM remains unsupported.
 Device/queue errors fail explicitly;

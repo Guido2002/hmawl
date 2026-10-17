@@ -15,7 +15,7 @@ First extract your own supported RVZ with the existing `hmawl_recompiler
 ```powershell
 cmake -S . -B build\native -DHMAWL_ORIGINAL_US_DOL:FILEPATH="$PWD\build\game-us-r0\main.dol"
 cmake --build build\native --config Release --target hmawl_original_startup
-build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz"
+build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz" --max-blocks 10000000
 ```
 
 Optional positive decimal limits are `--max-blocks 1000000` and
@@ -170,8 +170,8 @@ Initial silent command lists now execute their output DMA and send their own
 `0xDCD10002` completion mail/IRQ. The original CPU handler responds with
 `0xCDD10003`; the task's scheduler-control dispatch returns to word `0x4A` to wait
 for another list, rather than halting or synthesizing completion. The deterministic
-disc fixture verifies four lists, 95 data transfers/27292 bytes, 22/22 CPU mails,
-7/7 DSP mails and five task IRQs (including task initialization). Production Windows
+disc fixture verifies 19 lists, 575 data transfers/172972 bytes, 67/67 CPU mails,
+22/22 DSP mails and 20 task IRQs (including task initialization). Production Windows
 counts vary with host time. This does not implement general voice mixing, multiply/
 accumulate or ADPCM; initial output buffers remain silent.
 
@@ -211,8 +211,9 @@ Indexed single-float transfers and signed high multiplication execute the origin
 audio parameter/command preparation. The resulting CPU mail is the actual
 `0xBABE0024` header, not an injected test command or synthesized DSP completion.
 The original audio effect callback now runs through raw-low-word `stfiwx` stores.
-The first game-system initialization returns to main at `0x8000AA6C`; the next
-unbound game-object constructor is `0x80086044`, called with LR `0x8000AA94`.
+The first game-system initialization returns to main at `0x8000AA6C`, followed by
+eight original startup objects and a real DVD resource read. The next unbound
+constructor is `0x800154A0`, called with LR `0x8000ABAC`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -381,10 +382,12 @@ submission returns while the DSP executes initialization, additive sample loops,
 output interleave/DMA and its own completion mail/IRQ. The original nested CPU
 handler replies through the task's scheduler-control table.
 A measured runner execution returns from the first game-system initialization
-and reaches `PC=0x80086044`, LR `0x8000AA94`, SP `0x8035CF78`, the next unbound
-game-object constructor; DSP PC `0x4A` waits for the next list.
-That run submits 1920 actual RAM frames at 32028 Hz, completes 11 DMA periods and
-enters the original handler/callback twice. These steady-clock counts depend on
+and, with `--max-blocks 10000000`, executes eight post-system-init constructors
+and a real 128-byte resource read before reaching `PC=0x800154A0`, LR `0x8000ABAC`,
+the next unbound constructor; DSP PC `0x4A` waits for the next list.
+The default one-million-block limit can expire earlier. One measured Windows run
+submits 3840 actual RAM frames at 32028 Hz and completes 23 DMA periods.
+These steady-clock counts depend on
 host elapsed time. Host timing can also expose other untranslated startup paths.
 No mixed or audible
 game audio, renderer, scanout or main loop is claimed.
@@ -402,20 +405,29 @@ of its stack, SDA and nonvolatile integer/floating registers. Traced and untrace
 startup produce identical RAM, CPU state, AI/DSP/ARAM state, output and sampled time; damaged
 constructor words fail integrity validation without claiming later milestones.
 The separate deterministic PCM fixture uses 8 ticks while either AI sampling or PCM
-DMA is active. Four actual timed DMA periods execute four original handlers/
-callbacks and four complete DSP lists. It reaches the same next-constructor boundary
-with 800 submitted silent frames, 22 CPU mail words sent/consumed, seven DSP mails
-sent/consumed and five task IRQs. The task is still running/waiting, not a completed
+DMA is active. 19 actual timed DMA periods execute 19 original handlers/
+callbacks and 19 complete DSP lists. It reaches the same next-constructor boundary
+with 3200 submitted silent frames, 67 CPU mail words sent/consumed, 22 DSP mails
+sent/consumed and 20 task IRQs. The task is still running/waiting, not a completed
 program; no active or suspended CPU interrupt remains. Observed and unobserved executions
 match RAM/CPU state, DSP DRAM/registers, clock samples, DMA phase/counts and
-interrupt/DSP steps. 95 DSP data DMAs transfer 27292 bytes; all 18 words of the
+interrupt/DSP steps. 575 DSP data DMAs transfer 172972 bytes; all 18 words of the
 last command list match the actual CPU RAM source. The original CPU submission
-handshake completes four times, and game-system initialization returns to main.
+handshake completes 19 times, and game-system initialization returns to main.
+Eight subsequent original object constructors return in the actual main-call order.
+Tests verify the camera's actual vtable pointers and signed projection bounds for
+the 640x448 screen. The resource read uses the original 13-status eligibility table,
+low-level SDK read, SDK forwarding callback, game DvdFile virtual callback and
+notification. Its full 128-byte DMA payload is compared with the actual RVZ bytes
+in guest RAM before any resource processing; the original completed-read flag is
+also checked. Original completed-read cancellation/close dispatch uses its own
+13-entry table. Both tables have explicit build-time target guards. No native
+replacement resource constructor or callback fabricates completion.
 The game main loop, GX renderer,
 general scheduled game-thread execution, input and saves have not run.
 
 The next connected startup milestone is the original game-object constructor at
-`0x80086044` and its dependencies toward the main loop. General voice processing/
+`0x800154A0` and its dependencies toward the main loop. General voice processing/
 ADPCM remains an audio dependency, not a reason to substitute a replacement mixer.
 The native loader, task startup, initial command output/completion and Windows PCM
 backend are present.
@@ -574,7 +586,7 @@ complete original task IRAM bytes and guards, host/DSP mailbox counts, actual
 task interrupt and CPU callback, running/waiting versus completed program state,
 and corrupt-task rejection before IRAM upload or init callback,
 original PCM start/remaining/reload/handler/buffer callback, real DSP header/pointer
-consumption, exact command-list copy, 95 data DMAs, four original list completions,
+consumption, exact command-list copy, 575 data DMAs, 19 original list completions,
 all-silent submitted samples, system-initialization return and next-constructor
 dependency, system-call/nested-interrupt returns and complete observed/unobserved
 PCM-path equivalence using an explicitly test-only output sink,
