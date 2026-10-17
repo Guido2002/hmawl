@@ -29,6 +29,8 @@ add_library(hmawl_recompiler_core
     native_gx.cpp
     native_efb.cpp
     native_vi.cpp
+    native_aram.cpp
+    native_ai.cpp
 )
 target_compile_features(hmawl_recompiler_core PUBLIC cxx_std_17)
 target_include_directories(hmawl_recompiler_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -72,6 +74,9 @@ if(BUILD_TESTING)
     add_executable(hmawl_native_vi_tests native_vi_tests.cpp)
     target_link_libraries(hmawl_native_vi_tests PRIVATE hmawl_recompiler_core)
     add_test(NAME hmawl_native_vi_tests COMMAND hmawl_native_vi_tests)
+    add_executable(hmawl_native_audio_tests native_audio_tests.cpp)
+    target_link_libraries(hmawl_native_audio_tests PRIVATE hmawl_recompiler_core)
+    add_test(NAME hmawl_native_audio_tests COMMAND hmawl_native_audio_tests)
     add_executable(hmawl_ppc_float_tests ppc_float_tests.cpp)
     target_link_libraries(hmawl_ppc_float_tests PRIVATE hmawl_recompiler_core)
     if(MSVC)

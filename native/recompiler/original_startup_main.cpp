@@ -70,7 +70,8 @@ int RunCli(int argc, Character** argv) {
                      "(pixel scanout unimplemented), cold PI reset, 24 MiB RAM BAT profile, disconnected digital cable, "
                      "empty memory-card slots/SP1 and disconnected controllers, native console "
                      "(bounded strings/32-bit integers), persisted SRAM reads (writes/RTC/ROM unimplemented); "
-                     "16 MiB ARAM, compiled DSP init/native bootstrap (general DSP tasks/audio unimplemented); "
+                     "16 MiB ARAM, explicit disconnected expansion, synchronous DMA, native AI sample clock/volume "
+                     "(no PCM playback), compiled DSP init/native bootstrap (DSP ROM/tasks unimplemented); "
                      "162 MHz bus/486 MHz CPU metadata, steady-clock 40.5 MHz time base.\n";
         std::cout << "Native SRAM profile: " << sramPath.u8string() << '\n';
         if (disc) {
@@ -80,6 +81,19 @@ int RunCli(int argc, Character** argv) {
         }
         const auto result = RunOriginalStartup(dispatcher, state, blocks, depth);
         std::cerr << DescribeOriginalStartupStop(result) << '\n';
+        if (state.dspHardware) {
+            const auto& dsp = *state.dspHardware;
+            std::cerr << "Native ARAM: " << dsp.aram.size() << " bytes, " << dsp.dmaTransfers
+                      << " synchronous DMA transfers; disconnected expansion: "
+                      << dsp.absentAramReads << " no-data reads, " << dsp.absentAramWrites
+                      << " unreceived writes. DSP programs completed=" << dsp.completedPrograms << ".\n";
+        }
+        if (state.audio) {
+            const auto& ai = *state.audio;
+            std::cerr << "Native AI: volume=0x" << std::hex << ai.volume << " control=0x"
+                      << state.aiControl.value() << std::dec << ", " << ai.advancedSamples
+                      << " timed sample-clock steps, " << ai.resets << " counter resets. No PCM playback.\n";
+        }
         if (state.graphics) {
             const auto& gx = *state.graphics;
             std::cerr << "Native GX: " << gx.bursts << " actual 32-byte FIFO bursts, "

@@ -53,9 +53,14 @@ clear; the first copy's power-on pixels are explicitly undefined, not a game fra
 Controller setup, array construction and collision reset continue through original
 camera vector/normalization and look-at calculations. Scalar/paired fused arithmetic,
 horizontal sums, Gekko reciprocal-root estimates and 25-bit multiplier rounding now
-execute; tests observe three original normalization returns and 41 heap allocations.
-The next runner boundary is an unmapped AI volume-register read at `0xCC006C04`,
-`PC=0x801C19A0`, `LR=0x80129ED0`, during audio initialization.
+execute; tests observe three original normalization returns. Original ARInit,
+ARQInit and AIInit now return in the runner as well. Stateful ARAM controller,
+split-register DMA, explicit disconnected expansion and AI rate/sample-clock
+registers permit original audio-engine setup to reach 178 returned heap allocations.
+This models timing and register state, not PCM playback.
+The next runner boundary is the original DSPInit ROM/task bootstrap request at
+`PC=0x801C3DDC`, `LR=0x801C3DA8`. It fails explicitly without invented ROM contents,
+mailbox responses or DSP task completion.
 Pixel scanout, the main loop and a rendered game frame remain unfinished.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 

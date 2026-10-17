@@ -1203,10 +1203,11 @@ void TestHardwareControlRegisters() {
 }
 
 void TestCacheBlockInstructions() {
-    for (auto function : {ppc_0000B100, ppc_0000B110, ppc_0000B120, ppc_0000B130}) {
-        const bool indexed = function == ppc_0000B110 || function == ppc_0000B130;
+    for (auto function : {ppc_0000B100, ppc_0000B110, ppc_0000B120, ppc_0000B130, ppc_0000B140, ppc_0000B150}) {
+        const bool indexed = function == ppc_0000B110 || function == ppc_0000B130 || function == ppc_0000B150;
         const uint32_t pc = function == ppc_0000B100 ? 0xb100u :
-            function == ppc_0000B110 ? 0xb110u : function == ppc_0000B120 ? 0xb120u : 0xb130u;
+            function == ppc_0000B110 ? 0xb110u : function == ppc_0000B120 ? 0xb120u :
+            function == ppc_0000B130 ? 0xb130u : function == ppc_0000B140 ? 0xb140u : 0xb150u;
         PpcState state;
         state.memoryMap = PpcMemoryMap::GameCubeRam;
         state.memory.resize(kGameCubeRamSize, 0xa5);
@@ -2295,9 +2296,9 @@ void TestDspResetAndAramDma() {
             ppc_write_u32(state, 0xcc005024u, 32);
             ppc_write_u32(state, 0xcc005028u, (read ? 0x80000000u : 0u) | length);
             Require(state.dspControl == 0x24u && dsp.dmaTransfers == 1 &&
-                        ppc_read_u32(state, 0xcc005020u) == 64 &&
-                        ppc_read_u32(state, 0xcc005024u) == 32 &&
-                        ppc_read_u32(state, 0xcc005028u) == ((read ? 0x80000000u : 0u) | length),
+                        ppc_read_u32(state, 0xcc005020u) == 64 + length &&
+                        ppc_read_u32(state, 0xcc005024u) == 32 + length &&
+                        ppc_read_u32(state, 0xcc005028u) == (read ? 0x80000000u : 0u),
                     "ARAM DMA completion, direction, counter or register readback differs.");
             for (unsigned index = 0; index < state.memory.size(); ++index) {
                 Require(state.memory[index] == (read && index >= 64 && index < 64 + length ? 0x3cu : 0xa5u) &&

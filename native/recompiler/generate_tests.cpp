@@ -515,6 +515,8 @@ int main(int argc, char** argv) {
             Emit(output, 0xb110, {XForm(0, 4, 3, 86)});
             Emit(output, 0xb120, {XForm(0, 0, 3, 982)});
             Emit(output, 0xb130, {XForm(0, 4, 3, 982)});
+            Emit(output, 0xb140, {XForm(0, 0, 3, 54)});
+            Emit(output, 0xb150, {XForm(0, 4, 3, 54)});
             Emit(output, 0xb200, {0x80640000u});
             Emit(output, 0xb210, {0x90640000u});
             Emit(output, 0xb220, {0xa0640000u});

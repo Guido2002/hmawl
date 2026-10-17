@@ -134,6 +134,10 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
     }
     state.pc = address;
     do {
+        if (state.audio && state.aiControl && (*state.aiControl & 1u)) {
+            if (!state.readTimeBase) throw std::runtime_error("Native AI requires a time-base backend.");
+            NativeAiAdvance(state, state.readTimeBase());
+        }
         if (state.video && (state.video->registers[1] & 1)) {
             if (!state.readTimeBase) throw std::runtime_error("Native VI requires a time-base backend.");
             NativeViAdvance(*state.video, state.readTimeBase());

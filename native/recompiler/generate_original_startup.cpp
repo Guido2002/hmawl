@@ -87,7 +87,7 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
                             0x8019ad5cu, 0x80190204u, 0x8000b4c4u, 0x80198f54u,
                             0x80199ed8u, 0x8017a3a0u,
                             0x801cc448u, 0x801ce08cu, 0x801ce158u,
-                            0x801cb0c8u, 0x801cb1c4u,
+                            0x801cb0c8u, 0x801cb1c4u, 0x801c1b44u,
                             0x801be410u, 0x801bde64u, 0x801c0044u,
                             0x8000c9c4u, 0x8000c920u, 0x8000c82cu, 0x8000c788u,
                             0x80021ab0u, 0x80021ef8u, 0x80021f48u, 0x80022004u,
@@ -195,6 +195,8 @@ int main(int argc, char** argv) {
                      "    static constexpr uint16_t expected[] = {";
         for (const auto word : dspProgram) functions << word << "u,";
         functions << "};\n"
+                     "    if (state.dspControl && (*state.dspControl & 0x800u))\n"
+                     "        throw std::runtime_error(\"Native DSP ROM/task bootstrap is not implemented.\");\n"
                      "    if (!state.dspHardware || !state.dspControl || "
                      "(*state.dspControl & 0x805u) != 0 || "
                      "state.dspHardware->aramConfiguration != 0x43u)\n"

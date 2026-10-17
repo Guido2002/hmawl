@@ -4,6 +4,8 @@
 #include "native_gx.h"
 #include "ppc_float.h"
 #include "native_vi.h"
+#include "native_aram.h"
+#include "native_ai.h"
 
 #include <algorithm>
 #include <array>
@@ -56,6 +58,13 @@ struct PpcSerialInterface {
 
 struct PpcDspHardware {
     uint16_t aramConfiguration = 0;
+    uint16_t aramRefresh = 156;
+    bool aramControllerReady = false;
+    bool disconnectedAramExpansion = false;
+    uint32_t absentAramReads = 0;
+    uint32_t absentAramWrites = 0;
+    uint32_t audioDmaAddress = 0;
+    uint16_t audioDmaBlocks = 0;
     uint32_t dmaMainAddress = 0;
     uint32_t dmaAramAddress = 0;
     uint32_t dmaCount = 0;
@@ -165,6 +174,7 @@ struct PpcState {
     std::optional<PpcDspHardware> dspHardware;
     std::function<void(PpcState&)> executeDspInitialization;
     std::optional<uint32_t> aiControl;
+    std::optional<NativeAi> audio;
     std::optional<uint32_t> diConfiguration;
     std::optional<PpcDiscInterface> discInterface;
     std::optional<NativeGx> graphics;
@@ -212,13 +222,14 @@ inline void ppc_reset_performance_monitor(PpcState& state, unsigned index, uint3
 
 inline uint32_t ppc_pi_interrupt_cause(const PpcState& state) {
     uint32_t cause = state.graphics ? NativeGxInterruptCause(*state.graphics) : 0;
+    cause |= NativeAiInterruptCause(state);
     if (state.video) cause |= NativeViInterruptCause(*state.video);
     if (state.serialInterface &&
         (state.serialInterface->communication & 0xc0000000u) == 0xc0000000u) cause |= 8u;
     if (state.dspHardware && state.dspControl) {
         const auto control = *state.dspControl;
         if ((control & 0x180u) == 0x180u || (control & 0x60u) == 0x60u ||
-            (control & 0x18u) == 0x18u) cause |= 0x80u;
+            (control & 0x18u) == 0x18u) cause |= 0x40u;
     }
     if (state.discInterface) {
         const auto& di = *state.discInterface;
@@ -233,7 +244,7 @@ inline bool ppc_si_interrupt_pending(const PpcState& state) {
 }
 
 inline bool ppc_external_interrupt_pending(const PpcState& state) {
-    return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & 0xf0cu) != 0;
+    return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & 0xf2cu) != 0;
 }
 
 inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
@@ -246,9 +257,9 @@ inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
     if (enabled && ppc_external_interrupt_pending(state) &&
         (!state.externalInterrupt || !state.callException ||
          state.externalInterrupt->active)) {
-        throw std::runtime_error("Native SI/DI completion interrupt requires guest interrupt delivery.");
+        throw std::runtime_error("Native external interrupt requires guest interrupt delivery.");
     }
-    if (enabled && state.piInterruptMask.has_value() && (*state.piInterruptMask & 0x80u) != 0 &&
+    if (enabled && state.piInterruptMask.has_value() && (*state.piInterruptMask & 0x40u) != 0 &&
         state.dspHardware.has_value() && state.dspControl.has_value()) {
         const auto control = *state.dspControl;
         if ((control & 0x180u) == 0x180u || (control & 0x60u) == 0x60u ||
@@ -357,6 +368,9 @@ inline void ppc_write_ram_bat(PpcState& state, unsigned spr, uint32_t value) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.audio && NativeAiAddress(address)) {
+        return NativeAiRead(state, address, 4);
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
         return NativeViRead(state, address, 4);
     }
@@ -378,10 +392,7 @@ inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003024u &&
         state.piResetCode) return *state.piResetCode;
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
-        const auto& dsp = *state.dspHardware;
-        if (address == 0xcc005020u) return dsp.dmaMainAddress;
-        if (address == 0xcc005024u) return dsp.dmaAramAddress;
-        if (address == 0xcc005028u) return dsp.dmaCount;
+        if (NativeAramAddress(address)) return NativeAramRead(state, address, 4);
     }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.exiDmaEnabled) {
         for (unsigned channel = 0; channel < 3; ++channel) {
@@ -493,6 +504,9 @@ inline void ppc_write_u64(PpcState& state, uint32_t address, uint64_t value) {
 }
 
 inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.audio && NativeAiAddress(address)) {
+        return static_cast<uint16_t>(NativeAiRead(state, address, 2));
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
         return static_cast<uint16_t>(NativeViRead(state, address, 2));
     }
@@ -501,6 +515,9 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
     }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
         const auto& dsp = *state.dspHardware;
+        if (address == 0xcc005030u) return static_cast<uint16_t>(dsp.audioDmaAddress >> 16);
+        if (address == 0xcc005032u) return static_cast<uint16_t>(dsp.audioDmaAddress);
+        if (address == 0xcc005036u) return dsp.audioDmaBlocks;
         if (address == 0xcc005000u) return static_cast<uint16_t>(dsp.toDspMailbox >> 16);
         if (address == 0xcc005002u) return static_cast<uint16_t>(dsp.toDspMailbox);
         if (address == 0xcc005004u) return static_cast<uint16_t>(dsp.fromDspMailbox >> 16);
@@ -511,7 +528,7 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
 
             return static_cast<uint16_t>(dsp.fromDspMailbox);
         }
-        if (address == 0xcc005012u) return dsp.aramConfiguration;
+        if (NativeAramAddress(address)) return static_cast<uint16_t>(NativeAramRead(state, address, 2));
     }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc00206cu &&
         state.viDtvStatus.has_value()) {
@@ -546,6 +563,10 @@ inline uint16_t ppc_read_u16(PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.audio && NativeAiAddress(address)) {
+        NativeAiWrite(state, address, value, 4);
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
         NativeViWrite(state, address, value, 4);
         return;
@@ -604,33 +625,8 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
         }
     }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
-        auto& dsp = *state.dspHardware;
-        if (address == 0xcc005020u || address == 0xcc005024u) {
-            if ((value & ~0x03ffffe0u) != 0) {
-                throw std::runtime_error("ARAM DMA address must be 32-byte aligned and fit its register.");
-            }
-            (address == 0xcc005020u ? dsp.dmaMainAddress : dsp.dmaAramAddress) = value;
-            return;
-        }
-        if (address == 0xcc005028u) {
-            if (!state.dspControl.has_value() || (*state.dspControl & 4u) == 0 ||
-                (value & ~0x83ffffe0u) != 0 || (value & 0x03ffffe0u) == 0) {
-                throw std::runtime_error("ARAM DMA requires halted DSP and a nonzero aligned transfer length.");
-            }
-            const auto length = value & 0x03ffffe0u;
-            const auto offset = ppc_memory_offset(state, dsp.dmaMainAddress, length);
-            if (dsp.dmaAramAddress > dsp.aram.size() ||
-                length > dsp.aram.size() - dsp.dmaAramAddress) {
-                throw std::runtime_error("ARAM DMA range exceeds configured native ARAM.");
-            }
-            const bool read = (value & 0x80000000u) != 0;
-            for (size_t index = 0; index < length; ++index) {
-                if (read) state.memory[offset + index] = dsp.aram[dsp.dmaAramAddress + index];
-                else dsp.aram[dsp.dmaAramAddress + index] = state.memory[offset + index];
-            }
-            dsp.dmaCount = value;
-            ++dsp.dmaTransfers;
-            *state.dspControl |= 0x20u;
+        if (NativeAramAddress(address)) {
+            NativeAramWrite(state, address, value, 4);
             return;
         }
     }
@@ -856,6 +852,10 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
 }
 
 inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.audio && NativeAiAddress(address)) {
+        NativeAiWrite(state, address, value, 2);
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
         NativeViWrite(state, address, value, 2);
         return;
@@ -880,9 +880,23 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
     }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
         auto& dsp = *state.dspHardware;
-        if (address == 0xcc005012u) {
-            if (value != 0x43u) throw std::runtime_error("Unsupported native ARAM configuration.");
-            dsp.aramConfiguration = value;
+        if (address == 0xcc005030u) {
+            dsp.audioDmaAddress = (dsp.audioDmaAddress & 0xffffu) | (uint32_t(value & 0x3ffu) << 16);
+            return;
+        }
+        if (address == 0xcc005032u) {
+            dsp.audioDmaAddress = (dsp.audioDmaAddress & 0xffff0000u) | (value & 0xffe0u);
+            return;
+        }
+        if (address == 0xcc005036u) {
+            if (value & 0x8000u) {
+                throw std::runtime_error("Audio DMA enable requires a native PCM playback backend.");
+            }
+            dsp.audioDmaBlocks = value;
+            return;
+        }
+        if (NativeAramAddress(address)) {
+            NativeAramWrite(state, address, value, 2);
             return;
         }
         if (address == 0xcc005000u) {
@@ -950,6 +964,9 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
 }
 
 inline uint8_t ppc_read_u8(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.audio && NativeAiAddress(address)) {
+        return static_cast<uint8_t>(NativeAiRead(state, address, 1));
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
         return static_cast<uint8_t>(NativeViRead(state, address, 1));
     }
@@ -1017,6 +1034,10 @@ inline void ppc_store_float_pair(PpcState& state, uint32_t address, PpcFpr value
 }
 
 inline void ppc_write_u8(PpcState& state, uint32_t address, uint8_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.audio && NativeAiAddress(address)) {
+        NativeAiWrite(state, address, value, 1);
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
         NativeViWrite(state, address, value, 1);
         return;

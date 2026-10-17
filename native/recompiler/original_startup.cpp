@@ -95,8 +95,11 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.dspControl = 0;
     state.dspHardware.emplace();
     state.dspHardware->aram.resize(16u * 1024u * 1024u);
+    state.dspHardware->aramControllerReady = true;
+    state.dspHardware->disconnectedAramExpansion = true;
     state.executeDspInitialization = ExecuteOriginalDspInitialization;
     state.aiControl = 0;
+    state.audio.emplace();
     state.diConfiguration = 1;
     state.viDtvStatus = 0;
     state.serialInterface.emplace();
@@ -159,6 +162,9 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x8017a4c0u) result.viConfigured = true;
             if (pc == 0x8017a674u) result.viRetraceReturned = true;
             if (pc == 0x8000addcu) result.screenInitReturned = true;
+            if (pc == 0x80129fa4u) result.arInitReturned = true;
+            if (pc == 0x80129fa8u) result.arqInitReturned = true;
+            if (pc == 0x80129fb0u) result.aiInitReturned = true;
         });
     } catch (const std::exception& error) {
         const std::string reason = error.what();
@@ -195,6 +201,9 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.viConfigured) text << "Original VIConfigure returned. ";
     if (result.viRetraceReturned) text << "Original VIWaitForRetrace returned. ";
     if (result.screenInitReturned) text << "Original Screen constructor/initialization returned. ";
+    if (result.arInitReturned) text << "Original ARInit returned. ";
+    if (result.arqInitReturned) text << "Original ARQInit returned. ";
+    if (result.aiInitReturned) text << "Original AIInit returned. ";
     text << "This is NOT a game boot; no game main loop or renderer ran.";
     return text.str();
 }

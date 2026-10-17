@@ -89,7 +89,27 @@ byte copies; W1C status/masks are retained. A BIOS-free native bootstrap validat
 all 128 installed payload bytes before executing the build-time-compiled original
 DSP initializer. The DSP ROM loader itself is not executed; this is an explicit
 native handoff contract, not DSP-ROM emulation. General DSP tasks, outgoing CPU
-mail and DSP/audio interrupts remain unsupported and fail explicitly.
+mail and DSP interrupts remain unsupported and fail explicitly.
+
+The ARAM controller also exposes checked configuration, readiness and refresh,
+plus halfword address/count assembly; the count-low write triggers DMA. Transfers
+are synchronous: after the validated byte copy, addresses advance, the count
+clears and ARINT latches until W1C acknowledgement. The explicit disconnected-HSP
+profile has no expansion storage. A DMA read from that absent device leaves the
+destination bytes undriven/unchanged; writes have no recipient. Separate counters
+report those accesses. This is a bounded no-device profile, not certification of
+physical-console open-bus behavior. Internal/expansion-straddling transfers fail.
+
+AI control, independent stereo-volume bytes, sample counter and interrupt timing
+are mapped as aligned 32-bit registers. The NTSC clock uses the integer rational
+108 MHz / 2248 or / 3372, relative to the 40.5 MHz time base. Pause, rate changes,
+fractional ticks, reset, counter wrap, threshold crossing, interrupt inhibition,
+masking and W1C are stateful. AI sample interrupts use PI bit `0x20`, distinct from
+DSP's `0x40`, and route through the original guest exception/AI handler. A separate
+threshold-crossing test also verifies that SDK mask restoration delivers the
+already-pending VI source, with both handlers acknowledging and returning.
+This clock produces no PCM data or sound. Disabled PCM-DMA address/block registers
+retain configuration; enabling playback explicitly fails without a PCM backend.
 
 The bounded DSP compiler emits native C++ for the init subset, not a runtime
 instruction decoder. Instruction/data-ROM load loops can be eliminated only when
@@ -235,23 +255,39 @@ vtables and kernel/camera calculations. Original vector subtraction produces
 Three original `PSVECNormalize` calls return, storing the actual unit vectors
 `00000000 BDCBC89C BF7EBAC3`, `00000000 3DCBC89A 3F7EBAC0`, and
 `3F800000 80000000 80000000`. Original look-at calculations continue, and
-41 real heap allocations return without overlaps or escaped arena bounds.
-The next dependency is `PC=0x801C19A0`, LR `0x80129ED0`, SP `0x8035CF38`:
-audio initialization reads the currently unmapped AI volume register `0xCC006C04`.
-No fake volume value or replacement audio initialization is supplied.
+Original ARInit, ARQInit and AIInit subsequently return. Their actual guest flags
+are all 1; the original probe records 16777216 internal bytes and zero expansion
+bytes, including the corresponding low-memory total. Five ARAM DMA transfers
+include two reads and one write to the explicitly disconnected expansion.
+Original AI calibration advances four sample-clock steps and resets the counter
+five times in the deterministic regression. Volume is zero and final control is
+`0x46`; PCM DMA remains disabled with 20 blocks configured.
+The audio-engine/voice setup reaches 178 real heap allocations without overlaps
+or escaped arena bounds. Original `DCStoreRangeNoSync` executes checked `dcbst`
+operations against coherent RAM.
+The next dependency is `PC=0x801C3DDC`, LR `0x801C3DA8`, SP `0x8035CEB8`:
+original DSPInit unhalts the DSP with ROM bootstrap selected. The existing bounded
+native initializer executes only the earlier verified DOL payload, not the DSP
+ROM/task loader. This request therefore fails explicitly. No ROM bytes,
+mailbox responses or DSP task completion are fabricated.
 The inquiry result remains `0x8001` and the entire real FST is intact.
-The deterministic 1000-tick/block regression returns 165 external exceptions,
-advances 155 VI fields and restores one scheduler context; steady-clock runner field/interrupt
+The deterministic regression uses 1000 ticks per clock sample when AI is stopped,
+and 8 while its sample clock is running, resolving the SDK's sub-sample calibration
+window without modifying guest code or injecting a calibration result.
+It returns 167 external exceptions (including 157 original VI handlers),
+advances 238 VI fields and restores one scheduler context. A VI source remains
+pending at the final interrupts-disabled DSP boundary. Steady-clock runner field/interrupt
 counts depend on elapsed host time, not a forced completion.
 Real-disc tests verify every constructor in original table order and preservation
 of its stack, SDA and nonvolatile integer/floating registers. Traced and untraced
-startup produce identical RAM, CPU state, output and sampled time; damaged
+startup produce identical RAM, CPU state, AI/DSP/ARAM state, output and sampled time; damaged
 constructor words fail integrity validation without claiming later milestones.
 The game main loop, GX renderer,
-general scheduled game-thread execution, audio, input and saves have not run.
+general scheduled game-thread execution, PCM playback, input and saves have not run.
 
-The next connected milestone is the audio-initialization dependency chain and return
-from original game initialization. Geometry/texture rendering and XFB pixel scanout
+The next connected milestone is native execution of the original DSP bootstrap/task
+handoff, then completion of original audio/game initialization. PCM DMA still needs
+a real playback backend. Geometry/texture rendering and XFB pixel scanout
 are still required for a real displayed frame; Screen return alone does not establish one.
 Generated translation registration uses non-inlined batches
 of at most 64 regular bindings (plus the console binding in the final batch), avoiding

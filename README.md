@@ -105,10 +105,16 @@ RGB/depth clear. Its first copy contains 286720 undefined power-on pixels, expli
 tracked as undefined rather than claimed as a rendered frame.
 Original controller setup, array construction and collision resets continue through
 the camera's original vector normalization and look-at calculations; tests verify
-three actual normalization returns and all 41 returned heap allocations.
+three actual normalization returns. Original ARInit, ARQInit and AIInit now also
+return in the runner, followed by audio-engine setup; 178 original heap allocations
+complete. Checked split-register ARAM DMA and an explicit disconnected-expansion
+profile let the original SDK probe determine 16 MiB internal/zero external ARAM.
+AI stereo-volume registers, rate calibration, sample-clock timing and IRQ status
+are stateful, but there is no PCM playback.
 The runner stops with **exit code 3** at
-`PC=0x801C19A0`, `LR=0x80129ED0`: the audio setup reads the unmapped AI volume
-register at `0xCC006C04`. Draws, unsupported copy modes and texture DMA still fail
+`PC=0x801C3DDC`, `LR=0x801C3DA8`: original DSPInit requests the still-unimplemented
+DSP ROM/task bootstrap. No ROM bytes, mailbox acknowledgement or task completion
+are fabricated. Draws, unsupported copy modes and texture DMA still fail
 explicitly. Pixel scanout, a game window/intro and the game main loop have not run.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.

@@ -755,6 +755,7 @@ std::string RecompileFunction(uint32_t address,
                 break;
             }
             case 86:
+            case 54:
             case 470:
             case 982:
                 if (rt != 0 || record) {

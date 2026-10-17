@@ -31,6 +31,9 @@ struct OriginalStartupResult {
     bool viConfigured = false;
     bool viRetraceReturned = false;
     bool screenInitReturned = false;
+    bool arInitReturned = false;
+    bool arqInitReturned = false;
+    bool aiInitReturned = false;
     uint32_t constructorsReturned = 0;
 };
 

@@ -378,6 +378,8 @@ void TestInvalidFloatingPointInstructions() {
         0x4c20012cu,
         0x4c01012cu,
         0x4c00092cu,
+        (31u << 26) | (1u << 21) | (54u << 1),
+        (31u << 26) | (54u << 1) | 1u,
         (31u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (522u << 1),
         (31u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (650u << 1),
         0x1022182au | (1u << 6), // Paired add reserves its third source field.
