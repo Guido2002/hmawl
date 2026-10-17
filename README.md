@@ -263,8 +263,9 @@ Continuing that verified state, an independent original `OSInit` prefix now
 sets `AreWeInitialized`, calls the original `__OSGetSystemTime`, records
 `__OSStartTime`, masks interrupts and calls the six original MMCR0/1 and PMC1..4
 reset wrappers, then executes original `PPCDisableSpeculation` and
-`PPCSetFpNonIEEEMode` to set HID0 SPD and FPSCR NI. It stops at `0x801b0e64`
-before boot-info/arena setup;
+`PPCSetFpNonIEEEMode` to set HID0 SPD and FPSCR NI. The original boot-info
+and arena setup then runs through `OSSetArenaLo`/`OSSetArenaHi`. It stops at
+`0x801b0f5c`, before `OSExceptionInit`;
 first-time `OSInit` does not yet return. Its
 already-initialized branch and return epilogue are tested separately, not used
 to skip the unfinished first-time path.
@@ -298,6 +299,17 @@ the original HID0 getter/setter. Tests cover both initial SPD states, all
 cache-enable combinations, repeated calls, preserved loader bits, both interrupt
 states and stack/ABI guards. SPD is retained guest control state, not emulation
 of a speculative processor pipeline.
+
+Boot-info tests cover BI2 metadata, the low-memory fallback and absent metadata,
+including full-word versus byte-sized debug flags, the debug threshold at 2,
+PAD specification propagation and the DVD long-filename flag. Arena tests cover
+loader-supplied bounds, default bounds (`0x8035efa0`/`0x81700000`) and the
+debug-dependent low bound (`0x8035cfa0`). Original arena getters/setters retain
+exact guest values, including zero and unaligned inputs; they do not allocate
+host memory or validate an allocation range. Tests check exact RAM changes,
+setter order, register/stack guards and the unchanged already-initialized path.
+The integrated entry continuation exercises the absent-metadata/default-bound
+path; a complete loader boot-info contract and OS exception setup still remain.
 
 ### REL module parsing and linking
 

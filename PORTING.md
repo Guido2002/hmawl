@@ -200,7 +200,8 @@ queue. Full runtime scheduling and device services are still needed.
   Continue the verified entry state with the original `OSInit` prefix: set the
   initialization flag, record system start time and mask interrupts. Continue
   through six original performance-monitor reset wrappers, speculation disable
-  and non-IEEE setup to `0x801b0e64`, before boot-info/arena setup.
+  and non-IEEE setup, then boot-info/arena initialization to `0x801b0f5c`,
+  before `OSExceptionInit`.
   Test the already-initialized
   skip and epilogue separately; never claim they complete first-time startup.
 - [x] Compile FPSCR bit operations `mtfsb0`/`mtfsb1`, including record forms,
@@ -221,6 +222,15 @@ queue. Full runtime scheduling and device services are still needed.
   and stack/ABI guards. Continue OSInit through original SPD and NI setup in
   order; ensure its already-initialized path leaves both settings untouched.
   No speculative pipeline or NI arithmetic is implemented.
+- [x] Execute original OSInit boot-info/arena setup and original arena
+  getters/setters. Test BI2 metadata, low-memory fallback and absent metadata,
+  debug values below/at/above 2, full-word versus low-byte debug handling, PAD
+  specification propagation and the DVD long-filename flag. Verify default and
+  loader-supplied bounds, debug-dependent stack reservation, exact RAM writes,
+  setter order and preserved CPU state. Continue the entry-derived default path
+  to `0x801b0f5c`; initialized re-entry must leave boot info and arenas untouched.
+  Arena accessors store exact guest values, not host allocations; a complete
+  loader boot-info contract and OS exception initialization remain pending.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic
@@ -431,7 +441,7 @@ systems and the executable can be packaged without the GameCube build toolchain.
    unsupported hardware instructions as successful no-ops.
    The initial `OSInit` prefix is independently verified through start-time
    capture/interrupt masking, MMCR/PMC resets and HID0 SPD/FPSCR NI setup
-   (`0x801b0e64`); boot-info/arena setup and the remaining OS subsystem initialization
+   plus boot-info/arena setup (`0x801b0f5c`); OS exception setup and remaining subsystem initialization
    still follow.
 2. Expand the recompiler's opcode coverage, extend the tested REL/native-function
    bridge with function discovery and module lifetime management, implement

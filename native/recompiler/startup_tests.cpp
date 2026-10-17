@@ -188,6 +188,8 @@ void RunHardwareDependency(uint32_t address, PpcState& state) {
     case 0x801b0a94u: ppc_801B0A94(state); break;
     case 0x801b0afcu: ppc_801B0AFC(state); break;
     case 0x801b0b24u: ppc_801B0B24(state); break;
+    case 0x801b20e4u: ppc_801B20E4(state); break;
+    case 0x801b20ecu: ppc_801B20EC(state); break;
     case 0x801b7bf0u: ppc_801B7BF0(state); break;
     case 0x801b7c10u: ppc_801B7C10(state); break;
     case 0x801b1584u: ppc_801B1584(state); break;
@@ -762,7 +764,7 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     state.lr = 0x80003268u;
     const auto beforeOs = state.memory;
     ppc_801B0DE0(state);
-    Require(state.pc == 0x801b0e64u && reads == 3 &&
+    Require(state.pc == 0x801b0f5cu && reads == 3 &&
                 setupCalls == std::vector<uint32_t>{0x801b0a6cu, 0x801b0a74u,
                     0x801b0a7cu, 0x801b0a84u, 0x801b0a8cu, 0x801b0a94u,
                     0x801b0afcu, 0x801b0b24u} &&
@@ -772,11 +774,20 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
                 state.gpr[1] == stack - 0x18u &&
                 ppc_read_u32(state, 0x803495e0u) == 1 &&
                 ppc_read_u64(state, 0x803495f8u) == ticks + offset &&
+                ppc_read_u32(state, 0x803495c0u) == 0x80000000u &&
+                ppc_read_u32(state, 0x803495c4u) == 0 &&
+                ppc_read_u32(state, 0x803496ecu) == 1 &&
+                ppc_read_u32(state, 0x80348b90u) == 0x8035efa0u &&
+                ppc_read_u32(state, 0x80349618u) == 0x81700000u &&
                 !state.externalInterruptsEnabled,
             "Original OSInit prefix failed time, interrupts, monitor reset or SPD/NI setup.");
     const auto prefixFrame = ppc_memory_offset(state, stack - 0x38u, 0x40);
     for (size_t i = 0; i < beforeOs.size(); ++i) {
         if ((i >= prefixFrame && i < prefixFrame + 0x40) ||
+            (i >= 0x3495c0u && i < 0x3495c8u) ||
+            (i >= 0x3496ecu && i < 0x3496f0u) ||
+            (i >= 0x348b90u && i < 0x348b94u) ||
+            (i >= 0x349618u && i < 0x34961cu) ||
             (i >= 0x3495e0u && i < 0x3495e4u) ||
             (i >= 0x3495f8u && i < 0x349600u)) continue;
         Require(state.memory[i] == beforeOs[i],
@@ -811,8 +822,149 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     }
     std::cout << "Original OSInit prefix sets initialization flag/start time, masks "
                  "interrupts, resets MMCR0/1 plus PMC1..4, sets HID0 SPD and FPSCR NI; "
-                 "stops at 0x801b0e64 before boot-info/arena setup. "
+                 "initializes boot info and arena bounds, stops at 0x801b0f5c "
+                 "before OSExceptionInit. "
                  "Re-entry skip/epilogue tested separately; first OSInit does not return.\n";
+}
+
+void TestOriginalArenaAccessors(const DolImage& image) {
+    auto state = image.CreateGameCubeState();
+    ppc_800032B0(state);
+    state.lr = 0x80001000u;
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    state.fpscr = 4;
+    for (bool interrupts : {false, true}) {
+        state.externalInterruptsEnabled = interrupts;
+        for (uint32_t value : {0u, 0x8035cfa1u, 0x81700000u, UINT32_MAX}) {
+            for (bool high : {false, true}) {
+                const uint32_t slot = high ? 0x80349618u : 0x80348b90u;
+                auto expected = state;
+                ppc_write_u32(expected, slot, value);
+                state.gpr[3] = value;
+                if (high) ppc_801B20E4(state);
+                else ppc_801B20EC(state);
+                Require(state.memory == expected.memory && state.pc == state.lr &&
+                            state.gpr[3] == value,
+                        "Original arena setter changed more than its SDA slot.");
+                state.gpr[3] = ~value;
+                if (high) ppc_801B20D4(state);
+                else ppc_801B20DC(state);
+                Require(state.gpr[3] == value && state.memory == expected.memory &&
+                            state.pc == state.lr && state.cr == 0x12345678u &&
+                            state.xer == 0xe0000000u && state.fpscr == 4 &&
+                            state.gpr[1] == 0x8035cfa0u &&
+                            state.externalInterruptsEnabled == interrupts,
+                        "Original arena getter changed memory, flags, stack or interrupt state.");
+                Require(state.fpr == expected.fpr && state.gqr == expected.gqr &&
+                            state.msr == expected.msr && state.hid0 == expected.hid0 &&
+                            state.hid2 == expected.hid2 && state.l2cr == expected.l2cr &&
+                            state.performanceMonitor == expected.performanceMonitor &&
+                            state.ctr == expected.ctr && state.lr == expected.lr,
+                        "Original arena accessors changed unrelated CPU state.");
+                for (unsigned reg = 0; reg < 32; ++reg) {
+                    if (reg == 3) continue;
+                    Require(state.gpr[reg] == expected.gpr[reg],
+                            "Original arena accessors changed an unrelated integer register.");
+                }
+            }
+        }
+    }
+    std::cout << "Original arena getters/setters preserve exact bounds, including zero/"
+                 "unaligned values; no allocator or host pointer conversion implied.\n";
+}
+
+void TestOriginalBootInfoAndArena(const DolImage& image) {
+    for (unsigned source = 0; source < 3; ++source) {
+        for (uint32_t debug : {0u, 1u, 2u, 0x100u, UINT32_MAX}) {
+            for (bool customLow : {false, true}) {
+                for (bool customHigh : {false, true}) {
+                    if (source == 0 && customHigh) continue; // Nonzero high selects fallback boot info.
+                    if (source == 2 && !customHigh) continue;
+                    auto state = image.CreateGameCubeState();
+                    ppc_800032B0(state);
+                    state.externalInterruptsEnabled = false;
+                    state.hid0 = 0xc200u;
+                    state.fpscr = 4;
+                    state.fpr.fill({UINT64_MAX, UINT64_MAX});
+                    state.gqr.fill(0x12345678u);
+                    state.performanceMonitor.fill(0x87654321u);
+                    constexpr uint32_t bi2 = 0x80004000u;
+                    constexpr uint32_t pad = 0x123456abu;
+                    const uint32_t low = customLow ? 0x80400001u : 0;
+                    const uint32_t high = customHigh ? 0x81600001u : 0;
+                    ppc_write_u32(state, 0x800000f4u, source == 1 ? bi2 : 0);
+                    ppc_write_u32(state, 0x80000030u, low);
+                    ppc_write_u32(state, 0x80000034u, high);
+                    ppc_write_u32(state, bi2 + 0xc, debug);
+                    ppc_write_u32(state, bi2 + 0x24, pad);
+                    ppc_write_u8(state, 0x800030e8u,
+                        source == 1 ? 0x55u : static_cast<uint8_t>(debug));
+                    ppc_write_u8(state, 0x800030e9u,
+                        source == 1 ? 0x66u : static_cast<uint8_t>(pad));
+                    for (uint32_t slot : {0x803495c0u, 0x803495c4u, 0x803495c8u,
+                                          0x803497e0u, 0x803496ecu, 0x80348b90u,
+                                          0x80349618u}) {
+                        ppc_write_u32(state, slot, 0xdeadbeefu);
+                    }
+                    const auto before = state;
+                    auto expected = state;
+                    ppc_write_u32(expected, 0x803495c0u, 0x80000000u);
+                    ppc_write_u32(expected, 0x803495c4u,
+                        source == 1 ? bi2 + 0xc : source == 2 ? 0x803495c8u : 0);
+                    if (source == 1) {
+                        ppc_write_u32(expected, 0x803497e0u, pad);
+                        ppc_write_u8(expected, 0x800030e8u, static_cast<uint8_t>(debug));
+                        ppc_write_u8(expected, 0x800030e9u, static_cast<uint8_t>(pad));
+                    } else if (source == 2) {
+                        ppc_write_u32(expected, 0x803495c8u, debug & 0xffu);
+                        ppc_write_u32(expected, 0x803497e0u, pad & 0xffu);
+                    }
+                    ppc_write_u32(expected, 0x803496ecu, 1);
+                    const uint32_t effectiveDebug = source == 2 ? debug & 0xffu : debug;
+                    const bool stackArena = !customLow && source != 0 && effectiveDebug < 2;
+                    const uint32_t arenaLow = customLow ? low :
+                        stackArena ? 0x8035cfa0u : 0x8035efa0u;
+                    const uint32_t arenaHigh = customHigh ? high : 0x81700000u;
+                    ppc_write_u32(expected, 0x80348b90u, arenaLow);
+                    ppc_write_u32(expected, 0x80349618u, arenaHigh);
+                    std::vector<std::pair<uint32_t, uint32_t>> setters;
+                    state.callGuest = [&](uint32_t address, PpcState& guest) {
+                        Require(setters.size() < 3 && !guest.externalInterruptsEnabled,
+                                "Boot-info fixture exceeded setter budget or enabled interrupts.");
+                        setters.push_back({address, guest.gpr[3]});
+                        RunHardwareDependency(address, guest);
+                    };
+                    ppc_801B0E64(state);
+                    std::vector<std::pair<uint32_t, uint32_t>> expectedSetters{
+                        {0x801b20ecu, customLow ? low : 0x8035efa0u}};
+                    if (stackArena) expectedSetters.push_back({0x801b20ecu, arenaLow});
+                    expectedSetters.push_back({0x801b20e4u, arenaHigh});
+                    Require(state.pc == 0x801b0f5cu && !state.externalInterruptsEnabled &&
+                                setters == expectedSetters &&
+                                state.memory == expected.memory,
+                            "Original boot-info/arena branches, exact writes or setter order differ.");
+                    Require(state.fpr == before.fpr && state.gqr == before.gqr &&
+                                state.fpscr == before.fpscr && state.hid0 == before.hid0 &&
+                                state.msr == before.msr && state.hid2 == before.hid2 &&
+                                state.l2cr == before.l2cr && state.xer == before.xer &&
+                                (state.cr & 0x0fffffffu) == (before.cr & 0x0fffffffu) &&
+                                state.lr == 0x801b0f5cu &&
+                                state.ctr == before.ctr &&
+                                state.performanceMonitor == before.performanceMonitor,
+                            "Boot-info setup damaged unrelated CPU state.");
+                    for (unsigned reg = 0; reg < 32; ++reg) {
+                        if (reg == 0 || reg == 3 || reg == 4) continue;
+                        Require(state.gpr[reg] == before.gpr[reg],
+                                "Boot-info setup damaged its stack, SDA or preserved registers.");
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "Original boot-info/arena setup passed BI2, low-memory fallback and absent "
+                 "metadata; debug thresholds, byte truncation, custom/default bounds, "
+                 "setter order and exact RAM guards. Stops before OSExceptionInit.\n";
 }
 
 void TestMemoryFunctions(const DolImage& image) {
@@ -979,6 +1131,8 @@ int main(int argc, char** argv) {
         TestOriginalFpscrAccessors(image);
         TestOriginalNonIeeeMode(image);
         TestOriginalSpeculationDisable(image);
+        TestOriginalArenaAccessors(image);
+        TestOriginalBootInfoAndArena(image);
         TestStartupHelpers(image);
         TestArgumentRelocation(image);
         TestMemoryFunctions(image);
