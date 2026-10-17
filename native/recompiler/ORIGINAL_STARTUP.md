@@ -205,16 +205,29 @@ constructor targets; unsupported instruction paths remain unregistered, with
 build diagnostics and explicit runtime failure if reached. No instruction decoder
 runs at runtime. Persistent milestones observe verified compiled block entry,
 without replacing original instructions or changing guest registers.
-The runner's next dependency stop is the first game-initialization call at
-`PC=0x8000AD40`, LR `0x8000AA6C`, SP `0x8035CF78`, with
-original inquiry callback result `0x8001`, five external exceptions returned and
-the entire real FST intact.
+The original game-initialization call at `0x8000AD40` now executes its memory,
+resource-manager and Screen setup. Original `Memory::Initialize` constructs heaps
+from the real arena (`0x8035EFA0` to `0x81701FE0`). Nine original allocations,
+including a nested `0x1730` resource allocation and `0x60000` FIFO buffer, complete.
+The original Screen enters GXInit and prints the SDK's GX version.
+The runner's next dependency stop is `PC=0x801B3E00`, LR `0x801B3EEC`,
+SP `0x8035CEC0`, attempting PI mask `0x8FC` for graphics interrupts.
+The original inquiry callback result remains `0x8001`, five external exceptions
+returned and the entire real FST is intact. GXInit has not returned.
 Real-disc tests verify every constructor in original table order and preservation
 of its stack, SDA and nonvolatile integer/floating registers. Traced and untraced
 startup produce identical RAM, CPU state, output and sampled time; damaged
 constructor words fail integrity validation without claiming later milestones.
 The game main loop, GX renderer,
 scheduled game threads, audio, input and saves have not run.
+
+The next connected milestone is checked CP/PE interrupt and GX FIFO handling,
+followed by original GX/VI initialization. Enabling PI bits without the actual
+graphics backend would hide missing dependencies and is deliberately rejected.
+Reaching GXInit does not establish a completed graphics initialization, scheduled
+game thread or frame. Generated translation registration uses non-inlined batches
+of at most 64 regular bindings (plus the console binding in the final batch), avoiding
+MSVC's oversized temporary stack frames without increasing the executable stack.
 
 ## Targeted regression
 
@@ -243,3 +256,18 @@ the original nonconverging `OSGetTime` sampling loop, callback restoration and
 rejection of resuming an incomplete startup as fresh. Disk fixtures are created
 in a uniquely owned directory beside the build-local DOL and narrowly cleaned.
 Generated bindings and the input DOL remain local build inputs.
+
+With `HMAWL_US_REL_DIRECTORY` and `HMAWL_US_RVZ` also bound, the separate
+`hmawl_original_disc_startup_tests` case verifies all 93 constructor returns,
+the user-init return and the exact graphics-initialization dependency boundary. Its
+observer checks each original table target and per-constructor ABI restoration;
+a second execution compares the complete 24 MiB RAM image, CPU registers,
+console output and deterministic clock samples against the production runner.
+It also verifies original heap descriptors, nine allocation return addresses,
+requested sizes, 32-byte alignment, arena bounds, non-overlap, allocation count,
+manager singleton pointers and the Screen's FIFO pointer.
+The synthetic compiled-code suite additionally covers immediate single-precision
+loads/stores and update forms: signed zero, normal/subnormal values, infinities,
+NaN payloads, paired-lane behavior, truncating stores, four-byte write guards,
+RAM aliases, absolute addressing and transactional invalid accesses. These
+transfers do not add floating-point arithmetic or general paired-single stores.

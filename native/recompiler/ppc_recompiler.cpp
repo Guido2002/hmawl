@@ -912,7 +912,7 @@ std::string RecompileFunction(uint32_t address,
                 if (record || (spr != 1 && spr != 8 && spr != 9 && spr != 26 && spr != 27 &&
                                spr != 272 && spr != 1008 && spr != 1017 &&
                                (spr < 912 || spr > 920))) {
-                    throw std::runtime_error("Unsupported mfspr instruction " +
+                    throw UnsupportedPpcInstruction("Unsupported mfspr instruction " +
                                              Hex(instruction) + " at " +
                                              Hex(pc) + ".");
                 }
@@ -969,7 +969,7 @@ std::string RecompileFunction(uint32_t address,
                 }
                 if (record || (spr != 1 && spr != 8 && spr != 9 && spr != 1008 && spr != 1017 &&
                                (spr < 912 || spr > 920))) {
-                    throw std::runtime_error("Unsupported mtspr instruction " +
+                    throw UnsupportedPpcInstruction("Unsupported mtspr instruction " +
                                              Hex(instruction) + " at " +
                                              Hex(pc) + ".");
                 }

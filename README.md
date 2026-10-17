@@ -88,8 +88,11 @@ Expired decrementer delivery, general DSP tasks and audio playback remain unfini
 All **93 original DOL C++ constructors now return**, followed by `__init_user`;
 the original game `main` is entered in the Windows runner. Tests verify constructor
 order, nonvolatile registers and exact observer/non-observer execution equivalence.
-The runner stops with **exit code 3** at its first game-initialization call,
-`PC=0x8000AD40`, `LR=0x8000AA6C`. The game main loop and rendering have not run.
+Original game initialization now runs arena-backed memory setup, nine checked
+heap allocations, resource managers and `Screen` construction into original
+`GXInit`. The runner stops with **exit code 3** at its unsupported graphics
+interrupt enable, `PC=0x801B3E00`, `LR=0x801B3EEC` (PI mask `0x8FC`).
+GXInit has not returned; the game main loop and rendering have not run.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.
 The CLI creates an English/NTSC/stereo `native-console.sram` beside the input DOL

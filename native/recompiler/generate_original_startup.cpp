@@ -35,7 +35,7 @@ uint32_t BranchTarget(uint32_t address, uint32_t word) {
     return (word & 2u) ? displacement : address + displacement;
 }
 
-void AddOriginalConstructors(const DolImage& image, const PpcState& source,
+void AddOriginalDependencies(const DolImage& image, const PpcState& source,
                              std::map<uint32_t, uint32_t>& instructions,
                              std::set<uint32_t>& leaders) {
     std::vector<uint32_t> pending;
@@ -56,7 +56,9 @@ void AddOriginalConstructors(const DolImage& image, const PpcState& source,
     // Original virtual and array-construction calls do not encode their targets in a branch.
     for (uint32_t target : {0x80199eecu, 0x8001b920u, 0x80022790u, 0x800226f0u,
                             0x8002b80cu, 0x8002f27cu, 0x8002f100u, 0x8002efbcu,
-                            0x80179ee8u, 0x80179c90u, 0x801059a4u}) {
+                            0x80179ee8u, 0x80179c90u, 0x801059a4u,
+                            0x8019ad5cu, 0x80190204u, 0x8000b4c4u, 0x80198f54u,
+                            0x80199ed8u, 0x8017a3a0u}) {
         leaders.insert(target);
         pending.push_back(target);
     }
@@ -64,12 +66,13 @@ void AddOriginalConstructors(const DolImage& image, const PpcState& source,
     for (size_t index = 0; index < pending.size(); ++index) {
         const auto address = pending[index];
         if (!visited.insert(address).second) continue;
+        if (address == 0x802383c0u) continue; // Existing original-word-verified native console boundary.
         if (visited.size() > 50000) throw std::runtime_error("Original constructor compilation exceeds its code bound.");
         const auto word = image.ReadWords(address, 4).front();
         try {
             RecompileFunction(address, {word}, {true, true});
         } catch (const UnsupportedPpcInstruction& error) {
-            std::cout << "Constructor dependency remains untranslated: " << error.what() << '\n';
+            std::cout << "Original dependency remains untranslated: " << error.what() << '\n';
             continue;
         }
         instructions.emplace(address, word);
@@ -81,9 +84,7 @@ void AddOriginalConstructors(const DolImage& image, const PpcState& source,
         } else if (opcode == 19 && (extended == 16 || extended == 528)) {
             if ((word & 1u) != 0 || ((word >> 21) & 20u) != 20u) pending.push_back(address + 4);
         } else {
-            if (opcode == 17 || (opcode == 19 && extended == 50)) {
-                throw std::runtime_error("Unexpected exception transfer in original constructor dependencies.");
-            }
+            if (opcode == 19 && extended == 50) continue;
             pending.push_back(address + 4);
         }
     }
@@ -128,7 +129,7 @@ int main(int argc, char** argv) {
         }
         leaders.insert(0x001b4f54u);
         const auto jumpTableState = image.CreateGameCubeState();
-        AddOriginalConstructors(image, jumpTableState, instructions, leaders);
+        AddOriginalDependencies(image, jumpTableState, instructions, leaders);
         leaders.insert(0x80003268u);
         leaders.insert(0x800032a0u);
         for (uint32_t offset = 0; offset < 16u * 4u; offset += 4) {
@@ -167,9 +168,16 @@ int main(int argc, char** argv) {
                      "            throw std::runtime_error(\"Native DSP bootstrap payload differs from compiled DOL microcode.\");\n"
                      "    }\n"
                      "    OriginalDspInitialization(*state.dspHardware);\n}\n";
-        bindings << "static std::vector<NativeTranslation> OriginalStartupTranslations() {\n"
-                    "    return {\n";
+        bindings << "#if defined(_MSC_VER)\n#define HMAWL_BIND_NOINLINE __declspec(noinline)\n"
+                    "#else\n#define HMAWL_BIND_NOINLINE __attribute__((noinline))\n#endif\n";
+        size_t bindingCount = 0, batchCount = 0;
         for (auto at = instructions.begin(); at != instructions.end();) {
+            if (bindingCount % 64 == 0) {
+                if (bindingCount != 0) bindings << "}\n";
+                bindings << "static HMAWL_BIND_NOINLINE void OriginalBindings" << batchCount++
+                         << "(std::vector<NativeTranslation>& translations) {\n";
+            }
+            ++bindingCount;
             const uint32_t address = at->first;
             std::vector<uint32_t> words;
             do {
@@ -181,7 +189,7 @@ int main(int argc, char** argv) {
                     at->first != previousAddress + 4 || leaders.count(at->first)) break;
             } while (true);
             functions << RecompileFunction(address, words, {true, true}) << '\n';
-            bindings << "        {0x" << Hex(address) << "u, ppc_" << Hex(address) << ", {";
+            bindings << "    translations.push_back({0x" << Hex(address) << "u, ppc_" << Hex(address) << ", {";
             for (auto word : words) bindings << "0x" << Hex(word) << "u,";
             bindings << "}";
             if (address >= 0xc00u && address < 0xc1cu) {
@@ -194,13 +202,20 @@ int main(int argc, char** argv) {
                 }
                 bindings << "}";
             }
-            bindings << "},\n";
+            bindings << "});\n";
         }
-        bindings << "        {0x802383C0u, NativeGuestVprintf, {";
+        bindings << "    translations.push_back({0x802383C0u, NativeGuestVprintf, {";
         for (auto word : image.ReadWords(0x802383c0u, 0x7cu)) {
             bindings << "0x" << Hex(word) << "u,";
         }
-        bindings << "}},\n    };\n}\n";
+        bindings << "}});\n}\n#undef HMAWL_BIND_NOINLINE\n"
+                    "static std::vector<NativeTranslation> OriginalStartupTranslations() {\n"
+                    "    std::vector<NativeTranslation> translations;\n"
+                 << "    translations.reserve(" << bindingCount + 1 << ");\n";
+        for (size_t batch = 0; batch < batchCount; ++batch) {
+            bindings << "    OriginalBindings" << batch << "(translations);\n";
+        }
+        bindings << "    return translations;\n}\n";
         std::ofstream output(argv[2], std::ios::binary);
         output << "#include \"native_dispatch.h\"\n#include \"native_console.h\"\n"
                   "#include \"native_dsp_init.h\"\n\n"

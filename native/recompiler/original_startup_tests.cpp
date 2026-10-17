@@ -499,18 +499,20 @@ int main(int argc, char** argv) {
             const auto discResult = RunOriginalStartup(dispatcher, discState);
             std::cout << DescribeOriginalStartupStop(discResult) << '\n';
             Require(discResult.stop == OriginalStartupStop::Dependency &&
-                        discResult.pc == 0x8000ad40u && discResult.lr == 0x8000aa6cu &&
-                        discResult.stack == 0x8035cf78u && discResult.osInitReturned &&
+                        discResult.pc == 0x801b3e00u && discResult.lr == 0x801b3eecu &&
+                        discResult.stack == 0x8035cec0u && discResult.osInitReturned &&
                         discResult.constructorsReturned == 93 && discResult.userInitReturned &&
-                        discResult.gameMainEntered && !discState.callGuest && !discState.callException &&
-                        discResult.reason.find("No native translation registered at 0x8000AD40") != std::string::npos &&
+                        discResult.gameMainEntered && discResult.memoryInitialized &&
+                        discResult.screenInitEntered && discResult.gxInitEntered &&
+                        !discState.callGuest && !discState.callException &&
+                        discResult.reason.find("Unsupported PI interrupt mask") != std::string::npos &&
                         discState.discInterface->completedTransfers == 1 &&
                         discState.discInterface->status == 0x2au &&
                         discState.discInterface->dmaLength == 0 &&
                         discState.discInterface->control == 2 &&
                         discState.externalInterrupt->delivered == 5 &&
                         discState.externalInterrupt->returned == 5 &&
-                        !discState.externalInterrupt->active && discState.externalInterruptsEnabled &&
+                        !discState.externalInterrupt->active && !discState.externalInterruptsEnabled &&
                         discState.piInterruptMask == 0xfcu &&
                         ppc_read_u16(discState, 0x800030e6u) == 0x8001u &&
                         ppc_read_u32(discState, 0x80317a6cu) == 0 &&
@@ -518,9 +520,10 @@ int main(int argc, char** argv) {
                         ppc_read_u32(discState, 0x803185b8u) == 0 &&
                         ppc_read_u32(discState, 0x803495fcu) != 0 &&
                         discConsole.find("SDK - DVD") != std::string::npos &&
+                        discConsole.find("SDK - GX") != std::string::npos &&
                         DescribeOriginalStartupStop(discResult).find("OSInit returned") != std::string::npos &&
                         std::equal(fst.begin(), fst.end(), discState.memory.begin() + fstOffset),
-                    "Original entry did not reach game main through all constructors, real DVD DMA and protected FST.");
+                    "Original entry did not reach original graphics setup through constructors, heaps and real DVD DMA.");
             for (uint32_t address = 0x80317a40u; address < 0x80317a60u; ++address) {
                 Require(ppc_read_u8(discState, address) == (address == 0x80317a43u ? 1 : 0),
                         "Native virtual-drive identity differs or claims console firmware.");
@@ -542,6 +545,8 @@ int main(int argc, char** argv) {
             Require(ppc_read_u32(traced, 0x8023dd80u + 93 * 4) == 0,
                     "Original constructor table does not have exactly 93 entries.");
             size_t entered = 0, returned = 0;
+            bool initializedHeap = false;
+            std::vector<std::pair<uint32_t, uint32_t>> allocations;
             std::array<uint32_t, 32> savedRegisters{};
             std::array<uint64_t, 18> savedFprs{};
             const auto observe = [&](uint32_t pc) {
@@ -566,20 +571,69 @@ int main(int argc, char** argv) {
                 } else if (pc == 0x800032a0u || pc == 0x8000aa54u) {
                     Require(entered == 93 && returned == 93 && traced.gpr[1] == 0x8035cf98u,
                             "User initialization/game entry preceded complete constructor return.");
+                } else if (pc == 0x8000ad5cu) {
+                    const uint32_t size = (0x81701fe0u - 0x8035efa0u) & ~31u;
+                    Require(ppc_read_u32(traced, 0x80000030u) == 0x8035efa0u &&
+                                ppc_read_u32(traced, 0x80315508u) == 0x81701fe0u &&
+                                ppc_read_u32(traced, 0x8031550cu) == size &&
+                                ppc_read_u32(traced, 0x80315510u) == 0x802fd4fcu &&
+                                ppc_read_u16(traced, 0x80315514u) == 4096 &&
+                                ppc_read_u32(traced, 0x802fd4fcu) == 0x81701fe0u &&
+                                ppc_read_u32(traced, 0x802fd500u) == size &&
+                                ppc_read_u32(traced, 0x80349494u) == 0,
+                            "Original arena-backed heap initialization differs from actual loader bounds.");
+                    initializedHeap = true;
+                } else {
+                    uint32_t size = 0;
+                    switch (pc) {
+                    case 0x8000ad70u: size = 12; break;
+                    case 0x8000ad90u: size = 4; break;
+                    case 0x8019023cu: size = 0x4b10; break;
+                    case 0x80199318u: size = 0x1730; break;
+                    case 0x80190260u: size = 0x8a10; break;
+                    case 0x80190280u: size = 0x44; break;
+                    case 0x8000adb0u: size = 0xa0; break;
+                    case 0x8000add0u: size = 0xac; break;
+                    case 0x8017a40cu: size = 0x60000; break;
+                    }
+                    if (size != 0) {
+                        const auto address = traced.gpr[3];
+                        Require(initializedHeap && address >= 0x8035efa0u &&
+                                    address + size <= 0x81701fe0u && (address & 31u) == 0 &&
+                                    (allocations.empty() ||
+                                     address + size <= allocations.back().first),
+                                "Original initialization allocation failed, overlapped or escaped the arena.");
+                        allocations.emplace_back(address, size);
+                    }
                 }
             };
             bool reachedBoundary = false;
             try {
                 dispatcher.Execute(traced, image.entryPoint(), 1000000, 128, observe);
             } catch (const std::runtime_error& error) {
-                reachedBoundary = std::string(error.what()).find(
-                    "No native translation registered at 0x8000AD40") != std::string::npos;
+                reachedBoundary = traced.pc == 0x801b3e00u &&
+                    std::string(error.what()).find("Unsupported PI interrupt mask") != std::string::npos;
+                if (!reachedBoundary) throw;
             }
+            std::cout << "Observed original initialization allocations=" << allocations.size()
+                      << ", allocator count=" << ppc_read_u32(traced, 0x80349494u) << '\n';
+            Require(initializedHeap && allocations.size() == 9,
+                    "Original initialization did not return all nine observed heap allocations.");
+            Require(ppc_read_u32(traced, 0x80349494u) == allocations.size(),
+                    "Original allocation counter differs from nine observed allocations.");
+            Require(ppc_read_u32(traced, 0x8034915cu) == allocations[0].first &&
+                        ppc_read_u32(traced, 0x8034919cu) == allocations[1].first &&
+                        ppc_read_u32(traced, 0x803491b4u) == allocations[7].first &&
+                        ppc_read_u32(traced, allocations[7].first + 12) == allocations[8].first,
+                    "Original manager singletons or Screen FIFO pointer differ from allocated objects.");
             Require(reachedBoundary && entered == 93 && returned == 93 &&
                         traced.memory == discState.memory && tracedConsole == discConsole &&
                         tracedTicks == ticks && traced.pc == discState.pc && traced.lr == discState.lr &&
                         std::equal(std::begin(traced.gpr), std::end(traced.gpr), std::begin(discState.gpr)) &&
                         traced.fpr == discState.fpr && traced.fpscr == discState.fpscr &&
+                        traced.cr == discState.cr && traced.xer == discState.xer &&
+                        traced.ctr == discState.ctr && traced.gqr == discState.gqr &&
+                        ppc_read_msr(traced) == ppc_read_msr(discState) &&
                         !traced.callGuest && !traced.callException,
                     "Observed startup changed original initialization, memory, registers or callback cleanup.");
             auto damagedConstructor = CreateOriginalStartupState(image);

@@ -40,8 +40,10 @@ then delivers real SI completions through the original external exception vector
 dispatcher, callbacks and context restoration. With the verified RVZ bound, DVDInit,
 drive inquiry and the original DI completion chain also run: **original OSInit
 returns to `0x80003268` in the Windows runner**. All 93 original DOL constructors
-and `__init_user` also return, reaching original game `main`. Its first initialization
-call at `0x8000AD40`, the main loop and a rendered game frame remain unfinished.
+and `__init_user` also return, reaching original game `main`. Original memory setup,
+resource managers and Screen construction execute through to original GXInit.
+Graphics startup stops explicitly at its unsupported PI interrupt mask `0x8FC`;
+GXInit return, the main loop and a rendered game frame remain unfinished.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
 ## Phases and completion criteria
@@ -518,8 +520,15 @@ queue. Full runtime scheduling and device services are still needed.
   with raw-bit conversion for original initialization. Block observation
   records persistent milestones without modifying guest state. Real-disc tests
   verify all constructor targets/order, stack/SDA and nonvolatile GPR/FPR restoration,
-  identical traced/untraced state, and damaged-code rejection. Production stops at
-  `0x8000AD40`, LR `0x8000AA6C`: game initialization has not returned.
+  identical traced/untraced state, and damaged-code rejection.
+- [x] Integrate original game initialization from `0x8000AD40`: arena-backed memory
+  setup, nine real heap allocations, resource managers and Screen/FIFO allocation.
+  Verify original descriptor fields, allocation sizes/alignment/non-overlap,
+  counters, singleton/FIFO pointers and identical observed/unobserved execution.
+  Bound generated registration stack usage with non-inlined batches of 64 bindings.
+  The Windows runner enters original GXInit and stops at `0x801B3E00`,
+  LR `0x801B3EEC`, SP `0x8035CEC0`, attempting graphics PI mask `0x8FC`.
+  No graphics interrupt or FIFO success is synthesized; GXInit has not returned.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

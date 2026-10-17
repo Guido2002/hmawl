@@ -22,6 +22,9 @@ struct OriginalStartupResult {
     bool osInitReturned = false;
     bool userInitReturned = false;
     bool gameMainEntered = false;
+    bool memoryInitialized = false;
+    bool screenInitEntered = false;
+    bool gxInitEntered = false;
     uint32_t constructorsReturned = 0;
 };
 

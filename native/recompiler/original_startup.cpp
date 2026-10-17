@@ -147,6 +147,9 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x801b7cc8u) ++result.constructorsReturned;
             if (pc == 0x800032a0u) result.userInitReturned = true;
             if (pc == 0x8000aa54u) result.gameMainEntered = true;
+            if (pc == 0x8000ad5cu) result.memoryInitialized = true;
+            if (pc == 0x8017a3e0u) result.screenInitEntered = true;
+            if (pc == 0x801cb378u) result.gxInitEntered = true;
         });
     } catch (const std::exception& error) {
         const std::string reason = error.what();
@@ -174,6 +177,9 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     }
     if (result.userInitReturned) text << "Original __init_user returned. ";
     if (result.gameMainEntered) text << "Original game main entered. ";
+    if (result.memoryInitialized) text << "Original Memory::Initialize returned. ";
+    if (result.screenInitEntered) text << "Original Screen initialization entered. ";
+    if (result.gxInitEntered) text << "Original GXInit entered (not completed). ";
     text << "This is NOT a game boot; no game main loop or renderer ran.";
     return text.str();
 }
