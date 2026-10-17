@@ -603,6 +603,15 @@ std::string RecompileFunction(uint32_t address,
             uint32_t destination = rt;
             bool record = (instruction & 1u) != 0;
             switch (extendedOpcode) {
+            case 86:
+            case 982:
+                if (rt != 0 || record) {
+                    throw std::runtime_error("Invalid cache-block instruction at " + Hex(pc) + ".");
+                }
+                output << "    ppc_flush_cache_block(state, "
+                       << (ra == 0 ? "0u" : left) << " + " << right << ");\n";
+                emitted = true;
+                break;
             case 598:
                 if (instruction != 0x7c0004acu) {
                     throw std::runtime_error("Invalid sync instruction at " + Hex(pc) + ".");

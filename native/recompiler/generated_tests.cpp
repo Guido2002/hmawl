@@ -814,6 +814,47 @@ void TestHardwareControlRegisters() {
             "Control-register transfer changed flags, FPSCR or RAM.");
 }
 
+void TestCacheBlockInstructions() {
+    for (auto function : {ppc_0000B100, ppc_0000B110, ppc_0000B120, ppc_0000B130}) {
+        const bool indexed = function == ppc_0000B110 || function == ppc_0000B130;
+        const uint32_t pc = function == ppc_0000B100 ? 0xb100u :
+            function == ppc_0000B110 ? 0xb110u : function == ppc_0000B120 ? 0xb120u : 0xb130u;
+        PpcState state;
+        state.memoryMap = PpcMemoryMap::GameCubeRam;
+        state.memory.resize(kGameCubeRamSize, 0xa5);
+        state.gpr[0] = UINT32_MAX;
+        state.cr = 0x12345678u;
+        state.xer = 0xe0000000u;
+        state.fpscr = 4;
+        const auto memory = state.memory;
+        for (uint32_t base : {0u, 0x80000000u, 0xc0000000u}) {
+            for (uint32_t offset : {0u, 1u, 31u, 32u, kGameCubeRamSize - 1}) {
+                state.gpr[3] = indexed ? base + offset - 0x100u : base + offset;
+                state.gpr[4] = 0x100;
+                const auto registers = std::vector<uint32_t>(std::begin(state.gpr), std::end(state.gpr));
+                function(state);
+                Require(state.pc == pc + 4 && state.memory == memory &&
+                            std::equal(registers.begin(), registers.end(), std::begin(state.gpr)) &&
+                            state.cr == 0x12345678u && state.xer == 0xe0000000u &&
+                            state.fpscr == 4,
+                        "Cache block operation changed RAM/registers or failed alias/wrapping addressing.");
+            }
+        }
+        for (uint32_t invalid : {kGameCubeRamSize, 0x81800000u, 0xcc000000u, UINT32_MAX}) {
+            state.gpr[3] = indexed ? invalid - 0x100u : invalid;
+            state.pc = pc;
+            bool rejected = false;
+            try {
+                function(state);
+            } catch (const std::out_of_range&) {
+                rejected = true;
+            }
+            Require(rejected && state.pc == pc && state.memory == memory,
+                    "Unmapped cache operation did not reject before changing RAM/PC.");
+        }
+    }
+}
+
 void TestCacheControlRegisters() {
     PpcState state;
     state.memory.resize(64, 0xa5);
@@ -1417,6 +1458,11 @@ void TestNativeDispatch() {
         ppc_00009370(state);
         Require(dispatcher.Contains(0x4020) && state.hid0 == 0xc000u,
                 "Cache invalidation removed a valid static native translation.");
+        state.gpr[3] = 0x4020;
+        ppc_0000B100(state);
+        ppc_0000B120(state);
+        Require(dispatcher.Contains(0x4020),
+                "Cache-block operation removed a static native translation.");
         state.lr = 0x4ff0;
         state.ctr = 0x4020;
         state.gpr[3] = 10;
@@ -1448,6 +1494,9 @@ void TestNativeDispatch() {
     }
     Require(previousCalls == 3, "Failed native execution did not restore the callback.");
     ppc_write_u32(state, 0x4020, 0);
+    state.gpr[3] = 0x4020;
+    ppc_0000B100(state);
+    ppc_0000B120(state);
     state.gpr[3] = 0xc800u;
     ppc_00009350(state);
     ppc_00009360(state);
@@ -1510,6 +1559,7 @@ int main() {
         TestIndexedPairedAddresses();
         TestHardwareControlRegisters();
         TestCacheControlRegisters();
+        TestCacheBlockInstructions();
         TestL2ControlRegisters();
         TestRegisterAddCarry();
         TestPairedLoads(false);

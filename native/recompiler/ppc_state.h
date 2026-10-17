@@ -123,6 +123,12 @@ inline size_t ppc_memory_offset(const PpcState& state, uint32_t address,
     return offset;
 }
 
+inline void ppc_flush_cache_block(const PpcState& state, uint32_t address) {
+    ppc_memory_offset(state, address & ~31u, 32);
+    // Both caches share coherent RAM; static code checks remain authoritative.
+    ppc_sync();
+}
+
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
     const size_t offset = ppc_memory_offset(state, address, sizeof(uint32_t));
     return (static_cast<uint32_t>(state.memory[offset]) << 24) |

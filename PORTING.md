@@ -200,8 +200,8 @@ queue. Full runtime scheduling and device services are still needed.
   Continue the verified entry state with the original `OSInit` prefix: set the
   initialization flag, record system start time and mask interrupts. Continue
   through six original performance-monitor reset wrappers, speculation disable
-  and non-IEEE setup, then boot-info/arena initialization to `0x801b0f5c`,
-  before `OSExceptionInit`.
+  and non-IEEE setup, boot-info/arena initialization and exception installation
+  to `0x801b0f60`, before `__OSInitSystemCall`.
   Test the already-initialized
   skip and epilogue separately; never claim they complete first-time startup.
 - [x] Compile FPSCR bit operations `mtfsb0`/`mtfsb1`, including record forms,
@@ -230,7 +230,19 @@ queue. Full runtime scheduling and device services are still needed.
   setter order and preserved CPU state. Continue the entry-derived default path
   to `0x801b0f5c`; initialized re-entry must leave boot info and arenas untouched.
   Arena accessors store exact guest values, not host allocations; a complete
-  loader boot-info contract and OS exception initialization remain pending.
+  loader boot-info contract remains pending; exception installation follows below.
+- [x] Compile `dcbf`/`icbi` with checked, aligned 32-byte RAM blocks and host
+  fences over coherent storage. Reject reserved encodings and unmapped blocks;
+  verify aliases, effective-address wrap and preserved RAM/registers. Run
+  original `DCFlushRangeNoSync`/`ICInvalidateRange`, testing zero/unaligned
+  ranges, iteration counts and unmapped accesses. Keep static bindings and
+  modified-code rejection after block invalidation.
+- [x] Execute original `OSExceptionInit`, its debug-mark helper and default
+  handler setter. Check exact vector/integrator/table contents across debug
+  thresholds, marked masks and an existing integrator; verify cache-call ranges,
+  template restoration, RAM guards and return ABI. Continue entry-derived OSInit
+  to `0x801b0f60`. Installed vector/default-handler code is not executed:
+  exception delivery, exception returns and system-call initialization are pending.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic
@@ -441,7 +453,8 @@ systems and the executable can be packaged without the GameCube build toolchain.
    unsupported hardware instructions as successful no-ops.
    The initial `OSInit` prefix is independently verified through start-time
    capture/interrupt masking, MMCR/PMC resets and HID0 SPD/FPSCR NI setup
-   plus boot-info/arena setup (`0x801b0f5c`); OS exception setup and remaining subsystem initialization
+   plus boot-info/arena and exception installation (`0x801b0f60`);
+   system-call setup and remaining subsystem initialization
    still follow.
 2. Expand the recompiler's opcode coverage, extend the tested REL/native-function
    bridge with function discovery and module lifetime management, implement

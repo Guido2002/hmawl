@@ -190,6 +190,12 @@ void RunHardwareDependency(uint32_t address, PpcState& state) {
     case 0x801b0b24u: ppc_801B0B24(state); break;
     case 0x801b20e4u: ppc_801B20E4(state); break;
     case 0x801b20ecu: ppc_801B20EC(state); break;
+    case 0x801b11b8u: ppc_801B11B8(state); break;
+    case 0x801b1460u: ppc_801B1460(state); break;
+    case 0x801d33c8u: ppc_801D33C8(state); break;
+    case 0x801b2428u: ppc_801B2428(state); break;
+    case 0x801b24acu: ppc_801B24AC(state); break;
+    case 0x800055ccu: ppc_800055CC(state); break;
     case 0x801b7bf0u: ppc_801B7BF0(state); break;
     case 0x801b7c10u: ppc_801B7C10(state); break;
     case 0x801b1584u: ppc_801B1584(state); break;
@@ -631,6 +637,146 @@ void BindMemoryFunctions(PpcState& state) {
     };
 }
 
+void TestOriginalCacheRanges(const DolImage& image) {
+    auto state = image.CreateGameCubeState();
+    ppc_800032B0(state);
+    state.lr = 0x80001000u;
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    state.fpscr = 4;
+    const auto memory = state.memory;
+    for (auto function : {ppc_801B2428, ppc_801B24AC}) {
+        for (uint32_t alias : {0u, 0x80000000u, 0xc0000000u}) {
+            for (uint32_t offset : {0u, 1u, 31u}) {
+                for (uint32_t length : {0u, 1u, 31u, 32u, 33u, 97u}) {
+                    state.gpr[3] = alias + 0x1000u + offset;
+                    state.gpr[4] = length;
+                    state.gpr[5] = 0x12345678u;
+                    state.ctr = 0x87654321u;
+                    const uint32_t blocks = (offset + length + 31u) / 32u;
+                    function(state);
+                    Require(state.pc == state.lr && state.gpr[1] == 0x8035cfa0u &&
+                                state.memory == memory && state.xer == 0xe0000000u &&
+                                state.fpscr == 4 &&
+                                state.gpr[3] == alias + 0x1000u + offset +
+                                    (length == 0 ? 0 : blocks * 32) &&
+                                state.gpr[4] == (length == 0 ? 0 : blocks) &&
+                                state.gpr[5] == (length == 0 ? 0x12345678u : offset) &&
+                                state.ctr == (length == 0 ? 0x87654321u : 0),
+                            "Original cache range failed alignment, loop count, zero length or ABI.");
+                }
+            }
+        }
+        state.gpr[3] = 0xcc000000u;
+        state.gpr[4] = 0;
+        function(state);
+        Require(state.pc == state.lr && state.memory == memory,
+                "Original zero-length cache range accessed an unmapped address.");
+        state.gpr[4] = 1;
+        bool rejected = false;
+        try {
+            function(state);
+        } catch (const std::out_of_range&) {
+            rejected = true;
+        }
+        Require(rejected && state.memory == memory,
+                "Original nonempty MMIO cache range did not explicitly reject.");
+    }
+    std::cout << "Original DCFlushRangeNoSync/ICInvalidateRange passed RAM aliases, "
+                 "unaligned ranges, loop counts, zero lengths and unmapped rejection.\n";
+}
+
+void ExpectExceptionInitialization(PpcState& expected, bool debugPresent,
+                                   uint32_t debug, uint32_t marked) {
+    if (ppc_read_u32(expected, 0x80000060u) == 0) {
+        for (uint32_t i = 0; i < 0x24; ++i) {
+            ppc_write_u8(expected, 0x80000060u + i,
+                         ppc_read_u8(expected, 0x801b1438u + i));
+        }
+    }
+    const uint32_t number = ppc_read_u32(expected, 0x801b14f8u);
+    for (uint32_t exception = 0; exception < 15; ++exception) {
+        const bool isMarked = (marked & (1u << exception)) != 0;
+        if (debugPresent && debug >= 2 && isMarked) continue;
+        ppc_write_u32(expected, 0x801b14f8u, number | exception);
+        ppc_write_u32(expected, 0x801b14e8u,
+                     isMarked ? ppc_read_u32(expected, 0x801b145cu) : 0x60000000u);
+        const uint32_t vector = 0x80000000u +
+            ppc_read_u32(expected, 0x802dfdacu + exception * 4);
+        for (uint32_t i = 0; i < 0x98; ++i) {
+            ppc_write_u8(expected, vector + i, ppc_read_u8(expected, 0x801b1490u + i));
+        }
+    }
+    ppc_write_u32(expected, 0x803495e4u, 0x80003000u);
+    for (uint32_t exception = 0; exception < 15; ++exception) {
+        ppc_write_u32(expected, 0x80003000u + exception * 4, 0x801b152cu);
+    }
+    ppc_write_u32(expected, 0x801b14f8u, number);
+}
+
+void TestOriginalExceptionInitialization(const DolImage& image) {
+    for (uint32_t debug : {0u, 1u, 2u, UINT32_MAX}) {
+        for (uint32_t marked : {0u, 0x7fffu, 0x5555u, 0x80000000u}) {
+            for (bool integratorPresent : {false, true}) {
+                auto state = image.CreateGameCubeState();
+                ppc_800032B0(state);
+                ppc_801D3348(state);
+                state.externalInterruptsEnabled = false;
+                state.lr = 0x801b0f60u;
+                state.cr = 0x12345678u;
+                state.xer = 0xe0000000u;
+                state.fpscr = 4;
+                state.fpr.fill({UINT64_MAX, UINT64_MAX});
+                ppc_write_u32(state, 0x803495c4u, debug == 0 ? 0 : 0x80004000u);
+                ppc_write_u32(state, 0x80004000u, debug);
+                ppc_write_u32(state, 0x80000044u, marked);
+                std::fill(state.memory.begin() + 0x100, state.memory.begin() + 0x1800, 0xa5);
+                ppc_write_u32(state, 0x80000060u, integratorPresent ? 0x12345678u : 0);
+                const auto before = state;
+                auto expected = state;
+                ExpectExceptionInitialization(expected, debug != 0, debug, marked);
+                unsigned calls = 0;
+                std::vector<std::pair<uint32_t, uint32_t>> flushed, invalidated;
+                state.callGuest = [&](uint32_t address, PpcState& guest) {
+                    Require(++calls < 150, "Exception initialization exceeded dependency budget.");
+                    if (address == 0x801b2428u) flushed.push_back({guest.gpr[3], guest.gpr[4]});
+                    if (address == 0x801b24acu) invalidated.push_back({guest.gpr[3], guest.gpr[4]});
+                    RunHardwareDependency(address, guest);
+                };
+                ppc_801B11B8(state);
+                std::vector<std::pair<uint32_t, uint32_t>> ranges;
+                if (!integratorPresent) ranges.push_back({0x80000060u, 0x24u});
+                for (unsigned i = 0; i < 15; ++i) {
+                    if (debug < 2 || (marked & (1u << i)) == 0) {
+                        ranges.push_back({0x80000000u +
+                            ppc_read_u32(before, 0x802dfdacu + i * 4), 0x98u});
+                    }
+                }
+                Require(state.pc == before.lr && state.lr == before.lr &&
+                            flushed == ranges && invalidated == ranges &&
+                            !state.externalInterruptsEnabled &&
+                            state.fpr == before.fpr && state.fpscr == before.fpscr &&
+                            state.xer == before.xer,
+                        "Original exception initializer failed return, cache-call count or CPU guards.");
+                for (unsigned reg = 0; reg < 32; ++reg) {
+                    if (reg == 0 || (reg >= 3 && reg <= 6)) continue;
+                    Require(state.gpr[reg] == before.gpr[reg],
+                            "Original exception initializer damaged preserved registers.");
+                }
+                const size_t frame = ppc_memory_offset(state, before.gpr[1] - 0xa8u, 0xb0);
+                for (size_t i = 0; i < state.memory.size(); ++i) {
+                    if (i >= frame && i < frame + 0xb0) continue;
+                    Require(state.memory[i] == expected.memory[i],
+                            "Original exception initializer wrote unexpected RAM or installed wrong vectors.");
+                }
+            }
+        }
+    }
+    std::cout << "Original OSExceptionInit installs exact vector templates and default table; "
+                 "debug ownership, marked masks, existing integrator, cache ranges and ABI checked. "
+                 "Installed exception code is not executed.\n";
+}
+
 void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     auto state = image.CreateGameCubeState();
     Require(ppc_read_u64(state, 0x803495d0u) == 0 &&
@@ -762,9 +908,11 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
         return ticks;
     };
     state.lr = 0x80003268u;
-    const auto beforeOs = state.memory;
+    auto expectedExceptions = state;
+    ExpectExceptionInitialization(expectedExceptions, false, 0,
+                                   ppc_read_u32(state, 0x80000044u));
     ppc_801B0DE0(state);
-    Require(state.pc == 0x801b0f5cu && reads == 3 &&
+    Require(state.pc == 0x801b0f60u && reads == 3 &&
                 setupCalls == std::vector<uint32_t>{0x801b0a6cu, 0x801b0a74u,
                     0x801b0a7cu, 0x801b0a84u, 0x801b0a8cu, 0x801b0a94u,
                     0x801b0afcu, 0x801b0b24u} &&
@@ -782,15 +930,15 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
                 !state.externalInterruptsEnabled,
             "Original OSInit prefix failed time, interrupts, monitor reset or SPD/NI setup.");
     const auto prefixFrame = ppc_memory_offset(state, stack - 0x38u, 0x40);
-    for (size_t i = 0; i < beforeOs.size(); ++i) {
-        if ((i >= prefixFrame && i < prefixFrame + 0x40) ||
+    for (size_t i = 0; i < expectedExceptions.memory.size(); ++i) {
+        if ((i >= prefixFrame - 0x88u && i < prefixFrame + 0x40) ||
             (i >= 0x3495c0u && i < 0x3495c8u) ||
             (i >= 0x3496ecu && i < 0x3496f0u) ||
             (i >= 0x348b90u && i < 0x348b94u) ||
             (i >= 0x349618u && i < 0x34961cu) ||
             (i >= 0x3495e0u && i < 0x3495e4u) ||
             (i >= 0x3495f8u && i < 0x349600u)) continue;
-        Require(state.memory[i] == beforeOs[i],
+        Require(state.memory[i] == expectedExceptions.memory[i],
                 "OSInit prefix wrote outside stack, initialization flag and start time.");
     }
     const auto started = state.memory;
@@ -822,8 +970,8 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     }
     std::cout << "Original OSInit prefix sets initialization flag/start time, masks "
                  "interrupts, resets MMCR0/1 plus PMC1..4, sets HID0 SPD and FPSCR NI; "
-                 "initializes boot info and arena bounds, stops at 0x801b0f5c "
-                 "before OSExceptionInit. "
+                 "initializes boot info, arenas and exception vectors, stops at 0x801b0f60 "
+                 "before __OSInitSystemCall. "
                  "Re-entry skip/epilogue tested separately; first OSInit does not return.\n";
 }
 
@@ -1132,6 +1280,8 @@ int main(int argc, char** argv) {
         TestOriginalNonIeeeMode(image);
         TestOriginalSpeculationDisable(image);
         TestOriginalArenaAccessors(image);
+        TestOriginalExceptionInitialization(image);
+        TestOriginalCacheRanges(image);
         TestOriginalBootInfoAndArena(image);
         TestStartupHelpers(image);
         TestArgumentRelocation(image);

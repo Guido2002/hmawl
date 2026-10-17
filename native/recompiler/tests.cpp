@@ -294,6 +294,18 @@ void TestInvalidDolRange() {
 }
 
 void TestInvalidFloatingPointInstructions() {
+    for (uint32_t operation : {86u, 982u}) {
+        for (uint32_t reserved : {1u, 1u << 21, 31u << 21}) {
+            bool rejected = false;
+            try {
+                RecompileFunction(0x80003100u, {(31u << 26) | (3u << 11) |
+                                              (operation << 1) | reserved});
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            Require(rejected, "Invalid cache-block instruction was accepted.");
+        }
+    }
     for (uint32_t spr : {952u, 956u, 953u, 954u, 957u, 958u}) {
         for (uint32_t operation : {339u, 467u}) {
             const uint32_t instruction = (31u << 26) | (3u << 21) |

@@ -264,8 +264,8 @@ sets `AreWeInitialized`, calls the original `__OSGetSystemTime`, records
 `__OSStartTime`, masks interrupts and calls the six original MMCR0/1 and PMC1..4
 reset wrappers, then executes original `PPCDisableSpeculation` and
 `PPCSetFpNonIEEEMode` to set HID0 SPD and FPSCR NI. The original boot-info
-and arena setup then runs through `OSSetArenaLo`/`OSSetArenaHi`. It stops at
-`0x801b0f5c`, before `OSExceptionInit`;
+and arena setup then runs through `OSSetArenaLo`/`OSSetArenaHi`, followed by
+original `OSExceptionInit`. It stops at `0x801b0f60`, before `__OSInitSystemCall`;
 first-time `OSInit` does not yet return. Its
 already-initialized branch and return epilogue are tested separately, not used
 to skip the unfinished first-time path.
@@ -309,7 +309,24 @@ exact guest values, including zero and unaligned inputs; they do not allocate
 host memory or validate an allocation range. Tests check exact RAM changes,
 setter order, register/stack guards and the unchanged already-initialized path.
 The integrated entry continuation exercises the absent-metadata/default-bound
-path; a complete loader boot-info contract and OS exception setup still remain.
+path; a complete loader boot-info contract still remains.
+
+Original `OSExceptionInit` installs the debug integrator when absent, copies the
+15 exception-vector templates where not owned by the debugger, and initializes
+the default-handler table. Tests compare exact RAM contents across debug modes,
+marked-exception masks and an existing integrator, including temporary template
+patches/restoration, original cache-call ranges and preserved stack/registers.
+The installed vector code and default handlers are not executed: exception
+delivery, privileged exception-return instructions and system calls remain
+unsupported.
+
+Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
+memory fence over coherent storage. They retain static translation bindings
+and do not suppress dispatch code-word checks. Original `DCFlushRangeNoSync`
+and `ICInvalidateRange` now run their own alignment/iteration logic; tests cover
+aliases, wrapping effective addresses, range alignment, zero lengths, unmapped
+rejection and modified-code detection. This is not a CPU cache model or dynamic
+translation of the newly installed vectors.
 
 ### REL module parsing and linking
 

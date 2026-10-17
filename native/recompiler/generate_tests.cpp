@@ -319,7 +319,10 @@ int main(int argc, char** argv) {
                 {0x801b34ecu, 0x218}, {0x801b3a44u, 0x14},
                 {0x801b3a6cu, 0x24}, {0x801d33e4u, 0x50},
                 {0x801d3348u, 0x28},
-                {0x801b0de0u, 0x17c}, {0x801b119cu, 0x1c},
+                {0x801b0de0u, 0x180}, {0x801b119cu, 0x1c},
+                {0x801b11b8u, 0x280}, {0x801b1460u, 0x1c},
+                {0x801d33c8u, 0x1c},
+                {0x801b2428u, 0x2c}, {0x801b24acu, 0x34},
                 {0x801b0e64u, 0xf8},
                 {0x801b20d4u, 8}, {0x801b20dcu, 8},
                 {0x801b20e4u, 8}, {0x801b20ecu, 8},
@@ -349,6 +352,10 @@ int main(int argc, char** argv) {
             Emit(output, 0x9370, {0x4c00012cu});
             Emit(output, 0x9380, {0x7c79faa6u});
             Emit(output, 0x9390, {0x7c79fba6u});
+            Emit(output, 0xb100, {XForm(0, 0, 3, 86)});
+            Emit(output, 0xb110, {XForm(0, 4, 3, 86)});
+            Emit(output, 0xb120, {XForm(0, 0, 3, 982)});
+            Emit(output, 0xb130, {XForm(0, 4, 3, 982)});
             unsigned monitor = 0;
             for (unsigned spr : {952u, 956u, 953u, 954u, 957u, 958u}) {
                 Emit(output, 0xb000u + monitor++ * 16u, {
