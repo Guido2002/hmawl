@@ -1022,6 +1022,138 @@ void TestOriginalModuleInitialization(const DolImage& image) {
                  "No REL link/unlink or native-binding lifecycle implied.\n";
 }
 
+void ExpectInterruptTableInitialization(PpcState& expected, uint32_t stack, uint32_t lr) {
+    ppc_write_u32(expected, stack + 4, lr);
+    ppc_write_u32(expected, stack - 0x10u, stack);
+    ppc_write_u32(expected, stack - 4, expected.gpr[31]);
+    ppc_write_u32(expected, stack - 0x20u, stack - 0x10u);
+    ppc_write_u32(expected, stack - 0xcu, 0x801b3aecu);
+    ppc_write_u32(expected, stack - 0x14u, 0x80000000u);
+    ppc_write_u32(expected, 0x80349620u, 0x80003040u);
+    for (uint32_t i = 0; i < 0x80; ++i) ppc_write_u8(expected, 0x80003040u + i, 0);
+    ppc_write_u32(expected, 0x800000c4u, 0);
+    ppc_write_u32(expected, 0x800000c8u, 0);
+}
+
+void RunInterruptInitializationToHardware(PpcState& state) {
+    state.callGuest = [](uint32_t address, PpcState& guest) {
+        switch (address) {
+        case 0x800054e4u: ppc_800054E4(guest); break;
+        case 0x80005514u: ppc_80005514(guest); break;
+        default:
+            throw std::runtime_error("Unexpected interrupt-init dependency: " +
+                                     std::to_string(address));
+        }
+        Require(guest.pc == guest.lr, "Interrupt-init memory dependency did not return.");
+    };
+    bool rejected = false;
+    try {
+        ppc_801B3AC0(state);
+    } catch (const std::out_of_range& error) {
+        rejected = std::string(error.what()).find("not mapped to GameCube RAM") != std::string::npos;
+    }
+    Require(rejected && state.gpr[0] == 0xf0u && state.gpr[4] == 0xcc003000u &&
+                state.gpr[3] == 0xffffffe0u,
+            "Original interrupt initialization did not stop at the PI mask hardware write.");
+}
+
+void TestOriginalInterruptTableInitialization(const DolImage& image) {
+    for (bool interrupts : {false, true}) {
+        auto state = image.CreateGameCubeState();
+        ppc_800032B0(state);
+        state.externalInterruptsEnabled = interrupts;
+        state.lr = 0x801b0f70u;
+        state.fpscr = 4;
+        state.msr = 0x2030u;
+        state.hid0 = 0xc200u;
+        state.hid2 = 0xa0000000u;
+        state.l2cr = 0x80000000u;
+        state.fpr.fill({UINT64_MAX, UINT64_MAX});
+        state.gqr.fill(0x12345678u);
+        state.performanceMonitor.fill(0x87654321u);
+        std::fill(state.memory.begin() + 0x3040, state.memory.begin() + 0x30c0, 0xa5);
+        ppc_write_u32(state, 0x800000c4u, UINT32_MAX);
+        ppc_write_u32(state, 0x800000c8u, 0x12345678u);
+        const auto before = state;
+        auto expected = state;
+        const uint32_t stack = state.gpr[1];
+        ExpectInterruptTableInitialization(expected, stack, state.lr);
+        RunInterruptInitializationToHardware(state);
+        Require(state.memory == expected.memory && state.gpr[1] == stack - 0x10u &&
+                    state.gpr[31] == 0x80000000u && state.fpr == before.fpr &&
+                    state.fpscr == before.fpscr && state.gqr == before.gqr &&
+                    state.msr == before.msr && state.hid0 == before.hid0 &&
+                    state.hid2 == before.hid2 && state.l2cr == before.l2cr &&
+                    state.performanceMonitor == before.performanceMonitor &&
+                    state.externalInterruptsEnabled == interrupts,
+                "Interrupt-init RAM prefix changed unexpected memory or CPU control state.");
+        for (unsigned reg = 14; reg < 31; ++reg) {
+            Require(state.gpr[reg] == before.gpr[reg],
+                    "Interrupt-init prefix damaged a callee-saved register.");
+        }
+        const auto blocked = state.memory;
+        for (unsigned repeat = 0; repeat < 2; ++repeat) {
+            bool rejected = false;
+            try {
+                ppc_801B3B08(state);
+            } catch (const std::out_of_range&) {
+                rejected = true;
+            }
+            Require(rejected && state.memory == blocked,
+                    "Blocked PI mask write changed RAM or silently succeeded on retry.");
+        }
+    }
+    std::cout << "Original __OSInterruptInit clears its 32-slot handler table and software "
+                 "masks, then explicitly rejects the unsupported PI mask write at 0x801b3b08 "
+                 "(0xcc003004). The saved frame remains active; initialization has not returned.\n";
+}
+
+void TestOriginalInterruptHandlerAccessors(const DolImage& image) {
+    for (bool interrupts : {false, true}) {
+        auto state = image.CreateGameCubeState();
+        ppc_800032B0(state);
+        state.externalInterruptsEnabled = interrupts;
+        state.lr = 0x80001000u;
+        state.cr = 0x12345678u;
+        state.xer = 0xe0000000u;
+        state.fpscr = 4;
+        for (uint32_t table : {0x80003040u, 0xc0003040u}) {
+            ppc_write_u32(state, 0x80349620u, table);
+            for (unsigned test = 0; test < 34; ++test) {
+                const uint32_t index = test < 32 ? test : test == 32 ? 0xffffu : 0xfffeu;
+                const uint32_t offset = test < 32 ? test * 4 : test == 32 ? 0xfffffffcu : 0xfffffff8u;
+                const uint32_t old = 0x80001000u + test * 4;
+                const uint32_t handler = test == 0 ? 0 : 0x801b0000u + test * 4;
+                ppc_write_u32(state, table + offset, old);
+                const auto before = state;
+                auto expected = state;
+                ppc_write_u32(expected, table + offset, handler);
+                state.gpr[3] = 0xabcd0000u | index;
+                state.gpr[4] = handler;
+                ppc_801B3A90(state);
+                Require(state.gpr[3] == old && state.memory == expected.memory &&
+                            state.pc == state.lr,
+                        "Original interrupt setter failed old-value return or exact table write.");
+                state.gpr[3] = 0x12340000u | index;
+                ppc_801B3AAC(state);
+                Require(state.gpr[3] == handler && state.memory == expected.memory &&
+                            state.pc == state.lr && state.cr == before.cr &&
+                            state.xer == before.xer && state.fpscr == before.fpscr &&
+                            state.externalInterruptsEnabled == interrupts &&
+                            state.gpr[1] == before.gpr[1],
+                        "Original interrupt getter failed selector truncation or state guards.");
+                for (unsigned reg = 0; reg < 32; ++reg) {
+                    if (reg == 0 || (reg >= 3 && reg <= 5)) continue;
+                    Require(state.gpr[reg] == before.gpr[reg],
+                            "Interrupt accessor damaged an unrelated integer register.");
+                }
+            }
+        }
+    }
+    std::cout << "Original interrupt handler getter/setter passed all 32 slots, RAM aliases, "
+                 "null handlers, signed low-halfword selectors and previous-handler returns.\n";
+}
+
 void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     auto state = image.CreateGameCubeState();
     Require(ppc_read_u64(state, 0x803495d0u) == 0 &&
@@ -1199,6 +1331,7 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
         Require(state.memory[i] == expectedExceptions.memory[i],
                 "OSInit prefix wrote outside stack, initialization flag and start time.");
     }
+    const auto firstTime = state;
     const auto started = state.memory;
     // Finish only the saved frame for the re-entry test; the first startup is incomplete.
     ppc_801B119C(state);
@@ -1232,6 +1365,15 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
                  "initializes the alarm queue/handler/reset node; "
                  "resets module metadata, stops at 0x801b0f6c before __OSInterruptInit. "
                  "Re-entry skip/epilogue tested separately; first OSInit does not return.\n";
+    state = firstTime;
+    state.lr = 0x801b0f70u;
+    auto expectedInterrupts = state;
+    ExpectInterruptTableInitialization(expectedInterrupts, state.gpr[1], state.lr);
+    RunInterruptInitializationToHardware(state);
+    Require(state.memory == expectedInterrupts.memory && !state.externalInterruptsEnabled,
+            "Entry-derived interrupt prefix changed RAM outside its exact initialization writes.");
+    std::cout << "Entry-derived state continues into original interrupt table/mask reset, "
+                 "then rejects PI MMIO at 0x801b3b08; OSInit has not returned.\n";
 }
 
 void TestOriginalArenaAccessors(const DolImage& image) {
@@ -1544,6 +1686,8 @@ int main(int argc, char** argv) {
         TestOriginalResetRegistration(image);
         TestOriginalAlarmInitialization(image);
         TestOriginalModuleInitialization(image);
+        TestOriginalInterruptTableInitialization(image);
+        TestOriginalInterruptHandlerAccessors(image);
         TestOriginalCacheRanges(image);
         TestOriginalBootInfoAndArena(image);
         TestStartupHelpers(image);

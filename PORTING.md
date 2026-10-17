@@ -264,6 +264,16 @@ queue. Full runtime scheduling and device services are still needed.
   unchanged module payloads/CPU state. This resets SDK metadata only; SDK
   `OSLink`/`OSUnlink`, module-list integration and native binding lifetime
   management remain pending.
+- [x] Run original `__OSInterruptInit` through handler-table and software-mask
+  RAM setup, independently and from a saved entry-derived OSInit state.
+  Verify exact writes including the original nested memset stack frame, poisoned
+  table contents, both interrupt states and repeatable rejection at the first
+  PI mask write (`0x801b3b08`, address `0xcc003004`). Initialization has not
+  returned; the completed OSInit prefix remains `0x801b0f6c`.
+  Execute original interrupt handler getters/setters for all 32 slots, RAM
+  aliases, null/previous handlers and signed low-halfword selectors, preserving
+  the SDK's unchecked indexing and existing native memory bounds checks.
+  PI/device masks, interrupt dispatch and delivery still need native support.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic

@@ -345,6 +345,19 @@ including untouched module payload data. The entry-derived OSInit continuation
 also clears poisoned module metadata. This does not link/unlink RELs, register
 native translations, or connect the SDK module list to the existing host linker.
 
+Original `__OSInterruptInit` now runs independently and from the saved
+entry-derived OSInit state through its RAM setup: it installs the handler-table
+pointer, clears all 32 handler slots and resets the two software mask words.
+It then explicitly rejects the PI interrupt-mask write at `0x801b3b08`
+(`0xcc003004`); its stack frame remains active, so this is not a completed call.
+Tests verify exact RAM/stack writes, poisoned tables, both interrupt states and
+repeated rejection without RAM changes. Original interrupt-handler accessors
+are tested across all 32 slots, cached/uncached table aliases, null handlers,
+previous-handler returns and signed low-halfword index behavior. These SDK
+accessors do not validate indices; native memory bounds checks still apply.
+PI/device interrupt masks, interrupt dispatch and hardware delivery remain
+unimplemented. The completed OSInit prefix still ends at `0x801b0f6c`.
+
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings
 and do not suppress dispatch code-word checks. Original `DCFlushRangeNoSync`
