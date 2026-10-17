@@ -23,6 +23,14 @@ struct ExiImmediateRequest {
     uint32_t data;
 };
 
+struct ExiDmaRequest {
+    unsigned channel;
+    unsigned device;
+    unsigned direction;
+    unsigned length;
+    std::vector<uint8_t> output;
+};
+
 struct SiTransferRequest {
     unsigned channel = 0;
     std::vector<uint8_t> output;
@@ -87,6 +95,11 @@ struct PpcState {
     bool exiImmediateEnabled = false;
     std::array<uint32_t, 3> exiImmediateData = {};
     std::function<uint32_t(const ExiImmediateRequest&)> transferExiImmediate;
+    bool exiDmaEnabled = false;
+    std::array<uint32_t, 3> exiDmaAddress = {};
+    std::array<uint32_t, 3> exiDmaLength = {};
+    std::function<std::vector<uint8_t>(const ExiDmaRequest&)> transferExiDma;
+    std::function<void(unsigned, uint32_t)> selectExi;
     std::function<void(const std::string&)> writeConsole;
     bool externalInterruptsEnabled = true;
 };
@@ -122,8 +135,8 @@ inline void ppc_check_pending_si_interrupt(const PpcState& state, bool enabled) 
 }
 
 inline void ppc_write_msr(PpcState& state, uint32_t value) {
-    if (((ppc_read_msr(state) ^ value) & ~0xa000u) != 0) {
-        throw std::runtime_error("Unsupported PowerPC MSR mode change (only FP/EE supported).");
+    if (((ppc_read_msr(state) ^ value) & ~0xa002u) != 0) {
+        throw std::runtime_error("Unsupported PowerPC MSR mode change (only FP/EE/RI supported).");
     }
     ppc_check_pending_si_interrupt(state, (value & 0x8000u) != 0);
     state.msr = value & ~0x8000u;
@@ -194,6 +207,12 @@ inline void ppc_flush_cache_block(const PpcState& state, uint32_t address) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.exiDmaEnabled) {
+        for (unsigned channel = 0; channel < 3; ++channel) {
+            if (address == 0xcc006804u + channel * 0x14u) return state.exiDmaAddress[channel];
+            if (address == 0xcc006808u + channel * 0x14u) return state.exiDmaLength[channel];
+        }
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.serialInterface.has_value()) {
         const auto& serial = *state.serialInterface;
         if (address == 0xcc006430u) return serial.polling;
@@ -302,6 +321,51 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.exiDmaEnabled) {
+        for (unsigned channel = 0; channel < 3; ++channel) {
+            const auto base = 0xcc006800u + channel * 0x14u;
+            if (address != base + 4 && address != base + 8 &&
+                !(address == base + 12 && (value & 2u) != 0)) continue;
+            auto& control = state.exiTransferControl[channel];
+            auto& status = state.exiStatus[channel];
+            if (!control.has_value() || !status.has_value() || (*control & ~0x3eu) != 0) {
+                throw std::runtime_error("EXI DMA requires mapped idle control and status.");
+            }
+            if (address == base + 4 || address == base + 8) {
+                if ((value & ~0x03ffffe0u) != 0) {
+                    throw std::runtime_error("EXI DMA address/length must be aligned and fit its register.");
+                }
+                (address == base + 4 ? state.exiDmaAddress[channel] : state.exiDmaLength[channel]) = value;
+                return;
+            }
+            const auto selected = *status & 0x380u;
+            if (value != 3u && value != 7u) {
+                throw std::runtime_error("Unsupported EXI DMA transfer mode.");
+            }
+            if (selected != 0x80u && selected != 0x100u && selected != 0x200u) {
+                throw std::runtime_error("EXI DMA requires exactly one selected device.");
+            }
+            if (!state.transferExiDma) {
+                throw std::runtime_error("EXI DMA requires a native peripheral backend.");
+            }
+            const auto length = state.exiDmaLength[channel];
+            if (length == 0) throw std::runtime_error("EXI DMA requires a nonzero length.");
+            const auto offset = ppc_memory_offset(state, state.exiDmaAddress[channel], length);
+            ExiDmaRequest request{channel, selected == 0x80u ? 0u : selected == 0x100u ? 1u : 2u,
+                                  (value >> 2) & 1u, length, {}};
+            if (request.direction == 1) {
+                request.output.assign(state.memory.begin() + offset, state.memory.begin() + offset + length);
+            }
+            const auto input = state.transferExiDma(request);
+            if (input.size() != (request.direction == 0 ? length : 0u)) {
+                throw std::runtime_error("Invalid native EXI DMA result length.");
+            }
+            for (size_t index = 0; index < input.size(); ++index) state.memory[offset + index] = input[index];
+            *control = value & ~1u;
+            *status |= 8u;
+            return;
+        }
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.serialInterface.has_value()) {
         auto& serial = *state.serialInterface;
         if (address == 0xcc006430u) {
@@ -418,6 +482,9 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
                 const uint32_t pending = channel < 2 ? 0x80au : 0xau;
                 const uint32_t retained = channel == 0 ? 0x3000u :
                     channel == 1 ? 0x1000u : 0;
+                if (state.selectExi && (previous & 0x380u) != selected) {
+                    state.selectExi(channel, selected);
+                }
                 *status = (previous & retained) | (previous & pending & ~value) |
                     (value & writable & ~pending);
                 return;

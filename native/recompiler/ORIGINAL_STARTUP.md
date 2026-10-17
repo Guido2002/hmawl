@@ -40,7 +40,7 @@ controls, status W1C, sticky ROMDIS, one-hot chip selection and immediate
 transactions are enabled. External memory-card slots and Serial Port 1 are
 explicitly empty: the backend consumes writes and returns zero for absent
 external devices, rather than claiming a connected peripheral identity.
-Internal RTC/SRAM/ROM and AD16 transactions fail explicitly. No saves exist.
+Internal RTC/ROM, SRAM writes and AD16 transactions fail explicitly. No game saves exist.
 DI configuration is an explicitly mapped read-only value of 1, not a DVD
 command implementation. Cache operations use the
 existing checked coherent-RAM implementation. Time-base reads use the real
@@ -62,6 +62,21 @@ Automatic controller polling remains an explicit error. Completion interrupts
 remain pending while EE is disabled; enabling EE or dispatching with an unmasked,
 pending SI completion fails explicitly until guest interrupt delivery exists.
 This deliberately limited platform profile is not complete GameCube hardware.
+
+### Native console SRAM
+
+The CLI loads `native-console.sram` beside the input DOL, or the path supplied
+with `--sram <64-byte-profile>`. On Windows only, an absent file is created
+exclusively with a new English/NTSC/stereo configuration and valid additive
+checksums; no Nintendo BIOS or physical console identity is supplied. An existing
+file must be exactly 64 bytes and is read unchanged, never reset or overwritten.
+Creation/read/flush failures are explicit errors. The runtime API's default
+state has the same new profile in memory; tests do not create production files.
+
+Original code issues command `0x20000100` and DMA-reads all 64 bytes through the
+checked EXI bus. Only this full SRAM read is implemented: RTC, ROM, partial
+commands and SRAM writes remain explicit errors, so game-initiated configuration
+updates are not yet supported. This is console configuration, not a memory card.
 
 `original_startup_manifest.h` is the reusable list of original address ranges.
 The build generator translates these ranges to C++, never executes PPC, and
@@ -94,19 +109,28 @@ and queuing the remaining three probes. The first transaction has completed with
 the configured disconnected-port error, but its original guest interrupt handler
 has not run. This is not completed controller enumeration or usable input.
 
-The next untranslated dependency is **__OSInitSram at PC `0x801B5E98`,
-LR `0x801B0F94`**. `EXIInit` and `SIInit` have returned; `OSInit` has **not**.
+Original **__OSInitSram also returns**, with the exact native profile in its SRAM
+control block, successful synchronization and released EXI/SRAM locks.
+Original **__OSThreadInit also returns**: default thread/context, active-thread
+list, stack guard/fill, 32 empty run queues and MSR RI/FP state are initialized.
+This does not implement scheduling, context switching or guest interrupt delivery.
+
+The next untranslated dependency is **__OSInitAudioSystem at PC `0x801B20F4`,
+LR `0x801B0F9C`**. `OSInit` has **not** returned.
 The game main loop, GX renderer,
-DVD startup, threads, audio, input and saves have not run.
+DVD startup, scheduled game threads, audio, input and saves have not run.
 
 ## Targeted regression
 
 With testing enabled, build `hmawl_original_startup_tests` and run CTest's
 `hmawl_original_startup_tests`. It uses the production library and real verified
-DOL, checking the exact SRAM initialization call, two original EXI transaction
+DOL, checking the exact audio initialization call, two original external EXI transaction
 requests, cleared channel lock, both empty-slot probe results, exact console
 messages, the original SI command and three queued probes, sampling/handler state,
 pending no-response completion, missing SI backend/VI profile,
+exact original SRAM command/DMA bytes, SRAM locks/sync, default thread/context,
+active/run queues, stack guard and MSR state, missing DMA backend and preserved
+malformed profiles plus fresh-profile persistence/reload,
 missing EXI peripheral backend/console failures, initialization
 evidence, missing clock and unbound dispatcher dependencies, on-disk DOL
 truncation/mutation rejection, loaded-code integrity, block/call-depth bounds,

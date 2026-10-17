@@ -57,10 +57,16 @@ registers its interrupt handler, submits a controller type query and queues the
 remaining three probes. Controllers are explicitly disconnected: the transaction
 reports a hardware no-response error, not invented input. Its completion interrupt
 remains pending while EE is disabled; interrupt delivery is not yet implemented.
-The runner reaches `__OSInitSram` at `PC=0x801B5E98`, `LR=0x801B0F94`.
+Original SRAM initialization also returns after a real 64-byte EXI DMA read from
+a local native console profile. Original default-thread/context and scheduler
+queue initialization then returns. The runner reaches `__OSInitAudioSystem` at
+`PC=0x801B20F4`, `LR=0x801B0F9C`.
 This is an **explicit dependency stop (exit code 3)**, not successful OSInit,
-game initialization or rendering. RTC/SRAM/ROM, AD16 and connected EXI devices
+game initialization or rendering. RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.
+The CLI creates an English/NTSC/stereo `native-console.sram` beside the input DOL
+only if absent, without BIOS data. `--sram <path>` selects an existing 64-byte
+console profile or a new profile location. Existing files are never reset.
 The runner reports exact guest PC/registers, verifies original code at dispatch,
 and limits dispatched blocks and nested calls. Generated branch transfers yield
 to dispatch so original polling loops cannot bypass the execution budget.

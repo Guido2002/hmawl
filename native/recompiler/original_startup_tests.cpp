@@ -2,6 +2,7 @@
 #include "native_console.h"
 #include "native_exi_bus.h"
 #include "native_si_bus.h"
+#include "native_sram.h"
 
 #include <chrono>
 #include <fstream>
@@ -123,14 +124,30 @@ int main(int argc, char** argv) {
                     missingPeripheral.exiTransferControl[0] == 0,
                 "Missing EXI backend fabricated response/completion or stopped at the wrong instruction.");
         unsigned transfers = 0;
+        unsigned sramCommands = 0;
+        const auto peripheralBackend = state.transferExiImmediate;
         state.transferExiImmediate = [&](const ExiImmediateRequest& request) {
+            if (request.channel == 0 && request.device == 1) {
+                Require(request.direction == 1 && request.length == 4 && request.data == 0x20000100u &&
+                            sramCommands++ == 0,
+                        "Original SRAM command sequence differs.");
+                return peripheralBackend(request);
+            }
             Require(request.channel == 0 && request.device == 2 &&
                         request.direction == (transfers == 0 ? 1u : 0u) &&
                         request.length == (transfers == 0 ? 2u : 4u) &&
                         request.data == 0 && transfers < 2,
                     "Original EXI ID command/read sequence differs.");
             ++transfers;
-            return TransferEmptyExternalExi(request);
+            return peripheralBackend(request);
+        };
+        unsigned sramDmas = 0;
+        const auto dmaBackend = state.transferExiDma;
+        state.transferExiDma = [&](const ExiDmaRequest& request) {
+            Require(request.channel == 0 && request.device == 1 && request.direction == 0 &&
+                        request.length == 64 && request.output.empty() && sramDmas++ == 0,
+                    "Original SRAM DMA request differs.");
+            return dmaBackend(request);
         };
         std::string console;
         unsigned siTransfers = 0;
@@ -145,16 +162,70 @@ int main(int argc, char** argv) {
             ReadGuestConsoleString(state, ppc_read_u32(state, 0x80348cd8u)) + '\n';
         const auto result = RunOriginalStartup(dispatcher, state);
         std::cout << DescribeOriginalStartupStop(result) << '\n';
-        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801b5e98u &&
-                    result.lr == 0x801b0f94u && transfers == 2 && siTransfers == 1 &&
+        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801b20f4u &&
+                    result.lr == 0x801b0f9cu && transfers == 2 && siTransfers == 1 &&
+                    sramCommands == 1 && sramDmas == 1 &&
                     console == expectedVersion && state.exiStatus[0] == 0x2008u &&
-                    state.exiTransferControl[0] == 0x30u &&
+                    state.exiTransferControl[0] == 2u &&
                     ppc_read_u32(state, 0x80340c6cu) == 0 &&
                     ppc_read_u32(state, 0x800030c0u) == 0 &&
                     ppc_read_u32(state, 0x800030c4u) == 0 &&
                     result.reason.find("No native translation registered") != std::string::npos &&
                     ppc_read_u32(state, 0x80349ad0u) == 0,
                 "Production startup stopped at an unexpected boundary.");
+        const auto sram = NewNativeSram();
+        for (unsigned index = 0; index < sram.size(); ++index) {
+            Require(ppc_read_u8(state, 0x80317b00u + index) == sram[index],
+                    "Original SRAM initialization did not receive the exact native profile bytes.");
+        }
+        Require(ppc_read_u32(state, 0x80317b48u) == 0 &&
+                    ppc_read_u32(state, 0x80317b4cu) == 1,
+                "Original SRAM lock/sync state was not initialized successfully.");
+        constexpr uint32_t thread = 0x80317f70u;
+        Require(ppc_read_u32(state, 0x800000d4u) == thread &&
+                    ppc_read_u32(state, 0x800000c0u) == (thread & 0x3fffffffu) &&
+                    ppc_read_u32(state, 0x800000d8u) == 0 &&
+                    ppc_read_u32(state, 0x800000dcu) == thread &&
+                    ppc_read_u32(state, 0x800000e0u) == thread &&
+                    ppc_read_u32(state, 0x800000e4u) == thread &&
+                    ppc_read_u16(state, thread + 0x2c8u) == 2 &&
+                    ppc_read_u16(state, thread + 0x2cau) == 1 &&
+                    ppc_read_u32(state, thread + 0x2d0u) == 16 &&
+                    ppc_read_u32(state, thread + 0x304u) == 0x8035cfa0u &&
+                    ppc_read_u32(state, thread + 0x308u) == 0x8034cfa0u &&
+                    ppc_read_u32(state, 0x8034cfa0u) == 0xdeadbabeu &&
+                    ppc_read_msr(state) == 0x32u,
+                "Original default thread, active queue, context ownership, stack guard or RI/FP state differs.");
+        for (unsigned index = 0; index < 64; ++index) {
+            Require(ppc_read_u32(state, 0x80317b58u + index * 4u) == 0,
+                    "Original scheduler run queues were not initialized empty.");
+        }
+        auto missingDma = CreateOriginalStartupState(image);
+        missingDma.transferExiDma = {};
+        const auto dmaFailure = RunOriginalStartup(dispatcher, missingDma);
+        Require(dmaFailure.pc == 0x801f66b0u &&
+                    dmaFailure.reason.find("requires a native peripheral backend") != std::string::npos &&
+                    missingDma.exiTransferControl[0] == 0x34u &&
+                    ppc_read_u32(missingDma, 0x80317b4cu) == 0,
+                "Missing SRAM DMA backend fabricated data or successful synchronization.");
+        const auto profilePath = truncatedPath.parent_path() / "native-console.sram";
+#ifdef _WIN32
+        const auto persistedSram = LoadOrCreateNativeSram(profilePath);
+        Require(persistedSram == sram && LoadOrCreateNativeSram(profilePath) == sram,
+                "Fresh native SRAM profile was not persisted and reloaded exactly.");
+#endif
+        auto customSram = sram;
+        customSram[0x20] = 0x7a;
+        const auto customProfile = fixtures.Write("custom.sram", {customSram.begin(), customSram.end()});
+        Require(LoadOrCreateNativeSram(customProfile) == customSram,
+                "Existing native SRAM profile was reset instead of read unchanged.");
+        const auto malformedProfile = fixtures.Write("malformed.sram", {1, 2, 3});
+        RequireFailure([&] { LoadOrCreateNativeSram(malformedProfile); },
+                       "Malformed native SRAM profile was silently replaced.");
+        Require(std::filesystem::file_size(malformedProfile) == 3,
+                "Rejected native SRAM profile was modified.");
+        RequireFailure([&] { LoadOrCreateNativeSram(profilePath.parent_path() / "missing" / "console.sram"); },
+                       "Unwritable native SRAM profile path was silently ignored.");
         const uint32_t expectedPolling =
             (uint32_t{ppc_read_u16(state, 0x802e60b8u)} << 16) |
             (uint32_t{ppc_read_u8(state, 0x802e60bau)} << 8);

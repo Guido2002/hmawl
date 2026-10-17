@@ -611,6 +611,7 @@ std::string RecompileFunction(uint32_t address,
             bool record = (instruction & 1u) != 0;
             switch (extendedOpcode) {
             case 86:
+            case 470:
             case 982:
                 if (rt != 0 || record) {
                     throw std::runtime_error("Invalid cache-block instruction at " + Hex(pc) + ".");

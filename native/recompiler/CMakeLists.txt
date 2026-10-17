@@ -23,6 +23,7 @@ add_library(hmawl_recompiler_core
     native_dispatch.cpp
     native_dvd_reader.cpp
     native_dvd_queue.cpp
+    native_sram.cpp
 )
 target_compile_features(hmawl_recompiler_core PUBLIC cxx_std_17)
 target_include_directories(hmawl_recompiler_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

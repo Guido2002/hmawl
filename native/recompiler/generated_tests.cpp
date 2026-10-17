@@ -4,6 +4,7 @@
 #include "native_exi_bus.h"
 #include "native_console.h"
 #include "native_si_bus.h"
+#include "native_sram.h"
 
 #include <algorithm>
 #include <cfenv>
@@ -883,14 +884,14 @@ void TestHardwareControlRegisters() {
             ppc_00009300(state);
             Require(state.gpr[3] == (initial | (interrupts ? 0x8000u : 0u)),
                     "mfmsr does not reflect the native interrupt mask.");
-            for (uint32_t mode : {0u, 0x2000u, 0x8000u, 0xa000u}) {
-                const uint32_t desired = mode | (initial & ~0xa000u);
+            for (uint32_t mode : {0u, 2u, 0x2000u, 0x2002u, 0x8000u, 0x8002u, 0xa000u, 0xa002u}) {
+                const uint32_t desired = mode | (initial & ~0xa002u);
                 state.gpr[3] = desired;
                 ppc_00009310(state);
                 ppc_00009300(state);
                 Require(state.gpr[3] == desired && state.msr == (desired & ~0x8000u) &&
                             state.externalInterruptsEnabled == ((desired & 0x8000u) != 0),
-                        "Compiled MSR transfer did not preserve FP/EE state.");
+                        "Compiled MSR transfer did not preserve FP/EE/RI state.");
             }
         }
     }
@@ -909,7 +910,7 @@ void TestHardwareControlRegisters() {
     for (unsigned bit = 0; bit < 32; ++bit) {
         const uint32_t flag = 1u << bit;
         for (bool msr : {false, true}) {
-            const uint32_t allowed = msr ? 0xa000u : 0xa0000000u;
+            const uint32_t allowed = msr ? 0xa002u : 0xa0000000u;
             if ((flag & allowed) != 0) continue;
             for (bool clearing : {false, true}) {
                 state.msr = clearing ? flag : 0u;
@@ -1435,6 +1436,117 @@ void TestSiTransactionsAndPendingInterrupt() {
                           SiTransferRequest{0, {0}, 0}, SiTransferRequest{0, {0}, 129}}) {
         Reject([&] { TransferDisconnectedSi(request); }, "Invalid native SI");
     }
+}
+
+void TestNativeSramAndDma() {
+    for (unsigned channel = 0; channel < 3; ++channel) {
+        for (unsigned device = 0; device < 3; ++device) {
+            for (unsigned direction = 0; direction < 2; ++direction) {
+                for (unsigned length : {32u, 64u, 128u}) {
+                    PpcState dmaState;
+                    dmaState.memoryMap = PpcMemoryMap::GameCubeRam;
+                    dmaState.memory.resize(256, 0xa5);
+                    dmaState.exiDmaEnabled = true;
+                    dmaState.exiStatus[channel] = 0x80u << device;
+                    dmaState.exiTransferControl[channel] = 0;
+                    unsigned transfers = 0;
+                    dmaState.transferExiDma = [&](const ExiDmaRequest& request) {
+                        Require(request.channel == channel && request.device == device &&
+                                    request.direction == direction && request.length == length && transfers++ == 0 &&
+                                    request.output == (direction == 1 ? std::vector<uint8_t>(length, 0xa5) :
+                                                                       std::vector<uint8_t>{}),
+                                "EXI DMA channel/device/direction/length or write payload differs.");
+                        return direction == 0 ? std::vector<uint8_t>(length, 0x3c) : std::vector<uint8_t>{};
+                    };
+                    const auto base = 0xcc006800u + channel * 0x14u;
+                    ppc_write_u32(dmaState, base + 4, 64);
+                    ppc_write_u32(dmaState, base + 8, length);
+                    ppc_write_u32(dmaState, base + 12, 3u | (direction << 2));
+                    Require(transfers == 1 && dmaState.exiStatus[channel] == ((0x80u << device) | 8u) &&
+                                dmaState.exiTransferControl[channel] == (2u | (direction << 2)),
+                            "EXI DMA completion or selected-device status differs.");
+                    for (unsigned index = 0; index < dmaState.memory.size(); ++index) {
+                        const auto expected = direction == 0 && index >= 64 && index < 64 + length ? 0x3cu : 0xa5u;
+                        Require(dmaState.memory[index] == expected, "EXI DMA direction or RAM bounds differ.");
+                    }
+                }
+            }
+        }
+    }
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(256, 0xa5);
+    state.exiStatus = {0u, 0u, 0u};
+    state.exiTransferControl = {0u, 0u, 0u};
+    state.exiImmediateEnabled = true;
+    state.exiInitializationEnabled = true;
+    const auto sram = NewNativeSram();
+    Require(sram[0] == 0 && sram[1] == 0x2c && sram[2] == 0xff && sram[3] == 0xd0 &&
+                sram[0x12] == 0 && sram[0x13] == 0x2c,
+            "Native SRAM checksum, language or NTSC/stereo configuration differs.");
+    BindNativeSram(state, sram);
+    ppc_write_u32(state, 0xcc006800u, 0x2130u);
+    ppc_write_u32(state, 0xcc006810u, 0x20000100u);
+    ppc_write_u32(state, 0xcc00680cu, 0x35u);
+    Require(state.exiTransferControl[0] == 0x34u, "SRAM read command did not complete.");
+    ppc_write_u32(state, 0xcc006804u, 64);
+    ppc_write_u32(state, 0xcc006808u, 64);
+    Require(ppc_read_u32(state, 0xcc006804u) == 64 && ppc_read_u32(state, 0xcc006808u) == 64,
+            "EXI DMA register readback differs.");
+    ppc_write_u32(state, 0xcc00680cu, 3);
+    Require(state.exiTransferControl[0] == 2 && state.exiStatus[0] == 0x2138u,
+            "SRAM DMA did not complete with TCINT and retained selection.");
+    for (unsigned index = 0; index < state.memory.size(); ++index) {
+        Require(state.memory[index] == (index >= 64 && index < 128 ? sram[index - 64] : 0xa5u),
+                "SRAM DMA bytes or surrounding memory changed unexpectedly.");
+    }
+    Reject([&] { ppc_write_u32(state, 0xcc00680cu, 3); }, "SRAM DMA");
+    ppc_write_u32(state, 0xcc006800u, 0x2030u);
+    Reject([&] { ppc_write_u32(state, 0xcc00680cu, 3); }, "selected device");
+    ppc_write_u32(state, 0xcc006800u, 0x2130u);
+    ppc_write_u32(state, 0xcc006810u, 0x20000000u);
+    Reject([&] { ppc_write_u32(state, 0xcc00680cu, 0x35u); }, "SRAM/RTC/ROM command");
+    ppc_write_u32(state, 0xcc006810u, 0xa0000100u);
+    Reject([&] { ppc_write_u32(state, 0xcc00680cu, 0x35u); }, "SRAM/RTC/ROM command");
+    ppc_write_u32(state, 0xcc006810u, 0x20000100u);
+    ppc_write_u32(state, 0xcc00680cu, 0x35u);
+    const auto before = state.memory;
+    const auto control = state.exiTransferControl[0];
+    const auto status = state.exiStatus[0];
+    const auto dma = state.transferExiDma;
+    state.transferExiDma = {};
+    Reject([&] { ppc_write_u32(state, 0xcc00680cu, 3); }, "peripheral backend");
+    state.transferExiDma = [](const ExiDmaRequest&) -> std::vector<uint8_t> {
+        throw std::runtime_error("SRAM storage unavailable");
+    };
+    Reject([&] { ppc_write_u32(state, 0xcc00680cu, 3); }, "storage unavailable");
+    state.transferExiDma = [](const ExiDmaRequest&) { return std::vector<uint8_t>(63, 0); };
+    Reject([&] { ppc_write_u32(state, 0xcc00680cu, 3); }, "result length");
+    Require(state.memory == before && state.exiTransferControl[0] == control && state.exiStatus[0] == status,
+            "Failed EXI DMA partially committed RAM, control or completion.");
+    state.transferExiDma = dma;
+    ppc_write_u32(state, 0xcc006804u, 0x100u);
+    Reject([&] { ppc_write_u32(state, 0xcc00680cu, 3); }, "outside guest memory");
+    Require(state.exiTransferControl[0] == control && state.memory == before,
+            "Out-of-range EXI DMA consumed its command or changed hardware.");
+    ppc_write_u32(state, 0xcc006804u, 64);
+    for (auto value : {1u, 31u, 0x04000000u, UINT32_MAX}) {
+        Reject([&] { ppc_write_u32(state, 0xcc006804u, value); }, "aligned");
+        Reject([&] { ppc_write_u32(state, 0xcc006808u, value); }, "aligned");
+    }
+    ppc_write_u32(state, 0xcc006808u, 0);
+    Reject([&] { ppc_write_u32(state, 0xcc00680cu, 3); }, "nonzero");
+    ppc_write_u32(state, 0xcc006808u, 64);
+    Reject([&] { ppc_write_u32(state, 0xcc00680cu, 11); }, "transfer mode");
+    ppc_write_u32(state, 0xcc00680cu, 3);
+    state.gpr[4] = 64;
+    state.gpr[5] = 1;
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    const auto cacheMemory = state.memory;
+    ppc_0000B5A0(state);
+    Require(state.memory == cacheMemory && state.cr == 0x12345678u && state.xer == 0xe0000000u,
+            "Compiled dcbi changed coherent RAM or CPU flags.");
 }
 
 void TestMultiplyHighUnsigned() {
@@ -2739,6 +2851,7 @@ int main() {
         TestMultiplyHighUnsigned();
         TestSiStartupHardwareAndArithmetic();
         TestSiTransactionsAndPendingInterrupt();
+        TestNativeSramAndDma();
         TestNativeConsoleAndEmptyExi();
         TestAndComplement();
         TestCacheBlockInstructions();

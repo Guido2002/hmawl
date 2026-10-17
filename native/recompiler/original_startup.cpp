@@ -2,6 +2,7 @@
 #include "native_time_base.h"
 #include "native_exi_bus.h"
 #include "native_si_bus.h"
+#include "native_sram.h"
 #include "original_startup_manifest.h"
 #include "sha1.h"
 #include "generated_original_startup.h"
@@ -49,6 +50,7 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.exiInitializationEnabled = true;
     state.exiImmediateEnabled = true;
     state.transferExiImmediate = TransferEmptyExternalExi;
+    BindNativeSram(state, NewNativeSram());
     state.writeConsole = [](const std::string& text) {
         std::cout << text;
         if (!std::cout) throw std::runtime_error("Native console output failed.");
