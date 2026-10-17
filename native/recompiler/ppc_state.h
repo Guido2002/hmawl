@@ -51,6 +51,7 @@ struct PpcState {
     std::optional<uint16_t> dspControl;
     std::optional<uint32_t> aiControl;
     std::array<std::optional<uint32_t>, 3> exiStatus;
+    std::array<std::optional<uint32_t>, 3> exiTransferControl;
     bool externalInterruptsEnabled = true;
 };
 
@@ -137,6 +138,16 @@ inline void ppc_flush_cache_block(const PpcState& state, uint32_t address) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam &&
+        (address == 0xcc00680cu || address == 0xcc006820u || address == 0xcc006834u)) {
+        const auto& control = state.exiTransferControl[(address - 0xcc00680cu) / 0x14u];
+        if (control.has_value()) {
+            if ((*control & ~0x3eu) != 0) {
+                throw std::runtime_error("Unsupported EXI transfer control read (only idle state supported).");
+            }
+            return *control;
+        }
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam &&
         (address == 0xcc006800u || address == 0xcc006814u || address == 0xcc006828u)) {
         const auto& status = state.exiStatus[(address - 0xcc006800u) / 0x14u];

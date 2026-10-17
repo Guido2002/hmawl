@@ -1123,6 +1123,108 @@ void ExpectContextInitialization(PpcState& expected) {
     }
 }
 
+void RunExiInitializationPrefix(PpcState& state, unsigned enabledChannels) {
+    const auto before = state;
+    auto expected = state;
+    const uint32_t stack = state.gpr[1];
+    ppc_write_u32(expected, stack + 4, state.lr);
+    ppc_write_u32(expected, stack - 0x20u, stack);
+    for (unsigned reg = 28; reg <= 31; ++reg) {
+        ppc_write_u32(expected, stack - 0x10u + (reg - 28) * 4u, state.gpr[reg]);
+    }
+    unsigned calls = 0;
+    state.callGuest = [&](uint32_t address, PpcState& guest) {
+        Require(++calls <= 3, "EXI prefix exceeded its dependency budget.");
+        if (address == 0x801b3e0cu) {
+            Require(guest.gpr[3] == 0x007f8000u,
+                    "Original EXI init requested the wrong interrupt mask.");
+            ppc_write_u32(expected, stack - 0x1cu, 0x801f74a0u);
+            ppc_write_u32(expected, stack - 0x40u, stack - 0x20u);
+            ppc_write_u32(expected, stack - 0x24u, before.gpr[31]);
+            ppc_write_u32(expected, stack - 0x28u, before.gpr[30]);
+            ppc_write_u32(expected, stack - 0x2cu, before.gpr[29]);
+            ppc_801B3E0C(guest);
+        } else {
+            Require(address == 0x801b3a44u || address == 0x801b3a6cu,
+                    "EXI init repeated hardware masking despite pre-masked EXI interrupts.");
+            RunHardwareDependency(address, guest);
+        }
+    };
+    bool rejected = false;
+    try {
+        ppc_801F7440(state);
+    } catch (const std::out_of_range& error) {
+        rejected = std::string(error.what()).find("not mapped to GameCube RAM") != std::string::npos;
+    }
+    Require(rejected == (enabledChannels < 3) && calls == (enabledChannels == 3 ? 3u : 0u) &&
+                state.memory == expected.memory && state.gpr[1] == stack - 0x20u &&
+                state.pc == (enabledChannels == 3 ? 0x801f74a4u : before.pc) &&
+                (enabledChannels == 3 ||
+                    (state.gpr[3] == 0xcc006800u &&
+                     state.gpr[0] == (enabledChannels == 0 ? before.lr : 0u))) &&
+                state.externalInterruptsEnabled == before.externalInterruptsEnabled &&
+                state.exiTransferControl == before.exiTransferControl &&
+                state.exiStatus == before.exiStatus && state.piInterruptMask == before.piInterruptMask &&
+                state.miInterruptMask == before.miInterruptMask &&
+                state.dspControl == before.dspControl && state.aiControl == before.aiControl &&
+                state.hid0 == before.hid0 && state.hid2 == before.hid2 && state.l2cr == before.l2cr &&
+                state.fpr == before.fpr && state.fpscr == before.fpscr &&
+                state.gqr == before.gqr && state.msr == before.msr && state.xer == before.xer,
+            "Original EXI prefix changed unexpected RAM/device/CPU state or boundary.");
+    for (unsigned reg = 2; reg < 32; ++reg) {
+        if (reg >= 3 && reg <= 6) continue;
+        if (reg == 31 && enabledChannels == 3) {
+            Require(state.gpr[reg] == 0, "EXI init prefix did not clear its loop register.");
+        } else {
+            Require(state.gpr[reg] == before.gpr[reg], "EXI prefix damaged a preserved register.");
+        }
+    }
+    state.callGuest = {};
+}
+
+void TestOriginalExiInitializationPrefix(const DolImage& image) {
+    for (bool interrupts : {false, true}) {
+        for (unsigned channels = 0; channels <= 3; ++channels) {
+            for (uint32_t control : {0u, 2u, 0x3eu}) {
+                auto state = image.CreateGameCubeState();
+                ppc_800032B0(state);
+                state.lr = 0x801b0f8cu;
+                state.externalInterruptsEnabled = interrupts;
+                state.fpscr = 0xf1234567u;
+                state.fpr.fill({UINT64_MAX, UINT64_MAX});
+                state.gqr.fill(0x12345678u);
+                state.xer = 0xe0000000u;
+                ppc_write_u32(state, 0x800000c4u, 0xffffffe0u);
+                ppc_write_u32(state, 0x800000c8u, 0);
+                for (unsigned channel = 0; channel < channels; ++channel) {
+                    state.exiTransferControl[channel] = control;
+                }
+                RunExiInitializationPrefix(state, channels);
+            }
+        }
+        for (unsigned busyChannel = 0; busyChannel < 3; ++busyChannel) {
+            auto state = image.CreateGameCubeState();
+            ppc_800032B0(state);
+            state.lr = 0x801b0f8cu;
+            state.exiTransferControl = {0u, 0u, 0u};
+            state.exiTransferControl[busyChannel] = 1u;
+            const uint32_t stack = state.gpr[1];
+            bool rejected = false;
+            try {
+                ppc_801F7440(state);
+            } catch (const std::runtime_error& error) {
+                rejected = std::string(error.what()).find("only idle state") != std::string::npos;
+            }
+            Require(rejected && state.exiTransferControl[busyChannel] == 1u &&
+                        state.gpr[1] == stack - 0x20u,
+                    "Busy EXI startup did not fail explicitly before its polling loop.");
+        }
+    }
+    std::cout << "Original EXIInit prefix checks all three idle transfer controls and "
+                 "reuses existing software interrupt masks; exact RAM/stack and partial "
+                 "opt-in boundaries verified. Stops at 0x801f74a4 before EXI status reset.\n";
+}
+
 void TestOriginalContextInitialization(const DolImage& image) {
     for (bool interrupts : {false, true}) {
         for (uint32_t table : {0x80003000u, 0xc0003000u}) {
@@ -1778,6 +1880,11 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     std::cout << "Entry-derived OSInit continues through complete interrupt init, reset-switch "
                  "handler registration, context init and warm cache init, stopping at 0x801b0f88 "
                  "before EXIInit. OSInit has not returned.\n";
+    state.exiTransferControl = {0x3eu, 2u, 0u};
+    state.lr = 0x801b0f8cu;
+    RunExiInitializationPrefix(state, 3);
+    std::cout << "Entry-derived EXIInit prefix passes all idle transfer checks and mask "
+                 "reuse, stopping at 0x801f74a4 before status reset. EXIInit has not returned.\n";
 }
 
 void TestOriginalArenaAccessors(const DolImage& image) {
@@ -2095,6 +2202,7 @@ int main(int argc, char** argv) {
         TestOriginalInterruptHandlerAccessors(image);
         TestOriginalInterruptPiSetup(image);
         TestOriginalContextInitialization(image);
+        TestOriginalExiInitializationPrefix(image);
         TestOriginalCacheRanges(image);
         TestOriginalBootInfoAndArena(image);
         TestStartupHelpers(image);

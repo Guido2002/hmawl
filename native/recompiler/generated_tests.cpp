@@ -892,6 +892,94 @@ void TestAndComplement() {
     }
 }
 
+void TestExiTransferControl() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    const auto ram = state.memory;
+    const auto rejectAccess = [&](auto operation) {
+        const auto before = state.exiTransferControl;
+        bool rejected = false;
+        try {
+            operation();
+        } catch (const std::out_of_range&) {
+            rejected = true;
+        }
+        Require(rejected && state.exiTransferControl == before && state.memory == ram,
+                "Unsupported EXI transfer access changed state.");
+    };
+    for (unsigned channel = 0; channel < 3; ++channel) {
+        const uint32_t address = 0xcc00680cu + channel * 0x14u;
+        state.gpr[4] = address;
+        rejectAccess([&] { ppc_0000B200(state); });
+        for (uint32_t control = 0; control <= 0x3e; control += 2) {
+            state.exiTransferControl[channel] = control;
+            state.cr = 0x12345678u;
+            state.xer = 0xe0000000u;
+            for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                ppc_0000B200(state);
+                Require(state.gpr[3] == control && state.pc == 0xb204u &&
+                            state.cr == 0x12345678u && state.xer == 0xe0000000u &&
+                            state.exiTransferControl[channel] == control && state.memory == ram,
+                        "Compiled idle EXI transfer read changed state or returned wrong bits.");
+            }
+        }
+        for (unsigned bit = 0; bit < 32; ++bit) {
+            if ((0x3eu & (1u << bit)) != 0) continue;
+            const uint32_t invalid = 0x3eu | (1u << bit);
+            state.exiTransferControl[channel] = invalid;
+            state.pc = 0xb200u;
+            bool rejected = false;
+            try {
+                ppc_0000B200(state);
+            } catch (const std::runtime_error& error) {
+                rejected = std::string(error.what()).find("only idle state") != std::string::npos;
+            }
+            Require(rejected && state.pc == 0xb200u && state.memory == ram &&
+                        state.exiTransferControl[channel] == invalid,
+                    "Busy/reserved EXI transfer state was accepted or changed.");
+        }
+        state.exiTransferControl[channel] = 0x3e;
+        for (uint32_t value : {0u, 1u, 0x3eu, UINT32_MAX}) {
+            state.gpr[3] = value;
+            rejectAccess([&] { ppc_0000B210(state); });
+        }
+        for (uint32_t offset : {1u, 2u, 3u, 4u}) {
+            state.gpr[4] = address + offset;
+            rejectAccess([&] { ppc_0000B200(state); });
+        }
+        state.gpr[4] = address - 0xc0000000u;
+        rejectAccess([&] { ppc_0000B200(state); });
+        for (unsigned width : {1u, 2u, 8u}) {
+            rejectAccess([&] {
+                if (width == 1) (void)ppc_read_u8(state, address);
+                else if (width == 2) (void)ppc_read_u16(state, address);
+                else (void)ppc_read_u64(state, address);
+            });
+            rejectAccess([&] {
+                if (width == 1) ppc_write_u8(state, address, 0);
+                else if (width == 2) ppc_write_u16(state, address, 0);
+                else ppc_write_u64(state, address, 0);
+            });
+        }
+        state.exiTransferControl[channel].reset();
+        state.gpr[4] = address;
+        rejectAccess([&] { ppc_0000B200(state); });
+    }
+    state.exiTransferControl = {0u, 2u, 0x3eu};
+    const auto controls = state.exiTransferControl;
+    state.gpr[4] = 0xc0001000u;
+    state.gpr[3] = 0x12345678u;
+    ppc_0000B210(state);
+    ppc_0000B200(state);
+    Require(state.gpr[3] == 0x12345678u && state.exiTransferControl == controls,
+            "EXI transfer support changed ordinary RAM behavior.");
+    state.memoryMap = PpcMemoryMap::Flat;
+    ppc_write_u32(state, 4, 0x12345678u);
+    Require(ppc_read_u32(state, 4) == 0x12345678u && state.exiTransferControl == controls,
+            "EXI transfer support changed flat-memory behavior.");
+}
+
 void TestExiStatus() {
     PpcState state;
     state.memoryMap = PpcMemoryMap::GameCubeRam;
@@ -2098,6 +2186,7 @@ int main() {
         TestDspControl();
         TestAiControl();
         TestExiStatus();
+        TestExiTransferControl();
         TestAndComplement();
         TestCacheBlockInstructions();
         TestL2ControlRegisters();

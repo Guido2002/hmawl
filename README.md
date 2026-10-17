@@ -447,6 +447,19 @@ RAM/stack writes. The existing full hardware-startup tests continue to cover col
 cache enable/invalidation paths. This uses coherent native RAM and controlled
 guest cache state; it does not implement physical cache timing or DMA errors.
 
+The original `EXIInit` prefix now reads independently opt-in 32-bit transfer
+control state at `0xcc00680c`, `0xcc006820` and `0xcc006834`. Only inactive
+state is readable; busy or reserved state throws explicitly rather than
+entering an unbounded original polling loop. All writes, unsupported widths,
+neighboring/unaligned addresses and physical aliases remain errors. Tests cover
+all 32 inactive control combinations per channel, repeated reads and rejection
+without mutation. Original startup checks all three channels and calls
+`__OSMaskInterrupts` with `0x007f8000`; the already-masked software state avoids
+new device writes. Independent and entry-derived tests verify exact RAM/stack
+writes, CPU/device preservation and partial opt-in boundaries. The compiled
+prefix ends at `0x801f74a4`, before EXI status reset; EXIInit has not returned.
+No transfer completion, device probing or EXI data movement is implemented.
+
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings
 and do not suppress dispatch code-word checks. Original `DCFlushRangeNoSync`

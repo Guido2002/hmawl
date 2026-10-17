@@ -331,6 +331,15 @@ queue. Full runtime scheduling and device services are still needed.
   previous-handler return, both interrupt states, repeats, callee-saved registers
   and exact RAM/stack writes. Existing hardware tests retain cold-path coverage.
   No physical cache timing or DMA-error delivery; next startup dependency is EXIInit.
+- [x] Execute the original EXIInit prefix through its three transfer-idle checks
+  and software-mask reuse. Add independently opt-in read-only 32-bit transfer
+  controls (`0xcc00680c/20/34`); reject busy/reserved states explicitly to avoid
+  unbounded polling without a transfer backend. Test all 32 inactive combinations
+  per channel, repeats, rejected writes/access forms and unchanged RAM/state.
+  Verify original busy-state rejection, partial opt-in boundaries, exact RAM/stack
+  writes, CPU/device preservation and entry-derived continuation. Stop at
+  `0x801f74a4` before EXI status reset; EXIInit does not return. No transfers,
+  completion events or device probing.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
