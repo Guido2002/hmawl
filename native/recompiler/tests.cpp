@@ -293,6 +293,67 @@ void TestInvalidDolRange() {
     }
 }
 
+void TestInvalidFloatingPointInstructions() {
+    const std::vector<uint32_t> instructions = {
+        (51u << 26) | (3u << 21),
+        (55u << 26) | (3u << 21),
+        (31u << 26) | (3u << 21) | (4u << 11) | (631u << 1),
+        (31u << 26) | (3u << 21) | (4u << 11) | (759u << 1),
+        (31u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (599u << 1) | 1u,
+        (31u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (727u << 1) | 1u,
+        (63u << 26) | (3u << 21) | (1u << 16) | (4u << 11) | (72u << 1),
+        0xfdfe058eu | 0x02000000u,
+        0xfdfe058eu | 0x00010000u,
+        (63u << 26) | (134u << 1) | 0x00400000u,
+        (63u << 26) | (134u << 1) | 0x00000800u,
+        (63u << 26) | (583u << 1) | (1u << 16),
+        (63u << 26) | (583u << 1) | (1u << 11),
+        0xfc64282au, // fadd must not fall through to a register move.
+        0x10210090u, // Reserved ps_mr source field.
+        (57u << 26) | (3u << 21),
+        (4u << 26) | (3u << 21) | (4u << 11) | (38u << 1),
+        (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (6u << 1) | 1u,
+        (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (38u << 1) | 1u,
+        (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (7u << 1),
+        (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (39u << 1),
+        (60u << 26) | (3u << 16), // psq_st is not supported.
+        0x7c70e3a7u, // GQR SPR writes have no record form.
+        0x7c70e2a7u,
+        0x7c78e2a7u,
+        0x7c78e3a7u,
+        0x7c6000a7u,
+        0x7c600125u,
+        0x7c6100a6u,
+        0x7c600924u,
+        0x7c70faa7u,
+        0x7c70fba7u,
+        0x7c79faa7u,
+        0x7c79fba7u,
+        0x7c0004adu,
+        0x7c2004acu,
+        0x7c0104acu,
+        0x7c000cacu,
+        0x4c00012du,
+        0x4c20012cu,
+        0x4c01012cu,
+        0x4c00092cu,
+        (31u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (522u << 1),
+        (31u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (650u << 1),
+        0x1022182au  // Paired arithmetic is not a register move.
+    };
+    for (uint32_t instruction : instructions) {
+        bool rejected = false;
+        try {
+            RecompileFunction(0x80003100u, {instruction});
+        } catch (const std::runtime_error& error) {
+            Require(std::string(error.what()).find("at 0x80003100") != std::string::npos,
+                    "Invalid/unsupported floating-point instruction omitted its guest address.");
+            rejected = true;
+        }
+        Require(rejected, "Invalid/unsupported floating-point instruction was accepted.");
+    }
+}
+
 void TestGameCubeRamAndDolLoading() {
     auto bytes = MakeDol({0x38600005u, 0x4e800020u});
     bytes.resize(0x10c, 0);
@@ -427,6 +488,7 @@ int main() {
         TestInvalidSignExtendHalfword();
         TestInvalidTimeBaseAndConditionXor();
         TestInvalidUnaryAndOverflowArithmetic();
+        TestInvalidFloatingPointInstructions();
         TestInvalidDolRange();
         TestGameCubeRamAndDolLoading();
         TestRvzHeaderInspection();

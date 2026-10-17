@@ -43,11 +43,23 @@ void NativeDvdQueue::Invoke(uint32_t callback, uint32_t result, uint32_t info) {
     CheckCallback(callback);
     std::array<uint32_t, 32> gpr;
     std::copy(std::begin(state_.gpr), std::end(state_.gpr), gpr.begin());
+    const auto fpr = state_.fpr;
+    const auto fpscr = state_.fpscr;
+    const auto gqr = state_.gqr;
+    const auto msr = state_.msr, hid2 = state_.hid2, hid0 = state_.hid0;
+    const auto l2cr = state_.l2cr;
     const auto cr = state_.cr, xer = state_.xer, lr = state_.lr;
     const auto ctr = state_.ctr, pc = state_.pc;
     const bool interrupts = state_.externalInterruptsEnabled;
     const auto restore = [&] {
         std::copy(gpr.begin(), gpr.end(), std::begin(state_.gpr));
+        state_.fpr = fpr;
+        state_.fpscr = fpscr;
+        state_.gqr = gqr;
+        state_.msr = msr;
+        state_.hid2 = hid2;
+        state_.hid0 = hid0;
+        state_.l2cr = l2cr;
         state_.cr = cr;
         state_.xer = xer;
         state_.lr = lr;

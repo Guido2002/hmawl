@@ -1,6 +1,8 @@
 #ifndef HMAWL_PPC_STATE_H
 #define HMAWL_PPC_STATE_H
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -11,8 +13,25 @@ constexpr uint32_t kGameCubeRamSize = 24u * 1024u * 1024u;
 
 enum class PpcMemoryMap { Flat, GameCubeRam };
 
+struct PpcFpr {
+    uint64_t ps0 = 0;
+    uint64_t ps1 = 0;
+
+    bool operator==(const PpcFpr& other) const {
+        return ps0 == other.ps0 && ps1 == other.ps1;
+    }
+};
+
 struct PpcState {
     uint32_t gpr[32] = {};
+    // Raw IEEE-754 bits keep NaN payloads and the independent paired lane intact.
+    std::array<PpcFpr, 32> fpr = {};
+    uint32_t fpscr = 0;
+    std::array<uint32_t, 8> gqr = {};
+    uint32_t msr = 0; // EE is owned by externalInterruptsEnabled.
+    uint32_t hid2 = 0;
+    uint32_t hid0 = 0;
+    uint32_t l2cr = 0;
     uint32_t cr = 0;
     uint32_t xer = 0;
     uint32_t lr = 0;
@@ -26,6 +45,54 @@ struct PpcState {
     std::function<void(PpcState&)> cancelDvdRead;
     bool externalInterruptsEnabled = true;
 };
+
+inline uint32_t ppc_read_msr(const PpcState& state) {
+    return (state.msr & ~0x8000u) | (state.externalInterruptsEnabled ? 0x8000u : 0u);
+}
+
+inline void ppc_write_msr(PpcState& state, uint32_t value) {
+    if (((ppc_read_msr(state) ^ value) & ~0xa000u) != 0) {
+        throw std::runtime_error("Unsupported PowerPC MSR mode change (only FP/EE supported).");
+    }
+    state.msr = value & ~0x8000u;
+    state.externalInterruptsEnabled = (value & 0x8000u) != 0;
+}
+
+inline void ppc_write_hid2(PpcState& state, uint32_t value) {
+    if (((state.hid2 ^ value) & ~0xa0000000u) != 0) {
+        throw std::runtime_error("Unsupported PowerPC HID2 change (only PSE/LSQE supported).");
+    }
+    state.hid2 = value;
+}
+
+inline void ppc_sync() {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
+inline void ppc_write_hid0(PpcState& state, uint32_t value) {
+    if (((state.hid0 ^ value) & ~0xc800u) != 0) {
+        throw std::runtime_error("Unsupported PowerPC HID0 change (only ICE/DCE/ICFI supported).");
+    }
+    // RAM is coherent and translations are static, with code checks at dispatch.
+    if ((value & 0x800u) != 0) {
+        ppc_sync();
+    }
+    state.hid0 = value & ~0x800u;
+}
+
+inline void ppc_write_l2cr(PpcState& state, uint32_t value) {
+    if (((state.l2cr ^ value) & ~0x80200000u) != 0) {
+        throw std::runtime_error("Unsupported PowerPC L2CR change (only L2E/L2I supported).");
+    }
+    if ((value & 0x80200000u) == 0x80200000u) {
+        throw std::runtime_error("PowerPC L2 invalidation requires the L2 cache to be disabled.");
+    }
+    // Invalidation completes synchronously over coherent RAM; L2IP stays clear.
+    if ((value & 0x00200000u) != 0) {
+        ppc_sync();
+    }
+    state.l2cr = value;
+}
 
 inline size_t ppc_memory_offset(const PpcState& state, uint32_t address,
                                 size_t size) {
@@ -56,6 +123,42 @@ inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
            static_cast<uint32_t>(state.memory[offset + 3]);
 }
 
+inline uint64_t ppc_read_u64(const PpcState& state, uint32_t address) {
+    const size_t offset = ppc_memory_offset(state, address, sizeof(uint64_t));
+    uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i) {
+        value = (value << 8) | state.memory[offset + i];
+    }
+    return value;
+}
+
+inline uint64_t ppc_widen_single_bits(uint32_t bits) {
+    const uint64_t sign = static_cast<uint64_t>(bits & 0x80000000u) << 32;
+    const uint32_t exponent = (bits >> 23) & 0xffu;
+    uint32_t fraction = bits & 0x7fffffu;
+    if (exponent != 0) {
+        const uint64_t widenedExponent = exponent == 255 ? 2047u : exponent + 896u;
+        return sign | (widenedExponent << 52) | (static_cast<uint64_t>(fraction) << 29);
+    }
+    if (fraction == 0) {
+        return sign;
+    }
+    unsigned shift = 0;
+    while ((fraction & 0x800000u) == 0) {
+        fraction <<= 1;
+        ++shift;
+    }
+    return sign | (static_cast<uint64_t>(897u - shift) << 52) |
+           (static_cast<uint64_t>(fraction & 0x7fffffu) << 29);
+}
+
+inline void ppc_write_u64(PpcState& state, uint32_t address, uint64_t value) {
+    const size_t offset = ppc_memory_offset(state, address, sizeof(uint64_t));
+    for (unsigned i = 0; i < 8; ++i) {
+        state.memory[offset + i] = static_cast<uint8_t>(value >> (56u - i * 8u));
+    }
+}
+
 inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
     const size_t offset = ppc_memory_offset(state, address, sizeof(uint16_t));
     return static_cast<uint16_t>(
@@ -81,12 +184,58 @@ inline uint8_t ppc_read_u8(const PpcState& state, uint32_t address) {
     return state.memory[ppc_memory_offset(state, address, 1)];
 }
 
+inline uint64_t ppc_dequantize_integer_bits(uint32_t raw, uint32_t type,
+                                           uint32_t scale) {
+    const unsigned width = (type & 1u) != 0 ? 16u : 8u;
+    const uint32_t mask = (1u << width) - 1u;
+    raw &= mask;
+    const bool negative = (type & 2u) != 0 && (raw & (1u << (width - 1u))) != 0;
+    const uint32_t magnitude = negative ? ((~raw + 1u) & mask) : raw;
+    if (magnitude == 0) {
+        return 0;
+    }
+    unsigned leading = 0;
+    for (uint32_t remaining = magnitude; remaining > 1; remaining >>= 1) {
+        ++leading;
+    }
+    const int signedScale = scale < 32 ? static_cast<int>(scale) :
+                                        static_cast<int>(scale) - 64;
+    // All 8/16-bit integers scaled by a GQR power of two fit exactly in both precisions.
+    const uint64_t exponent = static_cast<uint64_t>(1023 + static_cast<int>(leading) - signedScale);
+    return (negative ? UINT64_C(0x8000000000000000) : 0) | (exponent << 52) |
+           (static_cast<uint64_t>(magnitude - (1u << leading)) << (52u - leading));
+}
+
+inline PpcFpr ppc_load_quantized_pair(const PpcState& state, uint32_t address,
+                                      uint32_t quantization, bool single) {
+    const uint32_t gqr = state.gqr.at(quantization);
+    const uint32_t type = (gqr >> 16) & 7u;
+    if (type >= 1 && type <= 3) {
+        throw std::runtime_error("Unsupported PowerPC psq_l quantized load type.");
+    }
+    const uint32_t width = type == 0 ? 4u : (type & 1u) != 0 ? 2u : 1u;
+    ppc_memory_offset(state, address, single ? width : width * 2u);
+    const auto load = [&](uint32_t source) {
+        if (type == 0) {
+            return ppc_widen_single_bits(ppc_read_u32(state, source));
+        }
+        const uint32_t raw = width == 2 ? ppc_read_u16(state, source) :
+                                         ppc_read_u8(state, source);
+        return ppc_dequantize_integer_bits(raw, type, (gqr >> 24) & 63u);
+    };
+    const uint64_t first = load(address);
+    const uint64_t second = single ? UINT64_C(0x3ff0000000000000) : load(address + width);
+    return {first, second};
+}
+
 inline void ppc_write_u8(PpcState& state, uint32_t address, uint8_t value) {
     state.memory[ppc_memory_offset(state, address, 1)] = value;
 }
 
-inline uint32_t ppc_add_carry(PpcState& state, uint32_t left, uint32_t right) {
-    const uint64_t sum = static_cast<uint64_t>(left) + right;
+inline uint32_t ppc_add_carry(PpcState& state, uint32_t left, uint32_t right,
+                              bool extended = false) {
+    const uint64_t sum = static_cast<uint64_t>(left) + right +
+                         (extended ? ((state.xer >> 29) & 1u) : 0u);
     state.xer = (state.xer & ~0x20000000u) |
                 (sum > UINT32_MAX ? 0x20000000u : 0u);
     return static_cast<uint32_t>(sum);
@@ -153,6 +302,20 @@ inline void ppc_set_cr_field(PpcState& state, uint32_t field, bool less,
                            (static_cast<uint32_t>(equal) << 1) |
                            summaryOverflow;
     state.cr = (state.cr & ~(0xfu << shift)) | (value << shift);
+}
+
+inline void ppc_write_fpscr(PpcState& state, uint32_t value, uint32_t mask) {
+    uint32_t result = (state.fpscr & ~mask) | (value & mask);
+    // VX and FEX are derived summaries, not independently writable flags.
+    constexpr uint32_t invalidCauses = 0x01f80700u;
+    result &= ~0x60000000u;
+    if ((result & invalidCauses) != 0) {
+        result |= 0x20000000u;
+    }
+    if (((result >> 22) & result & 0xf8u) != 0) {
+        result |= 0x40000000u;
+    }
+    state.fpscr = result;
 }
 
 inline bool ppc_branch_condition(PpcState& state, uint32_t bo, uint32_t bi) {

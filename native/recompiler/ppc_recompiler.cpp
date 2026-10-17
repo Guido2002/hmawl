@@ -55,6 +55,52 @@ void EmitRecordResult(std::ostringstream& output, bool record,
     }
 }
 
+void EmitDoubleTransfer(std::ostringstream& output, uint32_t pc, uint32_t reg,
+                        uint32_t base, const std::string& address, bool load,
+                        bool update) {
+    if (update && base == 0) {
+        throw std::runtime_error("Invalid floating-point update-form instruction at " +
+                                 Hex(pc) + ".");
+    }
+    const std::string ea = "ea_" + Hex(pc).substr(2);
+    output << "    const uint32_t " << ea << " = " << address << ";\n"
+           << "    if ((" << ea << " & 3u) != 0) {\n"
+           << "        throw std::runtime_error(\"Unaligned PowerPC floating-point transfer at "
+           << Hex(pc) << ".\");\n"
+           << "    }\n";
+    if (load) {
+        output << "    state.fpr[" << reg << "].ps0 = ppc_read_u64(state, "
+               << ea << ");\n";
+    } else {
+        output << "    ppc_write_u64(state, " << ea << ", state.fpr[" << reg
+               << "].ps0);\n";
+    }
+    if (update) {
+        output << "    state.gpr[" << base << "] = " << ea << ";\n";
+    }
+}
+
+void EmitFpscrRecord(std::ostringstream& output, bool record) {
+    if (record) {
+        output << "    state.cr = (state.cr & 0xf0ffffffu) | "
+                  "((state.fpscr >> 4) & 0x0f000000u);\n";
+    }
+}
+
+void EmitPairedLoad(std::ostringstream& output, uint32_t pc, uint32_t reg,
+                    uint32_t base, const std::string& address, uint32_t selector,
+                    bool single, bool update) {
+    if (update && base == 0) {
+        throw std::runtime_error("Invalid paired load update-form instruction at " + Hex(pc) + ".");
+    }
+    output << "    const uint32_t ea = " << address << ";\n"
+           << "    state.fpr[" << reg << "] = ppc_load_quantized_pair(state, ea, "
+           << selector << "u, " << (single ? "true" : "false") << ");\n";
+    if (update) {
+        output << "    state.gpr[" << base << "] = ea;\n";
+    }
+}
+
 void EmitBranch(std::ostringstream& output, uint32_t target, uint32_t address,
                 uint32_t next, uint32_t nextAddress, uint64_t end,
                 bool conditional) {
@@ -275,6 +321,122 @@ std::string RecompileFunction(uint32_t address,
                              "state.gpr[" + std::to_string(ra) + "]");
             break;
         }
+        case 56:
+        case 57: {
+            EmitPairedLoad(output, pc, rt, ra,
+                EffectiveAddress(ra, SignExtend(Bits(instruction, 0, 12), 12)),
+                Bits(instruction, 12, 3), Bits(instruction, 15, 1) != 0, opcode == 57);
+            break;
+        }
+        case 4: {
+            const uint32_t extendedOpcode = Bits(instruction, 1, 10);
+            const uint32_t quantizedOpcode = Bits(instruction, 1, 6);
+            if (quantizedOpcode == 6 || quantizedOpcode == 38) {
+                if ((instruction & 1u) != 0) {
+                    throw std::runtime_error("Invalid indexed paired load at " + Hex(pc) + ".");
+                }
+                const std::string base =
+                    ra == 0 ? "0u" : "state.gpr[" + std::to_string(ra) + "]";
+                EmitPairedLoad(output, pc, rt, ra,
+                    base + " + state.gpr[" + std::to_string(rb) + "]",
+                    Bits(instruction, 7, 3), Bits(instruction, 10, 1) != 0,
+                    quantizedOpcode == 38);
+                break;
+            }
+            if (extendedOpcode == 528 || extendedOpcode == 560 ||
+                extendedOpcode == 592 || extendedOpcode == 624) {
+                const unsigned first = (extendedOpcode - 528) / 64;
+                const unsigned second = ((extendedOpcode - 528) / 32) % 2;
+                output << "    const uint64_t first = state.fpr[" << ra << "].ps"
+                       << first << ";\n"
+                       << "    const uint64_t second = state.fpr[" << rb << "].ps"
+                       << second << ";\n"
+                       << "    state.fpr[" << rt << "] = {first, second};\n";
+            } else {
+                if (ra != 0 || (extendedOpcode != 40 && extendedOpcode != 72 &&
+                                extendedOpcode != 136 && extendedOpcode != 264)) {
+                    throw std::runtime_error("Unsupported PowerPC instruction " +
+                                             Hex(instruction) + " at " + Hex(pc) + ".");
+                }
+                for (unsigned lane = 0; lane < 2; ++lane) {
+                    output << "    state.fpr[" << rt << "].ps" << lane
+                           << " = state.fpr[" << rb << "].ps" << lane;
+                    if (extendedOpcode == 40) {
+                        output << " ^ UINT64_C(0x8000000000000000)";
+                    } else if (extendedOpcode == 136) {
+                        output << " | UINT64_C(0x8000000000000000)";
+                    } else if (extendedOpcode == 264) {
+                        output << " & UINT64_C(0x7fffffffffffffff)";
+                    }
+                    output << ";\n";
+                }
+            }
+            EmitFpscrRecord(output, (instruction & 1u) != 0);
+            break;
+        }
+        case 50:
+        case 51:
+        case 54:
+        case 55:
+            EmitDoubleTransfer(output, pc, rt, ra,
+                EffectiveAddress(ra, SignExtend(immediate, 16)),
+                opcode == 50 || opcode == 51, opcode == 51 || opcode == 55);
+            break;
+        case 63: {
+            const uint32_t extendedOpcode = Bits(instruction, 1, 10);
+            if (extendedOpcode == 583) {
+                if (ra != 0 || rb != 0) {
+                    throw std::runtime_error("Invalid mffs instruction at " + Hex(pc) + ".");
+                }
+                output << "    state.fpr[" << rt
+                       << "].ps0 = UINT64_C(0xfff8000000000000) | state.fpscr;\n";
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
+            }
+            if (extendedOpcode == 711 || extendedOpcode == 134) {
+                uint32_t mask = 0;
+                if (extendedOpcode == 711) {
+                    if ((instruction & 0x02010000u) != 0) {
+                        throw std::runtime_error("Invalid mtfsf instruction at " + Hex(pc) + ".");
+                    }
+                    const uint32_t fields = Bits(instruction, 17, 8);
+                    for (unsigned field = 0; field < 8; ++field) {
+                        if ((fields & (1u << field)) != 0) {
+                            mask |= 0xfu << (field * 4u);
+                        }
+                    }
+                    output << "    ppc_write_fpscr(state, static_cast<uint32_t>(state.fpr["
+                           << rb << "].ps0), " << Hex(mask) << "u);\n";
+                } else {
+                    if ((instruction & 0x007f0800u) != 0) {
+                        throw std::runtime_error("Invalid mtfsfi instruction at " + Hex(pc) + ".");
+                    }
+                    const uint32_t shift = 28u - Bits(instruction, 23, 3) * 4u;
+                    mask = 0xfu << shift;
+                    output << "    ppc_write_fpscr(state, "
+                           << Hex(Bits(instruction, 12, 4) << shift) << "u, "
+                           << Hex(mask) << "u);\n";
+                }
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
+            }
+            if (ra != 0 || (extendedOpcode != 40 && extendedOpcode != 72 &&
+                            extendedOpcode != 136 && extendedOpcode != 264)) {
+                throw std::runtime_error("Unsupported PowerPC instruction " +
+                                         Hex(instruction) + " at " + Hex(pc) + ".");
+            }
+            output << "    state.fpr[" << rt << "].ps0 = state.fpr[" << rb << "].ps0";
+            if (extendedOpcode == 40) {
+                output << " ^ UINT64_C(0x8000000000000000)";
+            } else if (extendedOpcode == 136) {
+                output << " | UINT64_C(0x8000000000000000)";
+            } else if (extendedOpcode == 264) {
+                output << " & UINT64_C(0x7fffffffffffffff)";
+            }
+            output << ";\n";
+            EmitFpscrRecord(output, (instruction & 1u) != 0);
+            break;
+        }
         case 32:
         case 33:
         case 34:
@@ -364,6 +526,13 @@ std::string RecompileFunction(uint32_t address,
             const uint32_t bo = Bits(instruction, 21, 5);
             const uint32_t bi = Bits(instruction, 16, 5);
             const uint32_t link = instruction & 1u;
+            if (extendedOpcode == 150) {
+                if (instruction != 0x4c00012cu) {
+                    throw std::runtime_error("Invalid isync instruction at " + Hex(pc) + ".");
+                }
+                output << "    ppc_sync();\n";
+                break;
+            }
             if (extendedOpcode == 193) {
                 if (link != 0) {
                     throw std::runtime_error("Invalid crxor instruction at " + Hex(pc) + ".");
@@ -425,6 +594,25 @@ std::string RecompileFunction(uint32_t address,
             uint32_t destination = rt;
             bool record = (instruction & 1u) != 0;
             switch (extendedOpcode) {
+            case 598:
+                if (instruction != 0x7c0004acu) {
+                    throw std::runtime_error("Invalid sync instruction at " + Hex(pc) + ".");
+                }
+                output << "    ppc_sync();\n";
+                emitted = true;
+                break;
+            case 83:
+            case 146:
+                if (record || ra != 0 || rb != 0) {
+                    throw std::runtime_error("Invalid MSR transfer at " + Hex(pc) + ".");
+                }
+                if (extendedOpcode == 83) {
+                    expression = "ppc_read_msr(state)";
+                } else {
+                    output << "    ppc_write_msr(state, state.gpr[" << rt << "]);\n";
+                    emitted = true;
+                }
+                break;
             case 26:
                 if (rb != 0) {
                     throw std::runtime_error("Invalid cntlzw instruction at " + Hex(pc) + ".");
@@ -456,6 +644,11 @@ std::string RecompileFunction(uint32_t address,
                 }
                 expression = "0u - " + left;
                 break;
+            case 10:
+            case 138:
+                expression = "ppc_add_carry(state, " + left + ", " + right +
+                             (extendedOpcode == 138 ? ", true)" : ")");
+                break;
             case 0:
             case 32: {
                 if (record || (rt & 3u) != 0) {
@@ -483,6 +676,23 @@ std::string RecompileFunction(uint32_t address,
                 destination = ra;
                 expression = "state.gpr[" + std::to_string(rt) + "] & " + right;
                 break;
+            case 599:
+            case 631:
+            case 727:
+            case 759: {
+                if (record) {
+                    throw std::runtime_error("Invalid floating-point indexed instruction at " +
+                                             Hex(pc) + ".");
+                }
+                const std::string base =
+                    ra == 0 ? "0u" : "state.gpr[" + std::to_string(ra) + "]";
+                EmitDoubleTransfer(output, pc, rt, ra,
+                    base + " + state.gpr[" + std::to_string(rb) + "]",
+                    extendedOpcode == 599 || extendedOpcode == 631,
+                    extendedOpcode == 631 || extendedOpcode == 759);
+                emitted = true;
+                break;
+            }
             case 23:
             case 55:
             case 87:
@@ -598,12 +808,16 @@ std::string RecompileFunction(uint32_t address,
                 break;
             case 339: {
                 const uint32_t spr = ra | (rb << 5);
-                if (record || (spr != 1 && spr != 8 && spr != 9)) {
+                if (record || (spr != 1 && spr != 8 && spr != 9 && spr != 1008 && spr != 1017 &&
+                               (spr < 912 || spr > 920))) {
                     throw std::runtime_error("Unsupported mfspr instruction " +
                                              Hex(instruction) + " at " +
                                              Hex(pc) + ".");
                 }
-                expression = spr == 1 ? "state.xer" : spr == 8 ? "state.lr" : "state.ctr";
+                expression = spr == 1017 ? "state.l2cr" :
+                    spr == 1008 ? "state.hid0" : spr == 920 ? "state.hid2" :
+                    spr >= 912 ? "state.gqr[" + std::to_string(spr - 912) + "]" :
+                    spr == 1 ? "state.xer" : spr == 8 ? "state.lr" : "state.ctr";
                 record = false;
                 break;
             }
@@ -619,13 +833,22 @@ std::string RecompileFunction(uint32_t address,
             }
             case 467: {
                 const uint32_t spr = ra | (rb << 5);
-                if (record || (spr != 1 && spr != 8 && spr != 9)) {
+                if (record || (spr != 1 && spr != 8 && spr != 9 && spr != 1008 && spr != 1017 &&
+                               (spr < 912 || spr > 920))) {
                     throw std::runtime_error("Unsupported mtspr instruction " +
                                              Hex(instruction) + " at " +
                                              Hex(pc) + ".");
                 }
+                if (spr == 920 || spr == 1008 || spr == 1017) {
+                    output << "    ppc_write_" << (spr == 920 ? "hid2" : spr == 1008 ? "hid0" : "l2cr")
+                           << "(state, state.gpr[" << rt << "]);\n";
+                    emitted = true;
+                    break;
+                }
                 output << "    state."
-                       << (spr == 1 ? "xer" : spr == 8 ? "lr" : "ctr")
+                       << (spr >= 912 ? "gqr[" + std::to_string(spr - 912) + "]" :
+                           spr == 1 ? std::string("xer") : spr == 8 ? std::string("lr") :
+                           std::string("ctr"))
                        << " = state.gpr[" << rt << "];\n";
                 emitted = true;
                 break;
@@ -648,10 +871,12 @@ std::string RecompileFunction(uint32_t address,
                                      ".");
         }
 
-        if (opcode != 16 && opcode != 18 && opcode != 19 &&
-            static_cast<uint64_t>(next) < end) {
+        const bool branch = opcode == 16 || opcode == 18 ||
+            (opcode == 19 && (Bits(instruction, 1, 10) == 16 ||
+                              Bits(instruction, 1, 10) == 528));
+        if (!branch && static_cast<uint64_t>(next) < end) {
             output << "    goto " << Label(next) << ";\n";
-        } else if (opcode != 16 && opcode != 18 && opcode != 19) {
+        } else if (!branch) {
             output << "    state.pc = " << Hex(next) << ";\n"
                    << "    return;\n";
         }
