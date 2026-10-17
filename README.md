@@ -274,6 +274,15 @@ forms, overlapping registers and preservation of other XER bits; overflow-enable
 forms remain unsupported. No performance counters, OS scheduler or RTC backend
 are implied by these time tests.
 
+Compiled `mtfsb0`/`mtfsb1` now clear/set individual FPSCR bits, recompute VX/FEX
+and optionally update CR1. Setting a previously clear exception-cause bit also
+sets sticky FX; setting an already-set cause does not recreate a cleared FX.
+Tests cover all 32 bit selectors, both operations/record forms, repeated writes,
+exception summaries, register/RAM preservation and unchanged host rounding.
+The original `PPCSetFpNonIEEEMode` wrapper (`0x801b0b24`) independently sets NI
+and returns without disturbing rounding bits or FPR lanes. This is guest status
+support, not implementation of NI arithmetic or completion of `OSInit`.
+
 ### REL module parsing and linking
 
 Inspect a locally extracted version 3 module without changing it:

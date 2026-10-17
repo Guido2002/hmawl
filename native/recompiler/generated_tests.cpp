@@ -2,6 +2,7 @@
 #include "native_dispatch.h"
 #include "native_time_base.h"
 
+#include <algorithm>
 #include <cfenv>
 #include <cmath>
 #include <cstring>
@@ -284,6 +285,59 @@ void TestFpscrWrites() {
                     "Guest FPSCR writes changed the host floating-point rounding mode.");
         }
     }
+}
+
+void TestFpscrBits() {
+    const int rounding = std::fegetround();
+    const unsigned exceptionBits[] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 21, 22, 23};
+    for (unsigned set = 0; set < 2; ++set) {
+        for (unsigned bit = 0; bit < 32; ++bit) {
+            const uint32_t mask = 0x80000000u >> bit;
+            for (unsigned record = 0; record < 2; ++record) {
+                for (uint32_t initial : {0u, UINT32_MAX, 0x12345678u, 0xfedcba98u,
+                                        mask, ~mask, 0x60000000u, 0x01f80700u,
+                                        0x000000f8u, 0x01000080u, 0x10000040u}) {
+                    PpcState state;
+                    for (unsigned reg = 0; reg < 32; ++reg) {
+                        state.gpr[reg] = 0x100u + reg;
+                        state.fpr[reg] = {UINT64_C(0x7ff0000000000001) + reg,
+                                          UINT64_C(0xfff8000000000000) + reg};
+                    }
+                    const auto fpr = state.fpr;
+                    state.memory.resize(32, 0xa5);
+                    const auto memory = state.memory;
+                    state.fpscr = initial;
+                    state.cr = 0x12345678u;
+                    state.xer = 0xe0000000u;
+                    state.lr = 0x80001000u;
+                    state.ctr = 0x87654321u;
+                    uint32_t value = set ? initial | mask : initial & ~mask;
+                    const bool exception = std::find(std::begin(exceptionBits),
+                        std::end(exceptionBits), bit) != std::end(exceptionBits);
+                    if (set && exception && (initial & mask) == 0) value |= 0x80000000u;
+                    const uint32_t expected = ExpectedFpscr(0, value, 255);
+                    const unsigned index = set * 64 + bit * 2 + record;
+                    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                        FpscrBitTestFunctions[index](state);
+                        Require(state.fpscr == expected &&
+                                    state.cr == (record ? (0x10345678u |
+                                        ((expected >> 4) & 0x0f000000u)) : 0x12345678u) &&
+                                    state.fpr == fpr && state.memory == memory &&
+                                    state.xer == 0xe0000000u && state.lr == 0x80001000u &&
+                                    state.ctr == 0x87654321u &&
+                                    state.pc == 0xa004u + index * 4,
+                                "mtfsb0/mtfsb1 lost bit, FX/VX/FEX, CR1 or repeat semantics.");
+                    }
+                    for (unsigned reg = 0; reg < 32; ++reg) {
+                        Require(state.gpr[reg] == 0x100u + reg,
+                                "FPSCR bit write changed an integer register.");
+                    }
+                }
+            }
+        }
+    }
+    Require(std::fegetround() == rounding,
+            "FPSCR bit operations changed the host rounding mode.");
 }
 
 void TestFpscrReads() {
@@ -1382,6 +1436,7 @@ int main() {
         TestFloatingPointTransfers();
         TestFloatingPointMoves();
         TestFpscrWrites();
+        TestFpscrBits();
         TestFpscrReads();
         TestSingleWidening();
         TestQuantizationRegisters();

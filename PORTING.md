@@ -201,6 +201,12 @@ queue. Full runtime scheduling and device services are still needed.
   initialization flag, record system start time and mask interrupts. Stop at
   `0x801b0e2c` before performance-monitor setup. Test the already-initialized
   skip and epilogue separately; never claim they complete first-time startup.
+- [x] Compile FPSCR bit operations `mtfsb0`/`mtfsb1`, including record forms,
+  derived VX/FEX summaries and sticky FX on newly set exception causes.
+  Check all bit selectors, repeated writes, existing causes with FX cleared,
+  CR1, reserved encoding rejection and unchanged RAM/registers/host rounding.
+  Execute original `PPCSetFpNonIEEEMode` independently: NI is guest status,
+  not arithmetic behavior or a bypass of the pending OSInit dependencies.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic

@@ -384,6 +384,15 @@ std::string RecompileFunction(uint32_t address,
             break;
         case 63: {
             const uint32_t extendedOpcode = Bits(instruction, 1, 10);
+            if (extendedOpcode == 38 || extendedOpcode == 70) {
+                if (ra != 0 || rb != 0) {
+                    throw std::runtime_error("Invalid FPSCR bit instruction at " + Hex(pc) + ".");
+                }
+                output << "    ppc_write_fpscr_bit(state, " << Hex(0x80000000u >> rt)
+                       << "u, " << (extendedOpcode == 38 ? "true" : "false") << ");\n";
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
+            }
             if (extendedOpcode == 583) {
                 if (ra != 0 || rb != 0) {
                     throw std::runtime_error("Invalid mffs instruction at " + Hex(pc) + ".");

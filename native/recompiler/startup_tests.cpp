@@ -492,6 +492,32 @@ void TestOriginalFpscrAccessors(const DolImage& image) {
                  "stack guards and status bits across all rounding modes.\n";
 }
 
+void TestOriginalNonIeeeMode(const DolImage& image) {
+    auto state = image.CreateGameCubeState();
+    ppc_800032B0(state);
+    state.fpr.fill({UINT64_MAX, UINT64_MAX});
+    state.cr = 0x12345678u;
+    state.xer = 0xe0000000u;
+    state.lr = 0x801b0e64u;
+    const auto before = state.memory;
+    for (uint32_t flags : {0u, 1u, 2u, 3u, 4u, 0x80000003u}) {
+        state.fpscr = flags;
+        for (unsigned repeat = 0; repeat < 2; ++repeat) {
+            ppc_801B0B24(state);
+            Require(state.fpscr == (flags | 4u) && state.pc == state.lr &&
+                        state.cr == 0x12345678u && state.xer == 0xe0000000u &&
+                        state.gpr[1] == 0x8035cfa0u && state.memory == before &&
+                        std::all_of(state.fpr.begin(), state.fpr.end(),
+                            [](const PpcFpr& fpr) {
+                                return fpr == PpcFpr{UINT64_MAX, UINT64_MAX};
+                            }),
+                    "Original non-IEEE wrapper did not set only NI or preserve ABI.");
+        }
+    }
+    std::cout << "Original PPCSetFpNonIEEEMode sets guest FPSCR NI and returns; "
+                 "rounding bits, FPRs, RAM and flags preserved. No arithmetic implied.\n";
+}
+
 void TestArgumentRelocation(const DolImage& image) {
     for (unsigned path = 0; path < 4; ++path) {
         auto state = image.CreateGameCubeState();
@@ -856,6 +882,7 @@ int main(int argc, char** argv) {
         TestOriginalCacheControls(image);
         TestOriginalFprSaveRestore(image);
         TestOriginalFpscrAccessors(image);
+        TestOriginalNonIeeeMode(image);
         TestStartupHelpers(image);
         TestArgumentRelocation(image);
         TestMemoryFunctions(image);

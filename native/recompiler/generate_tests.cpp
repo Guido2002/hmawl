@@ -321,6 +321,7 @@ int main(int argc, char** argv) {
                 {0x801d3348u, 0x28},
                 {0x801b0de0u, 0x4c}, {0x801b119cu, 0x1c},
                 {0x801b7bf0u, 0x18}, {0x801b7c10u, 0x64},
+                {0x801b0b24u, 8},
                 {0x801b0a9cu, 0x20}, {0x801b0abcu, 0x28},
                 {0x80235e00u, 0x4c}, {0x80235e4cu, 0x4c}}) {
                 generated += RecompileFunction(range.first,
@@ -457,6 +458,22 @@ int main(int argc, char** argv) {
             output << "};\n";
             Emit(output, 0x7000u, {(63u << 26) | (3u << 21) | (583u << 1)});
             Emit(output, 0x7010u, {(63u << 26) | (3u << 21) | (583u << 1) | 1u});
+            unsigned fpscrBit = 0;
+            for (unsigned set = 0; set < 2; ++set) {
+                for (unsigned bit = 0; bit < 32; ++bit) {
+                    for (unsigned record = 0; record < 2; ++record) {
+                        Emit(output, 0xa000u + fpscrBit++ * 4u, {
+                            (63u << 26) | (bit << 21) |
+                            ((set ? 38u : 70u) << 1) | record});
+                    }
+                }
+            }
+            output << "static void (*const FpscrBitTestFunctions[])(PpcState&) = {\n";
+            for (unsigned i = 0; i < fpscrBit; ++i) {
+                output << "    ppc_0000" << std::hex << std::uppercase
+                       << (0xa000u + i * 4u) << ",\n" << std::dec;
+            }
+            output << "};\n";
             for (unsigned i = 0; i < 8; ++i) {
                 Emit(output, 0x8000u + i * 16u, {
                     XForm(3, 16u + i, 28, 467), XForm(4, 16u + i, 28, 339)});

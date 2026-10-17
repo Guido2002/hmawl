@@ -318,6 +318,14 @@ inline void ppc_write_fpscr(PpcState& state, uint32_t value, uint32_t mask) {
     state.fpscr = result;
 }
 
+inline void ppc_write_fpscr_bit(PpcState& state, uint32_t mask, bool set) {
+    uint32_t value = set ? state.fpscr | mask : state.fpscr & ~mask;
+    if (set && (mask & 0x1ff80700u) != 0 && (state.fpscr & mask) == 0) {
+        value |= 0x80000000u;
+    }
+    ppc_write_fpscr(state, value, UINT32_MAX);
+}
+
 inline bool ppc_branch_condition(PpcState& state, uint32_t bo, uint32_t bi) {
     const bool ctrCondition = (bo & 0x04u) != 0 ||
                               (((--state.ctr != 0) ? 1u : 0u) !=
