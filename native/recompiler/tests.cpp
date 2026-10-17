@@ -322,6 +322,8 @@ void TestInvalidFloatingPointInstructions() {
         }
     }
     const std::vector<uint32_t> instructions = {
+        (49u << 26) | (3u << 21),
+        (53u << 26) | (3u << 21),
         (51u << 26) | (3u << 21),
         (55u << 26) | (3u << 21),
         (31u << 26) | (3u << 21) | (4u << 11) | (631u << 1),

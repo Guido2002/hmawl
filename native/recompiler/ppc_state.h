@@ -454,6 +454,21 @@ inline uint64_t ppc_widen_single_bits(uint32_t bits) {
            (static_cast<uint64_t>(fraction & 0x7fffffu) << 29);
 }
 
+inline uint32_t ppc_narrow_single_bits(uint64_t bits) {
+    const uint32_t sign = static_cast<uint32_t>(bits >> 32) & 0x80000000u;
+    const uint32_t exponent = static_cast<uint32_t>((bits >> 52) & 0x7ffu);
+    if (exponent > 896 || (bits & UINT64_C(0x7fffffffffffffff)) == 0) {
+        return (static_cast<uint32_t>(bits >> 32) & 0xc0000000u) |
+               (static_cast<uint32_t>(bits >> 29) & 0x3fffffffu);
+    }
+    if (exponent >= 874) {
+        const uint32_t significand = 0x80000000u |
+            static_cast<uint32_t>((bits & UINT64_C(0x000fffffffffffff)) >> 21);
+        return sign | (significand >> (905u - exponent));
+    }
+    return sign;
+}
+
 inline void ppc_write_u64(PpcState& state, uint32_t address, uint64_t value) {
     const size_t offset = ppc_memory_offset(state, address, sizeof(uint64_t));
     for (unsigned i = 0; i < 8; ++i) {

@@ -39,8 +39,9 @@ runner completes original memory protection, kernel reports and arena clearing,
 then delivers real SI completions through the original external exception vector,
 dispatcher, callbacks and context restoration. With the verified RVZ bound, DVDInit,
 drive inquiry and the original DI completion chain also run: **original OSInit
-returns to `0x80003268` in the Windows runner**. Game initialization, the main loop
-and a rendered game frame remain unachieved.
+returns to `0x80003268` in the Windows runner**. All 93 original DOL constructors
+and `__init_user` also return, reaching original game `main`. Its first initialization
+call at `0x8000AD40`, the main loop and a rendered game frame remain unfinished.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
 ## Phases and completion criteria
@@ -509,6 +510,16 @@ queue. Full runtime scheduling and device services are still needed.
   `0x8035CF98`, with all five external exceptions restored, original inquiry
   command status zero and version callback result `0x8001`. All FST bytes survive.
   This proves original OSInit return, not game initialization or a rendered frame.
+- [x] Execute all 93 original DOL constructors, return from `__init_user` and enter
+  original game `main` in the production runner. Build-time bounded traversal
+  compiles direct constructor dependencies; explicitly bind the observed original
+  virtual/array constructors. Unsupported instructions remain explicit untranslated
+  boundaries, never runtime interpretation or no-ops. Add single loads/stores
+  with raw-bit conversion for original initialization. Block observation
+  records persistent milestones without modifying guest state. Real-disc tests
+  verify all constructor targets/order, stack/SDA and nonvolatile GPR/FPR restoration,
+  identical traced/untraced state, and damaged-code rejection. Production stops at
+  `0x8000AD40`, LR `0x8000AA6C`: game initialization has not returned.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

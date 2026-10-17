@@ -55,9 +55,9 @@ void EmitRecordResult(std::ostringstream& output, bool record,
     }
 }
 
-void EmitDoubleTransfer(std::ostringstream& output, uint32_t pc, uint32_t reg,
+void EmitFloatingTransfer(std::ostringstream& output, uint32_t pc, uint32_t reg,
                         uint32_t base, const std::string& address, bool load,
-                        bool update) {
+                        bool update, bool single = false) {
     if (update && base == 0) {
         throw std::runtime_error("Invalid floating-point update-form instruction at " +
                                  Hex(pc) + ".");
@@ -68,9 +68,16 @@ void EmitDoubleTransfer(std::ostringstream& output, uint32_t pc, uint32_t reg,
            << "        throw std::runtime_error(\"Unaligned PowerPC floating-point transfer at "
            << Hex(pc) << ".\");\n"
            << "    }\n";
-    if (load) {
+    if (load && single) {
+        output << "    const uint64_t value = ppc_widen_single_bits(ppc_read_u32(state, "
+               << ea << "));\n"
+               << "    state.fpr[" << reg << "] = {value, value};\n";
+    } else if (load) {
         output << "    state.fpr[" << reg << "].ps0 = ppc_read_u64(state, "
                << ea << ");\n";
+    } else if (single) {
+        output << "    ppc_write_u32(state, " << ea << ", ppc_narrow_single_bits(state.fpr["
+               << reg << "].ps0));\n";
     } else {
         output << "    ppc_write_u64(state, " << ea << ", state.fpr[" << reg
                << "].ps0);\n";
@@ -362,7 +369,7 @@ std::string RecompileFunction(uint32_t address,
             } else {
                 if (ra != 0 || (extendedOpcode != 40 && extendedOpcode != 72 &&
                                 extendedOpcode != 136 && extendedOpcode != 264)) {
-                    throw std::runtime_error("Unsupported PowerPC instruction " +
+                    throw UnsupportedPpcInstruction("Unsupported PowerPC instruction " +
                                              Hex(instruction) + " at " + Hex(pc) + ".");
                 }
                 for (unsigned lane = 0; lane < 2; ++lane) {
@@ -381,13 +388,18 @@ std::string RecompileFunction(uint32_t address,
             EmitFpscrRecord(output, (instruction & 1u) != 0);
             break;
         }
+        case 48:
+        case 49:
         case 50:
         case 51:
+        case 52:
+        case 53:
         case 54:
         case 55:
-            EmitDoubleTransfer(output, pc, rt, ra,
+            EmitFloatingTransfer(output, pc, rt, ra,
                 EffectiveAddress(ra, SignExtend(immediate, 16)),
-                opcode == 50 || opcode == 51, opcode == 51 || opcode == 55);
+                opcode <= 51, opcode == 49 || opcode == 51 || opcode == 53 || opcode == 55,
+                opcode == 48 || opcode == 49 || opcode == 52 || opcode == 53);
             break;
         case 63: {
             const uint32_t extendedOpcode = Bits(instruction, 1, 10);
@@ -438,7 +450,7 @@ std::string RecompileFunction(uint32_t address,
             }
             if (ra != 0 || (extendedOpcode != 40 && extendedOpcode != 72 &&
                             extendedOpcode != 136 && extendedOpcode != 264)) {
-                throw std::runtime_error("Unsupported PowerPC instruction " +
+                throw UnsupportedPpcInstruction("Unsupported PowerPC instruction " +
                                          Hex(instruction) + " at " + Hex(pc) + ".");
             }
             output << "    state.fpr[" << rt << "].ps0 = state.fpr[" << rb << "].ps0";
@@ -579,7 +591,7 @@ std::string RecompileFunction(uint32_t address,
                 break;
             }
             if (rb != 0 || (extendedOpcode != 16 && extendedOpcode != 528)) {
-                throw std::runtime_error("Unsupported PowerPC instruction " +
+                throw UnsupportedPpcInstruction("Unsupported PowerPC instruction " +
                                          Hex(instruction) + " at " + Hex(pc) +
                                          ".");
             }
@@ -757,7 +769,7 @@ std::string RecompileFunction(uint32_t address,
                 }
                 const std::string base =
                     ra == 0 ? "0u" : "state.gpr[" + std::to_string(ra) + "]";
-                EmitDoubleTransfer(output, pc, rt, ra,
+                EmitFloatingTransfer(output, pc, rt, ra,
                     base + " + state.gpr[" + std::to_string(rb) + "]",
                     extendedOpcode == 599 || extendedOpcode == 631,
                     extendedOpcode == 631 || extendedOpcode == 759);
@@ -976,7 +988,7 @@ std::string RecompileFunction(uint32_t address,
                 break;
             }
             default:
-                throw std::runtime_error("Unsupported PowerPC instruction " +
+                throw UnsupportedPpcInstruction("Unsupported PowerPC instruction " +
                                          Hex(instruction) + " at " + Hex(pc) +
                                          ".");
             }
@@ -988,7 +1000,7 @@ std::string RecompileFunction(uint32_t address,
             break;
         }
         default:
-            throw std::runtime_error("Unsupported PowerPC instruction " +
+            throw UnsupportedPpcInstruction("Unsupported PowerPC instruction " +
                                      Hex(instruction) + " at " + Hex(pc) +
                                      ".");
         }

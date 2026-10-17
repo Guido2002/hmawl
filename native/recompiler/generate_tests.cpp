@@ -495,6 +495,13 @@ int main(int argc, char** argv) {
             Emit(output, 0x50b0, {XForm(3, 0, 4, 727)});
             Emit(output, 0x50c0, {XForm(3, 3, 3, 631)});
             Emit(output, 0x50d0, {XForm(3, 3, 3, 759)});
+            unsigned singleTransfer = 0;
+            for (unsigned opcode : {48u, 49u, 52u, 53u}) {
+                Emit(output, 0xb700u + singleTransfer++ * 16u,
+                    {(opcode << 26) | (3u << 21) | (3u << 16) | 0xfffcu});
+            }
+            Emit(output, 0xb740u, {(48u << 26) | (3u << 21) | 0x100u});
+            Emit(output, 0xb750u, {(52u << 26) | (3u << 21) | 0x100u});
             unsigned unary = 0;
             for (unsigned opcode : {72u, 40u, 264u, 136u}) {
                 for (bool record : {false, true}) {

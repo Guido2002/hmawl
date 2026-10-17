@@ -127,7 +127,8 @@ bool NativeDispatcher::Contains(uint32_t address) const {
 }
 
 void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAddress,
-                           size_t& remaining, size_t depth, size_t maxDepth) {
+                           size_t& remaining, size_t depth, size_t maxDepth,
+                           const std::function<void(uint32_t)>& onBlock) {
     if (depth > maxDepth) {
         throw std::runtime_error("Native guest call-depth limit exceeded.");
     }
@@ -146,12 +147,14 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
         }
         CheckCode(state, entry->second.translation);
         --remaining;
+        if (onBlock) onBlock(state.pc);
         entry->second.translation.function(state);
     } while (state.pc != returnAddress);
 }
 
 void NativeDispatcher::Execute(PpcState& state, uint32_t address,
-                               size_t maxFunctionEntries, size_t maxCallDepth) {
+                               size_t maxFunctionEntries, size_t maxCallDepth,
+                               const std::function<void(uint32_t)>& onBlock) {
     if (executing_ || maxFunctionEntries == 0 || maxCallDepth == 0 ||
         (address & 3u) != 0 || (state.lr & 3u) != 0) {
         throw std::runtime_error("Invalid or reentrant native execution request.");
@@ -162,14 +165,14 @@ void NativeDispatcher::Execute(PpcState& state, uint32_t address,
     size_t depth = 1;
     size_t remaining = maxFunctionEntries;
     try {
-        state.callException = [this, &state, &remaining, &depth, maxCallDepth](
+        state.callException = [this, &state, &remaining, &depth, maxCallDepth, &onBlock](
                                   uint32_t target, uint32_t resume, PpcState& guest) {
             if (&guest != &state || (target & 3u) != 0 || (resume & 3u) != 0) {
                 throw std::runtime_error("Invalid native guest exception context or address.");
             }
             ++depth;
             try {
-                Run(guest, target, resume, remaining, depth, maxCallDepth);
+                Run(guest, target, resume, remaining, depth, maxCallDepth, onBlock);
             } catch (const PpcInterruptContextReturn&) {
                 if (target != 0x500u || !guest.externalInterrupt ||
                     guest.externalInterrupt->active || guest.pc != resume) {
@@ -182,21 +185,21 @@ void NativeDispatcher::Execute(PpcState& state, uint32_t address,
             }
             --depth;
         };
-        state.callGuest = [this, &state, &remaining, &depth, maxCallDepth](
+        state.callGuest = [this, &state, &remaining, &depth, maxCallDepth, &onBlock](
                               uint32_t target, PpcState& guest) {
             if (&guest != &state || (target & 3u) != 0 || (guest.lr & 3u) != 0) {
                 throw std::runtime_error("Invalid native guest call context or address.");
             }
             ++depth;
             try {
-                Run(guest, target, guest.lr, remaining, depth, maxCallDepth);
+                Run(guest, target, guest.lr, remaining, depth, maxCallDepth, onBlock);
             } catch (...) {
                 --depth;
                 throw;
             }
             --depth;
         };
-        Run(state, address, state.lr, remaining, depth, maxCallDepth);
+        Run(state, address, state.lr, remaining, depth, maxCallDepth, onBlock);
     } catch (...) {
         state.callGuest = std::move(previous);
         state.callException = std::move(previousException);

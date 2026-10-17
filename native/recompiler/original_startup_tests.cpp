@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -497,8 +498,13 @@ int main(int argc, char** argv) {
             discState.writeConsole = [&](const std::string& text) { discConsole += text; };
             const auto discResult = RunOriginalStartup(dispatcher, discState);
             std::cout << DescribeOriginalStartupStop(discResult) << '\n';
-            Require(discResult.pc == 0x80003268u && discResult.lr == 0x80003268u &&
-                        discResult.stack == 0x8035cf98u && discState.discInterface->completedTransfers == 1 &&
+            Require(discResult.stop == OriginalStartupStop::Dependency &&
+                        discResult.pc == 0x8000ad40u && discResult.lr == 0x8000aa6cu &&
+                        discResult.stack == 0x8035cf78u && discResult.osInitReturned &&
+                        discResult.constructorsReturned == 93 && discResult.userInitReturned &&
+                        discResult.gameMainEntered && !discState.callGuest && !discState.callException &&
+                        discResult.reason.find("No native translation registered at 0x8000AD40") != std::string::npos &&
+                        discState.discInterface->completedTransfers == 1 &&
                         discState.discInterface->status == 0x2au &&
                         discState.discInterface->dmaLength == 0 &&
                         discState.discInterface->control == 2 &&
@@ -514,7 +520,7 @@ int main(int argc, char** argv) {
                         discConsole.find("SDK - DVD") != std::string::npos &&
                         DescribeOriginalStartupStop(discResult).find("OSInit returned") != std::string::npos &&
                         std::equal(fst.begin(), fst.end(), discState.memory.begin() + fstOffset),
-                    "Original OSInit did not return after real DVD DMA, original callbacks and protected FST.");
+                    "Original entry did not reach game main through all constructors, real DVD DMA and protected FST.");
             for (uint32_t address = 0x80317a40u; address < 0x80317a60u; ++address) {
                 Require(ppc_read_u8(discState, address) == (address == 0x80317a43u ? 1 : 0),
                         "Native virtual-drive identity differs or claims console firmware.");
@@ -522,6 +528,71 @@ int main(int argc, char** argv) {
             Require(discState.decrementer->armed && discState.decrementer->writes == 1 &&
                         ticks < discState.decrementer->deadline,
                     "Original DVD alarm did not program an actual future decrementer deadline.");
+
+            auto traced = CreateOriginalStartupState(image);
+            InstallOriginalStartupDisc(traced, disc);
+            uint64_t tracedTicks = 1000000;
+            traced.readTimeBase = [&] { return tracedTicks += 1000; };
+            std::string tracedConsole;
+            traced.writeConsole = [&](const std::string& text) { tracedConsole += text; };
+            std::vector<uint32_t> constructors;
+            for (uint32_t offset = 0; offset < 93 * 4; offset += 4) {
+                constructors.push_back(ppc_read_u32(traced, 0x8023dd80u + offset));
+            }
+            Require(ppc_read_u32(traced, 0x8023dd80u + 93 * 4) == 0,
+                    "Original constructor table does not have exactly 93 entries.");
+            size_t entered = 0, returned = 0;
+            std::array<uint32_t, 32> savedRegisters{};
+            std::array<uint64_t, 18> savedFprs{};
+            const auto observe = [&](uint32_t pc) {
+                if (pc == 0x801b7cc0u) {
+                    Require(entered == returned && entered < constructors.size() &&
+                                traced.gpr[12] == constructors[entered] &&
+                                traced.gpr[31] == 0x8023dd80u + entered * 4,
+                            "Original constructors were skipped, reordered or replayed.");
+                    std::copy(std::begin(traced.gpr), std::end(traced.gpr), savedRegisters.begin());
+                    for (unsigned reg = 14; reg < 32; ++reg) savedFprs[reg - 14] = traced.fpr[reg].ps0;
+                    ++entered;
+                } else if (pc == 0x801b7cc8u) {
+                    Require(entered == returned + 1 && traced.gpr[1] == savedRegisters[1] &&
+                                traced.gpr[2] == savedRegisters[2] && traced.gpr[13] == savedRegisters[13],
+                            "Original constructor did not restore its stack or SDA registers.");
+                    for (unsigned reg = 14; reg < 32; ++reg) {
+                        Require(traced.gpr[reg] == savedRegisters[reg] &&
+                                    traced.fpr[reg].ps0 == savedFprs[reg - 14],
+                                "Original constructor corrupted nonvolatile ABI registers.");
+                    }
+                    ++returned;
+                } else if (pc == 0x800032a0u || pc == 0x8000aa54u) {
+                    Require(entered == 93 && returned == 93 && traced.gpr[1] == 0x8035cf98u,
+                            "User initialization/game entry preceded complete constructor return.");
+                }
+            };
+            bool reachedBoundary = false;
+            try {
+                dispatcher.Execute(traced, image.entryPoint(), 1000000, 128, observe);
+            } catch (const std::runtime_error& error) {
+                reachedBoundary = std::string(error.what()).find(
+                    "No native translation registered at 0x8000AD40") != std::string::npos;
+            }
+            Require(reachedBoundary && entered == 93 && returned == 93 &&
+                        traced.memory == discState.memory && tracedConsole == discConsole &&
+                        tracedTicks == ticks && traced.pc == discState.pc && traced.lr == discState.lr &&
+                        std::equal(std::begin(traced.gpr), std::end(traced.gpr), std::begin(discState.gpr)) &&
+                        traced.fpr == discState.fpr && traced.fpscr == discState.fpscr &&
+                        !traced.callGuest && !traced.callException,
+                    "Observed startup changed original initialization, memory, registers or callback cleanup.");
+            auto damagedConstructor = CreateOriginalStartupState(image);
+            InstallOriginalStartupDisc(damagedConstructor, disc);
+            damagedConstructor.writeConsole = [](const std::string&) {};
+            ppc_write_u32(damagedConstructor, constructors[11], 0);
+            const auto damagedResult = RunOriginalStartup(dispatcher, damagedConstructor);
+            Require(damagedResult.stop == OriginalStartupStop::Dependency &&
+                        damagedResult.osInitReturned && damagedResult.constructorsReturned == 11 &&
+                        !damagedResult.userInitReturned && !damagedResult.gameMainEntered &&
+                        damagedResult.reason.find("code mismatch") != std::string::npos &&
+                        !damagedConstructor.callGuest && !damagedConstructor.callException,
+                    "Damaged constructor code bypassed integrity checks or reported a false startup milestone.");
             auto absentBackend = CreateOriginalStartupState(image);
             InstallOriginalStartupDisc(absentBackend, disc);
             absentBackend.transferDisc = {};

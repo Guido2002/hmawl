@@ -198,9 +198,21 @@ InquiryCallback. DEC retains a deadline derived from the native time base;
 an expired timer fails explicitly because timer-exception delivery is not yet
 implemented. Original completion cancels the DVD alarm; no timeout is ignored.
 **OSInit returns to its original caller at PC=LR `0x80003268`, SP `0x8035CF98`.**
-The runner's next dependency stop is untranslated post-OSInit entry code, with
+The original post-OSInit entry continues through all **93 DOL C++ constructors**,
+`__init_user` returns, and original game `main` is entered. Static build-time
+traversal compiles supported direct dependencies and explicit original indirect
+constructor targets; unsupported instruction paths remain unregistered, with
+build diagnostics and explicit runtime failure if reached. No instruction decoder
+runs at runtime. Persistent milestones observe verified compiled block entry,
+without replacing original instructions or changing guest registers.
+The runner's next dependency stop is the first game-initialization call at
+`PC=0x8000AD40`, LR `0x8000AA6C`, SP `0x8035CF78`, with
 original inquiry callback result `0x8001`, five external exceptions returned and
 the entire real FST intact.
+Real-disc tests verify every constructor in original table order and preservation
+of its stack, SDA and nonvolatile integer/floating registers. Traced and untraced
+startup produce identical RAM, CPU state, output and sampled time; damaged
+constructor words fail integrity validation without claiming later milestones.
 The game main loop, GX renderer,
 scheduled game threads, audio, input and saves have not run.
 

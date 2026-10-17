@@ -85,8 +85,12 @@ firmware/date; its checked inquiry/read DMA does not claim physical-drive identi
 **Original OSInit now returns in the runner to `PC=LR=0x80003268`.**
 Without `--rvz`, missing DI hardware remains an explicit dependency failure.
 Expired decrementer delivery, general DSP tasks and audio playback remain unfinished.
-The runner still stops with **exit code 3** at the untranslated post-OSInit code;
-this is not game initialization or rendering. RTC/ROM, SRAM writes, AD16 and connected EXI devices
+All **93 original DOL C++ constructors now return**, followed by `__init_user`;
+the original game `main` is entered in the Windows runner. Tests verify constructor
+order, nonvolatile registers and exact observer/non-observer execution equivalence.
+The runner stops with **exit code 3** at its first game-initialization call,
+`PC=0x8000AD40`, `LR=0x8000AA6C`. The game main loop and rendering have not run.
+RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.
 The CLI creates an English/NTSC/stereo `native-console.sram` beside the input DOL
 only if absent, without BIOS data. `--sram <path>` selects an existing 64-byte

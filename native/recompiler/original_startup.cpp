@@ -129,19 +129,33 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
         blockBudget == 0 || maxCallDepth == 0) {
         throw std::runtime_error("Original startup requires a fresh entry state and nonzero execution limits.");
     }
+    OriginalStartupResult result{};
+    const auto finish = [&](OriginalStartupStop stop, const std::string& reason) {
+        result.stop = stop;
+        result.pc = state.pc;
+        result.lr = state.lr;
+        result.stack = state.gpr[1];
+        result.argument3 = state.gpr[3];
+        result.argument4 = state.gpr[4];
+        result.argument5 = state.gpr[5];
+        result.reason = reason;
+        return result;
+    };
     try {
-        dispatcher.Execute(state, state.pc, blockBudget, maxCallDepth);
+        dispatcher.Execute(state, state.pc, blockBudget, maxCallDepth, [&](uint32_t pc) {
+            if (pc == 0x80003268u) result.osInitReturned = true;
+            if (pc == 0x801b7cc8u) ++result.constructorsReturned;
+            if (pc == 0x800032a0u) result.userInitReturned = true;
+            if (pc == 0x8000aa54u) result.gameMainEntered = true;
+        });
     } catch (const std::exception& error) {
         const std::string reason = error.what();
         const bool budget = reason.find("budget exceeded") != std::string::npos ||
                             reason.find("call-depth limit exceeded") != std::string::npos;
-        return {budget ? OriginalStartupStop::Budget : OriginalStartupStop::Dependency,
-                state.pc, state.lr, state.gpr[1], state.gpr[3], state.gpr[4],
-                state.gpr[5], reason};
+        return finish(budget ? OriginalStartupStop::Budget : OriginalStartupStop::Dependency, reason);
     }
-    return {OriginalStartupStop::UnexpectedReturn, state.pc, state.lr, state.gpr[1],
-            state.gpr[3], state.gpr[4], state.gpr[5],
-            "Original entry returned unexpectedly; no game main loop is available."};
+    return finish(OriginalStartupStop::UnexpectedReturn,
+                  "Original entry returned unexpectedly; no game main loop is available.");
 }
 
 std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
@@ -154,8 +168,12 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
          << " R4=0x" << std::setw(8) << result.argument4
          << " R5=0x" << std::setw(8) << result.argument5 << '\n'
          << result.reason << '\n'
-         << (result.pc == 0x80003268u ?
-             "Original OSInit returned to __start. " : "OSInit is incomplete. ")
-         << "This is NOT a game boot; no game main loop or renderer ran.";
+         << (result.osInitReturned ? "Original OSInit returned to __start. " : "OSInit is incomplete. ");
+    if (result.constructorsReturned != 0) {
+        text << std::dec << result.constructorsReturned << " original C++ constructors returned. ";
+    }
+    if (result.userInitReturned) text << "Original __init_user returned. ";
+    if (result.gameMainEntered) text << "Original game main entered. ";
+    text << "This is NOT a game boot; no game main loop or renderer ran.";
     return text.str();
 }

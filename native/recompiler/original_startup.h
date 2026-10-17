@@ -19,6 +19,10 @@ struct OriginalStartupResult {
     uint32_t argument4;
     uint32_t argument5;
     std::string reason;
+    bool osInitReturned = false;
+    bool userInitReturned = false;
+    bool gameMainEntered = false;
+    uint32_t constructorsReturned = 0;
 };
 
 DolImage LoadOriginalUsDol(const std::filesystem::path& path);

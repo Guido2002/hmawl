@@ -3,6 +3,7 @@
 
 #include "rel_image.h"
 
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -39,7 +40,8 @@ public:
 
     // Runs compiled functions only. The caller supplies LR as the return sentinel.
     void Execute(PpcState& state, uint32_t address,
-                 size_t maxFunctionEntries = 100000, size_t maxCallDepth = 256);
+                 size_t maxFunctionEntries = 100000, size_t maxCallDepth = 256,
+                 const std::function<void(uint32_t)>& onBlock = {});
 
 private:
     struct Entry {
@@ -48,7 +50,8 @@ private:
     };
     void CheckCode(const PpcState& state, const NativeTranslation& translation) const;
     void Run(PpcState& state, uint32_t address, uint32_t returnAddress,
-             size_t& remaining, size_t depth, size_t maxDepth);
+             size_t& remaining, size_t depth, size_t maxDepth,
+             const std::function<void(uint32_t)>& onBlock);
     std::map<uint32_t, Entry> entries_;
     bool executing_ = false;
 };

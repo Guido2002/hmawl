@@ -278,6 +278,74 @@ void TestFloatingPointTransfers() {
     }
 }
 
+void TestSingleTransfers() {
+    using Transfer = void (*)(PpcState&);
+    const Transfer transfers[] = {ppc_0000B700, ppc_0000B710, ppc_0000B720, ppc_0000B730};
+    for (uint32_t bits : {0u, 0x80000000u, 1u, 0x807fffffu, 0x00800000u, 0x3f800000u,
+                          0xbf800000u, 0x7f7fffffu, 0x7f800000u, 0xff800000u,
+                          0x7fc12345u, 0xff812345u}) {
+        for (unsigned operation = 0; operation < 4; ++operation) {
+            PpcState state;
+            state.memoryMap = PpcMemoryMap::GameCubeRam;
+            state.memory.resize(kGameCubeRamSize, 0xcc);
+            state.gpr[3] = 0xc0000104u;
+            state.fpr[3] = {ppc_widen_single_bits(bits), UINT64_C(0xdeadbeef12345678)};
+            state.fpscr = 0x12345678u;
+            state.cr = 0x87654321u;
+            ppc_write_u32(state, 0x80000100u, operation < 2 ? bits : 0xa5a5a5a5u);
+            const auto before = state;
+            transfers[operation](state);
+            Require(state.gpr[3] == (operation % 2 ? 0xc0000100u : before.gpr[3]) &&
+                        state.fpscr == before.fpscr && state.cr == before.cr &&
+                        state.fpr[3].ps0 == ppc_widen_single_bits(bits) &&
+                        state.fpr[3].ps1 == (operation < 2 ? ppc_widen_single_bits(bits) :
+                                                          before.fpr[3].ps1) &&
+                        ppc_read_u32(state, 0x100u) == bits,
+                    "Compiled single transfer lost raw bits, paired lane, alias, update or FPSCR state.");
+            auto expected = before.memory;
+            const auto offset = ppc_memory_offset(state, 0x100u, 4);
+            for (unsigned byte = 0; byte < 4; ++byte) {
+                expected[offset + byte] = static_cast<uint8_t>(bits >> (24 - byte * 8));
+            }
+            Require(state.memory == expected, "Compiled single transfer wrote outside its four-byte destination.");
+        }
+    }
+    for (unsigned operation = 0; operation < 4; ++operation) {
+        for (uint32_t base : {0x80000105u, 0x81800004u, 0xfffffffcu}) {
+            PpcState state;
+            state.memoryMap = PpcMemoryMap::GameCubeRam;
+            state.memory.resize(kGameCubeRamSize, 0xcc);
+            state.gpr[3] = base;
+            state.fpr[3] = {UINT64_C(0x3ff0000000000000), UINT64_C(0x4000000000000000)};
+            const auto before = state;
+            bool failed = false;
+            try {
+                transfers[operation](state);
+            } catch (const std::runtime_error&) {
+                failed = true;
+            } catch (const std::out_of_range&) {
+                failed = true;
+            }
+            Require(failed && state.gpr[3] == before.gpr[3] && state.fpr == before.fpr &&
+                        state.memory == before.memory && state.fpscr == before.fpscr,
+                    "Invalid single transfer committed an update, FPR or partial memory write.");
+        }
+    }
+    PpcState absolute;
+    absolute.memory.resize(0x108u, 0xa5);
+    absolute.gpr[0] = 0xffffffffu;
+    ppc_write_u32(absolute, 0x100u, 0x80000001u);
+    ppc_0000B740(absolute);
+    Require(absolute.fpr[3].ps0 == UINT64_C(0xb6a0000000000000) &&
+                absolute.fpr[3].ps1 == absolute.fpr[3].ps0,
+            "Absolute single load used GPR0 or incorrectly widened a signed subnormal.");
+    absolute.fpr[3].ps0 = UINT64_C(0x3ff000001fffffff);
+    ppc_0000B750(absolute);
+    Require(ppc_read_u32(absolute, 0x100u) == 0x3f800000u &&
+                ppc_read_u32(absolute, 0x104u) == 0xa5a5a5a5u,
+            "Single store did not truncate the mantissa or wrote eight bytes.");
+}
+
 void TestFloatingPointMoves() {
     using Function = void (*)(PpcState&);
     const Function functions[] = {
@@ -3359,9 +3427,11 @@ void TestNativeDispatch() {
         state.lr = 0x4ff0;
         state.ctr = 0x4020;
         state.gpr[3] = 10;
-        dispatcher.Execute(state, entry, 3, 2);
+        std::vector<uint32_t> visited;
+        dispatcher.Execute(state, entry, 3, 2, [&](uint32_t pc) { visited.push_back(pc); });
         Require(state.gpr[3] == (entry == 0x4000 ? 17u : 16u) &&
-                    state.pc == 0x4ff0 && state.lr == 0x4ff0,
+                    state.pc == 0x4ff0 && state.lr == 0x4ff0 &&
+                    visited == std::vector<uint32_t>{entry, 0x4020u, 0x4040u},
                 "Compiled direct/indirect call, tail branch or return failed.");
     }
     Require(previousCalls == 0, "Native dispatcher used an unrelated callback.");
@@ -3432,6 +3502,14 @@ void TestNativeDispatch() {
     nativeTestAction = {};
     dispatcher.Unregister(2);
     state.callGuest = {};
+    state.gpr[3] = 17;
+    Reject([&] {
+        dispatcher.Execute(state, 0x4040, 1, 1, [](uint32_t) {
+            throw std::runtime_error("block observer failed");
+        });
+    }, "block observer failed");
+    Require(!state.callGuest && !state.callException && state.gpr[3] == 17,
+            "Throwing block observer executed code or leaked dispatcher callbacks.");
     dispatcher.Execute(state, 0x4040);
     Require(!state.callGuest, "Native dispatcher did not restore an empty callback.");
 }
@@ -3443,6 +3521,7 @@ int main() {
         TestLogicalRegisters();
         TestYieldingBranchesAndPrecisePc();
         TestFloatingPointTransfers();
+        TestSingleTransfers();
         TestFloatingPointMoves();
         TestFpscrWrites();
         TestFpscrBits();

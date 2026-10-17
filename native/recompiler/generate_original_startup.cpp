@@ -35,6 +35,60 @@ uint32_t BranchTarget(uint32_t address, uint32_t word) {
     return (word & 2u) ? displacement : address + displacement;
 }
 
+void AddOriginalConstructors(const DolImage& image, const PpcState& source,
+                             std::map<uint32_t, uint32_t>& instructions,
+                             std::set<uint32_t>& leaders) {
+    std::vector<uint32_t> pending;
+    bool terminated = false;
+    for (uint32_t offset = 0; offset < 0x180u; offset += 4) {
+        const auto target = ppc_read_u32(source, 0x8023dd80u + offset);
+        if (target == 0) {
+            terminated = true;
+        } else {
+            if (terminated) throw std::runtime_error("Original constructor table has data after its terminator.");
+            leaders.insert(target);
+            pending.push_back(target);
+        }
+    }
+    if (!terminated || pending.size() != 93) {
+        throw std::runtime_error("Original USA constructor table differs from its bounded native profile.");
+    }
+    // Original virtual and array-construction calls do not encode their targets in a branch.
+    for (uint32_t target : {0x80199eecu, 0x8001b920u, 0x80022790u, 0x800226f0u,
+                            0x8002b80cu, 0x8002f27cu, 0x8002f100u, 0x8002efbcu,
+                            0x80179ee8u, 0x80179c90u, 0x801059a4u}) {
+        leaders.insert(target);
+        pending.push_back(target);
+    }
+    std::set<uint32_t> visited;
+    for (size_t index = 0; index < pending.size(); ++index) {
+        const auto address = pending[index];
+        if (!visited.insert(address).second) continue;
+        if (visited.size() > 50000) throw std::runtime_error("Original constructor compilation exceeds its code bound.");
+        const auto word = image.ReadWords(address, 4).front();
+        try {
+            RecompileFunction(address, {word}, {true, true});
+        } catch (const UnsupportedPpcInstruction& error) {
+            std::cout << "Constructor dependency remains untranslated: " << error.what() << '\n';
+            continue;
+        }
+        instructions.emplace(address, word);
+        const auto opcode = word >> 26;
+        const auto extended = (word >> 1) & 1023u;
+        if (opcode == 16 || opcode == 18) {
+            pending.push_back(BranchTarget(address, word));
+            if (opcode == 16 || (word & 1u) != 0) pending.push_back(address + 4);
+        } else if (opcode == 19 && (extended == 16 || extended == 528)) {
+            if ((word & 1u) != 0 || ((word >> 21) & 20u) != 20u) pending.push_back(address + 4);
+        } else {
+            if (opcode == 17 || (opcode == 19 && extended == 50)) {
+                throw std::runtime_error("Unexpected exception transfer in original constructor dependencies.");
+            }
+            pending.push_back(address + 4);
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -74,6 +128,9 @@ int main(int argc, char** argv) {
         }
         leaders.insert(0x001b4f54u);
         const auto jumpTableState = image.CreateGameCubeState();
+        AddOriginalConstructors(image, jumpTableState, instructions, leaders);
+        leaders.insert(0x80003268u);
+        leaders.insert(0x800032a0u);
         for (uint32_t offset = 0; offset < 16u * 4u; offset += 4) {
             const auto target = ppc_read_u32(jumpTableState, 0x802e0ed8u + offset);
             if (target < 0x801bc080u || target >= 0x801bc3a0u || (target & 3u) != 0) {
