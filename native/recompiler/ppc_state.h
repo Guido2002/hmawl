@@ -1,6 +1,8 @@
 #ifndef HMAWL_PPC_STATE_H
 #define HMAWL_PPC_STATE_H
 
+#include "native_gx.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -161,6 +163,7 @@ struct PpcState {
     std::optional<uint32_t> aiControl;
     std::optional<uint32_t> diConfiguration;
     std::optional<PpcDiscInterface> discInterface;
+    std::optional<NativeGx> graphics;
     std::function<std::vector<uint8_t>(const std::array<uint32_t, 3>&, uint32_t)> transferDisc;
     std::optional<uint16_t> viDtvStatus;
     std::optional<PpcSerialInterface> serialInterface;
@@ -203,7 +206,7 @@ inline void ppc_reset_performance_monitor(PpcState& state, unsigned index, uint3
 }
 
 inline uint32_t ppc_pi_interrupt_cause(const PpcState& state) {
-    uint32_t cause = 0;
+    uint32_t cause = state.graphics ? NativeGxInterruptCause(*state.graphics) : 0;
     if (state.serialInterface &&
         (state.serialInterface->communication & 0xc0000000u) == 0xc0000000u) cause |= 8u;
     if (state.dspHardware && state.dspControl) {
@@ -224,7 +227,7 @@ inline bool ppc_si_interrupt_pending(const PpcState& state) {
 }
 
 inline bool ppc_external_interrupt_pending(const PpcState& state) {
-    return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & 0xcu) != 0;
+    return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & 0xe0cu) != 0;
 }
 
 inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
@@ -270,8 +273,9 @@ inline void ppc_write_msr(PpcState& state, uint32_t value) {
 }
 
 inline void ppc_write_hid2(PpcState& state, uint32_t value) {
-    if (((state.hid2 ^ value) & ~0xa0000000u) != 0) {
-        throw std::runtime_error("Unsupported PowerPC HID2 change (only PSE/LSQE supported).");
+    if (((state.hid2 ^ value) & ~0xe0000000u) != 0 ||
+        (((state.hid2 ^ value) & 0x40000000u) != 0 && !state.graphics)) {
+        throw std::runtime_error("Unsupported PowerPC HID2 change (write gathering requires native GX).");
     }
     state.hid2 = value;
 }
@@ -347,6 +351,9 @@ inline void ppc_write_ram_bat(PpcState& state, unsigned spr, uint32_t value) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
+        return NativeGxRead(state, address, 4);
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.discInterface) {
         if (address == 0xcc006000u) return state.discInterface->status;
         if (address == 0xcc006004u) return state.discInterface->cover;
@@ -477,6 +484,9 @@ inline void ppc_write_u64(PpcState& state, uint32_t address, uint64_t value) {
 }
 
 inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
+        return static_cast<uint16_t>(NativeGxRead(state, address, 2));
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
         const auto& dsp = *state.dspHardware;
         if (address == 0xcc005000u) return static_cast<uint16_t>(dsp.toDspMailbox >> 16);
@@ -524,6 +534,10 @@ inline uint16_t ppc_read_u16(PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
+        NativeGxWrite(state, address, value, 4);
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.discInterface) {
         auto& di = *state.discInterface;
         if (address >= 0xcc006008u && address <= 0xcc00601cu && (address & 3u) == 0) {
@@ -806,9 +820,13 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
     }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003004u &&
         state.piInterruptMask.has_value()) {
-        if (value != 0xf0u && !(state.serialInterface.has_value() && value == 0xf8u) &&
-            !(state.discInterface && (value == 0xf4u || (state.serialInterface && value == 0xfcu)))) {
-            throw std::runtime_error("Unsupported PI interrupt mask write (SI/DI enables require mapped hardware profiles).");
+        const auto graphicsBits = value & 0xe00u;
+        const auto startupBits = value & ~0xe00u;
+        if ((graphicsBits != 0 && !state.graphics) ||
+            (startupBits != 0xf0u && !(state.serialInterface && startupBits == 0xf8u) &&
+             !(state.discInterface && (startupBits == 0xf4u ||
+                                      (state.serialInterface && startupBits == 0xfcu))))) {
+            throw std::runtime_error("Unsupported PI interrupt mask write (SI/DI/CP/PE enables require mapped hardware profiles).");
         }
         *state.piInterruptMask = value;
         return;
@@ -821,6 +839,10 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
 }
 
 inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
+        NativeGxWrite(state, address, value, 2);
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.memoryProtection) {
         if (address == 0xcc004010u) {
             if (value != 0xffu) {
@@ -907,6 +929,9 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
 }
 
 inline uint8_t ppc_read_u8(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
+        return static_cast<uint8_t>(NativeGxRead(state, address, 1));
+    }
     return state.memory[ppc_memory_offset(state, address, 1)];
 }
 
@@ -954,7 +979,24 @@ inline PpcFpr ppc_load_quantized_pair(const PpcState& state, uint32_t address,
     return {first, second};
 }
 
+inline void ppc_store_float_pair(PpcState& state, uint32_t address, PpcFpr value,
+                                uint32_t quantization, bool single) {
+    if ((state.gqr.at(quantization) & 7u) != 0) {
+        throw std::runtime_error("PowerPC psq_st integer quantization is not implemented.");
+    }
+    const bool fifo = state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc008000u;
+    if (!fifo) ppc_memory_offset(state, address, single ? 4 : 8);
+    ppc_write_u32(state, address, ppc_narrow_single_bits(value.ps0));
+    if (!single) {
+        ppc_write_u32(state, fifo ? address : address + 4, ppc_narrow_single_bits(value.ps1));
+    }
+}
+
 inline void ppc_write_u8(PpcState& state, uint32_t address, uint8_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
+        NativeGxWrite(state, address, value, 1);
+        return;
+    }
     state.memory[ppc_memory_offset(state, address, 1)] = value;
 }
 

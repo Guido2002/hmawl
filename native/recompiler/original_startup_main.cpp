@@ -65,7 +65,8 @@ int RunCli(int argc, Character** argv) {
         std::cout << "Executing hash-verified original USA DOL entry 0x80003154 "
                      "using compiled native blocks only.\n"
                      "Profile: loader IR/DR, EE disabled, coherent RAM, idle opt-in "
-                     "PI/MI/DSP/AI/EXI/SI, cold PI reset, 24 MiB RAM BAT profile, analog VI cable status, "
+                     "PI/MI/DSP/AI/EXI/SI, native CP/PE and checked GX register-command FIFO "
+                     "(draw/copy/texture DMA unimplemented), cold PI reset, 24 MiB RAM BAT profile, analog VI cable status, "
                      "empty memory-card slots/SP1 and disconnected controllers, native console "
                      "(bounded strings/32-bit integers), persisted SRAM reads (writes/RTC/ROM unimplemented); "
                      "16 MiB ARAM, compiled DSP init/native bootstrap (general DSP tasks/audio unimplemented); "
@@ -78,6 +79,13 @@ int RunCli(int argc, Character** argv) {
         }
         const auto result = RunOriginalStartup(dispatcher, state, blocks, depth);
         std::cerr << DescribeOriginalStartupStop(result) << '\n';
+        if (state.graphics) {
+            const auto& gx = *state.graphics;
+            std::cerr << "Native GX: " << gx.bursts << " actual 32-byte FIFO bursts, "
+                      << gx.decodedCommands << " decoded register/NOP commands, "
+                      << gx.commands.size() << " pending command bytes, "
+                      << gx.gathered.size() << " gathered bytes. No rendered frame.\n";
+        }
         return result.stop == OriginalStartupStop::Budget ? 4 :
                result.stop == OriginalStartupStop::UnexpectedReturn ? 5 : 3;
     } catch (const std::exception& error) {

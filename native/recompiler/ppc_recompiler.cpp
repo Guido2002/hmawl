@@ -94,15 +94,20 @@ void EmitFpscrRecord(std::ostringstream& output, bool record) {
     }
 }
 
-void EmitPairedLoad(std::ostringstream& output, uint32_t pc, uint32_t reg,
+void EmitPairedTransfer(std::ostringstream& output, uint32_t pc, uint32_t reg,
                     uint32_t base, const std::string& address, uint32_t selector,
-                    bool single, bool update) {
+                    bool single, bool update, bool load = true) {
     if (update && base == 0) {
-        throw std::runtime_error("Invalid paired load update-form instruction at " + Hex(pc) + ".");
+        throw std::runtime_error("Invalid paired transfer update-form instruction at " + Hex(pc) + ".");
     }
-    output << "    const uint32_t ea = " << address << ";\n"
-           << "    state.fpr[" << reg << "] = ppc_load_quantized_pair(state, ea, "
-           << selector << "u, " << (single ? "true" : "false") << ");\n";
+    output << "    const uint32_t ea = " << address << ";\n";
+    if (load) {
+        output << "    state.fpr[" << reg << "] = ppc_load_quantized_pair(state, ea, "
+               << selector << "u, " << (single ? "true" : "false") << ");\n";
+    } else {
+        output << "    ppc_store_float_pair(state, ea, state.fpr[" << reg << "], "
+               << selector << "u, " << (single ? "true" : "false") << ");\n";
+    }
     if (update) {
         output << "    state.gpr[" << base << "] = ea;\n";
     }
@@ -336,25 +341,29 @@ std::string RecompileFunction(uint32_t address,
             break;
         }
         case 56:
-        case 57: {
-            EmitPairedLoad(output, pc, rt, ra,
+        case 57:
+        case 60:
+        case 61: {
+            EmitPairedTransfer(output, pc, rt, ra,
                 EffectiveAddress(ra, SignExtend(Bits(instruction, 0, 12), 12)),
-                Bits(instruction, 12, 3), Bits(instruction, 15, 1) != 0, opcode == 57);
+                Bits(instruction, 12, 3), Bits(instruction, 15, 1) != 0,
+                opcode == 57 || opcode == 61, opcode < 60);
             break;
         }
         case 4: {
             const uint32_t extendedOpcode = Bits(instruction, 1, 10);
             const uint32_t quantizedOpcode = Bits(instruction, 1, 6);
-            if (quantizedOpcode == 6 || quantizedOpcode == 38) {
+            if (quantizedOpcode == 6 || quantizedOpcode == 38 ||
+                quantizedOpcode == 7 || quantizedOpcode == 39) {
                 if ((instruction & 1u) != 0) {
-                    throw std::runtime_error("Invalid indexed paired load at " + Hex(pc) + ".");
+                    throw std::runtime_error("Invalid indexed paired transfer at " + Hex(pc) + ".");
                 }
                 const std::string base =
                     ra == 0 ? "0u" : "state.gpr[" + std::to_string(ra) + "]";
-                EmitPairedLoad(output, pc, rt, ra,
+                EmitPairedTransfer(output, pc, rt, ra,
                     base + " + state.gpr[" + std::to_string(rb) + "]",
                     Bits(instruction, 7, 3), Bits(instruction, 10, 1) != 0,
-                    quantizedOpcode == 38);
+                    quantizedOpcode >= 38, (quantizedOpcode & 1u) == 0);
                 break;
             }
             if (extendedOpcode == 528 || extendedOpcode == 560 ||
@@ -936,6 +945,12 @@ std::string RecompileFunction(uint32_t address,
             }
             case 467: {
                 const uint32_t spr = ra | (rb << 5);
+                if (spr == 921) {
+                    if (record) throw std::runtime_error("Invalid mtspr WPAR instruction at " + Hex(pc) + ".");
+                    output << "    NativeGxSetWriteGatherAddress(state, state.gpr[" << rt << "]);\n";
+                    emitted = true;
+                    break;
+                }
                 if (spr == 22) {
                     if (record) throw std::runtime_error("Invalid mtspr DEC instruction at " + Hex(pc) + ".");
                     output << "    ppc_write_decrementer(state, state.gpr[" << rt << "]);\n";

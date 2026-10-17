@@ -42,8 +42,10 @@ drive inquiry and the original DI completion chain also run: **original OSInit
 returns to `0x80003268` in the Windows runner**. All 93 original DOL constructors
 and `__init_user` also return, reaching original game `main`. Original memory setup,
 resource managers and Screen construction execute through to original GXInit.
-Graphics startup stops explicitly at its unsupported PI interrupt mask `0x8FC`;
-GXInit return, the main loop and a rendered game frame remain unfinished.
+Original CP/PE/FIFO setup and matrix command streaming now execute; the runner
+decodes 29 actual FIFO bursts into graphics-register state. Startup stops at
+floating-point viewport setup (`0x801CBE64`). GXInit return, the main loop and a
+rendered game frame remain unfinished.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
 ## Phases and completion criteria
@@ -526,9 +528,22 @@ queue. Full runtime scheduling and device services are still needed.
   Verify original descriptor fields, allocation sizes/alignment/non-overlap,
   counters, singleton/FIFO pointers and identical observed/unobserved execution.
   Bound generated registration stack usage with non-inlined batches of 64 bindings.
-  The Windows runner enters original GXInit and stops at `0x801B3E00`,
-  LR `0x801B3EEC`, SP `0x8035CEC0`, attempting graphics PI mask `0x8FC`.
-  No graphics interrupt or FIFO success is synthesized; GXInit has not returned.
+  The Windows runner enters original GXInit; no allocation success is synthesized.
+- [x] Integrate checked native CP/PE interrupts, split-half FIFO registers, PI ring
+  bounds, WPAR/HID2 write gathering and actual 32-byte FIFO RAM bursts.
+  Decode CP/BP/XF register commands, BP masks and vertex-cache invalidation; preserve
+  incomplete commands across bursts. Compile original GX attribute/texcoord switch
+  tables and unquantized paired stores, including indexed/update/W forms.
+  Production executes 29 bursts and 121 register/NOP commands, stopping at
+  `0x801CBE64`, LR `0x801CBE2C`, SP `0x8035CE48`, before floating-point viewport setup.
+  Unit tests cover ring wrap/full/breakpoints, RAM guards, disabled readers,
+  watermark/PE interrupt sources, write-only PE acknowledgements and failures.
+  Real-DOL tests inject token/finish commands through this FIFO, execute both
+  original PE handlers and restore the interrupted CPU context (seven exceptions
+  including the previous SI/DI five). This injection is not production-game activity.
+  Missing graphics retains the previous explicit CP-enable boundary at `0x801B3E00`.
+  Draws, EFB copies, texture/TLUT DMA, display lists and integer-quantized stores
+  remain explicit dependencies. GXInit has not returned; no frame is rendered.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

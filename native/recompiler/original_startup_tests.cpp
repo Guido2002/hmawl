@@ -467,6 +467,19 @@ int main(int argc, char** argv) {
                 "Original nonconverging OSGetTime loop bypassed the block budget.");
         if (argc == 4) {
             RvzImage disc(argv[3]);
+            {
+                auto missingGraphics = CreateOriginalStartupState(image);
+                missingGraphics.graphics.reset();
+                InstallOriginalStartupDisc(missingGraphics, disc);
+                uint64_t clock = 1000000;
+                missingGraphics.readTimeBase = [&] { return clock += 1000; };
+                missingGraphics.writeConsole = [](const std::string&) {};
+                const auto missing = RunOriginalStartup(dispatcher, missingGraphics);
+                Require(missing.pc == 0x801b3e00u && missing.gxInitEntered &&
+                            missing.reason.find("Unsupported PI interrupt mask") != std::string::npos &&
+                            missingGraphics.piInterruptMask == 0xfcu,
+                        "Missing graphics backend did not retain the explicit original CP-enable boundary.");
+            }
             auto discState = CreateOriginalStartupState(image);
             const auto originalMemory = discState.memory;
             InstallOriginalStartupDisc(discState, disc);
@@ -499,21 +512,21 @@ int main(int argc, char** argv) {
             const auto discResult = RunOriginalStartup(dispatcher, discState);
             std::cout << DescribeOriginalStartupStop(discResult) << '\n';
             Require(discResult.stop == OriginalStartupStop::Dependency &&
-                        discResult.pc == 0x801b3e00u && discResult.lr == 0x801b3eecu &&
-                        discResult.stack == 0x8035cec0u && discResult.osInitReturned &&
+                        discResult.pc == 0x801cbe64u && discResult.lr == 0x801cbe2cu &&
+                        discResult.stack == 0x8035ce48u && discResult.osInitReturned &&
                         discResult.constructorsReturned == 93 && discResult.userInitReturned &&
                         discResult.gameMainEntered && discResult.memoryInitialized &&
                         discResult.screenInitEntered && discResult.gxInitEntered &&
                         !discState.callGuest && !discState.callException &&
-                        discResult.reason.find("Unsupported PI interrupt mask") != std::string::npos &&
+                        discResult.reason.find("No native translation registered") != std::string::npos &&
                         discState.discInterface->completedTransfers == 1 &&
                         discState.discInterface->status == 0x2au &&
                         discState.discInterface->dmaLength == 0 &&
                         discState.discInterface->control == 2 &&
                         discState.externalInterrupt->delivered == 5 &&
                         discState.externalInterrupt->returned == 5 &&
-                        !discState.externalInterrupt->active && !discState.externalInterruptsEnabled &&
-                        discState.piInterruptMask == 0xfcu &&
+                        !discState.externalInterrupt->active && discState.externalInterruptsEnabled &&
+                        discState.piInterruptMask == 0xefcu &&
                         ppc_read_u16(discState, 0x800030e6u) == 0x8001u &&
                         ppc_read_u32(discState, 0x80317a6cu) == 0 &&
                         ppc_read_u32(discState, 0x80349698u) == 0 &&
@@ -524,6 +537,19 @@ int main(int argc, char** argv) {
                         DescribeOriginalStartupStop(discResult).find("OSInit returned") != std::string::npos &&
                         std::equal(fst.begin(), fst.end(), discState.memory.begin() + fstOffset),
                     "Original entry did not reach original graphics setup through constructors, heaps and real DVD DMA.");
+            const auto& gx = *discState.graphics;
+            const auto fifo = ppc_read_u32(discState, ppc_read_u32(discState, 0x803491b4u) + 12) & 0x3fffffffu;
+            std::cout << "Original GX bursts=" << gx.bursts << " commands=" << gx.decodedCommands
+                      << " CP control=" << gx.control << " PE control=" << gx.peControl << '\n';
+            Require(gx.bursts == 29 && gx.decodedCommands == 121 &&
+                        gx.gathered.size() == 24 && gx.commands.size() == 29 &&
+                        gx.cpuBase == fifo && gx.cpuEnd == fifo + 0x5ffe0 &&
+                        gx.cpuWrite == fifo + 29 * 32 && gx.fifo[0] == gx.cpuBase &&
+                        gx.fifo[1] == gx.cpuEnd && gx.fifo[4] == 0 &&
+                        gx.fifo[5] == gx.cpuWrite && gx.fifo[6] == gx.cpuWrite &&
+                        gx.writeGatherAddress == 0x0c008000u && (discState.hid2 & 0x40000000u) != 0 &&
+                        gx.peControl == 3 && NativeGxInterruptCause(gx) == 0,
+                    "Original GX FIFO/PE setup did not consume the exact actual command bursts.");
             for (uint32_t address = 0x80317a40u; address < 0x80317a60u; ++address) {
                 Require(ppc_read_u8(discState, address) == (address == 0x80317a43u ? 1 : 0),
                         "Native virtual-drive identity differs or claims console firmware.");
@@ -611,8 +637,8 @@ int main(int argc, char** argv) {
             try {
                 dispatcher.Execute(traced, image.entryPoint(), 1000000, 128, observe);
             } catch (const std::runtime_error& error) {
-                reachedBoundary = traced.pc == 0x801b3e00u &&
-                    std::string(error.what()).find("Unsupported PI interrupt mask") != std::string::npos;
+                reachedBoundary = traced.pc == 0x801cbe64u &&
+                    std::string(error.what()).find("No native translation registered") != std::string::npos;
                 if (!reachedBoundary) throw;
             }
             std::cout << "Observed original initialization allocations=" << allocations.size()
@@ -636,6 +662,58 @@ int main(int argc, char** argv) {
                         ppc_read_msr(traced) == ppc_read_msr(discState) &&
                         !traced.callGuest && !traced.callException,
                     "Observed startup changed original initialization, memory, registers or callback cleanup.");
+            const auto& observedGx = *traced.graphics;
+            Require(observedGx.control == gx.control && observedGx.peControl == gx.peControl &&
+                        observedGx.pePending == gx.pePending &&
+                        observedGx.fifo == gx.fifo && observedGx.cp == gx.cp &&
+                        observedGx.bp == gx.bp && observedGx.xf == gx.xf &&
+                        observedGx.gathered == gx.gathered && observedGx.commands == gx.commands &&
+                        observedGx.bpMask == gx.bpMask && observedGx.cpuBase == gx.cpuBase &&
+                        observedGx.cpuEnd == gx.cpuEnd && observedGx.cpuWrite == gx.cpuWrite &&
+                        observedGx.writeGatherAddress == gx.writeGatherAddress &&
+                        observedGx.watermarkStatus == gx.watermarkStatus &&
+                        observedGx.cpToken == gx.cpToken && observedGx.token == gx.token &&
+                        observedGx.bursts == gx.bursts && observedGx.decodedCommands == gx.decodedCommands &&
+                        observedGx.vertexCacheInvalidations == gx.vertexCacheInvalidations,
+                    "Observed execution changed actual GX command, FIFO or interrupt state.");
+            {
+                auto pe = traced;
+                uint64_t peTicks = tracedTicks;
+                pe.readTimeBase = [&] { return peTicks += 1000; };
+                for (unsigned byte = 0; byte < 8; ++byte) ppc_write_u8(pe, 0xcc008000u, 0);
+                Require(pe.graphics->commands.empty() && pe.graphics->gathered.empty(),
+                        "Original pending matrix command did not finish on an actual gather flush.");
+                const uint8_t requests[] = {0x61, 0x48, 0, 0x12, 0x34, 0x61, 0x45, 0, 0, 2};
+                for (const auto byte : requests) ppc_write_u8(pe, 0xcc008000u, byte);
+                for (unsigned byte = 10; byte < 32; ++byte) ppc_write_u8(pe, 0xcc008000u, 0);
+                Require(NativeGxInterruptCause(*pe.graphics) == 0x600u &&
+                            ppc_read_u16(pe, 0xcc00100au) == 3,
+                        "Test FIFO token/finish commands did not assert both real PE sources.");
+                unsigned tokenHandlers = 0, finishHandlers = 0;
+                bool resumed = false;
+                try {
+                    dispatcher.Execute(pe, traced.pc, 100000, 128, [&](uint32_t pc) {
+                        if (pc == 0x801ce08cu) ++tokenHandlers;
+                        if (pc == 0x801ce158u) ++finishHandlers;
+                    });
+                } catch (const std::runtime_error& error) {
+                    resumed = pe.pc == traced.pc &&
+                        std::string(error.what()).find("No native translation registered") != std::string::npos;
+                    if (!resumed) throw;
+                }
+                Require(resumed && tokenHandlers == 1 && finishHandlers == 1 &&
+                            pe.externalInterrupt->delivered == 7 && pe.externalInterrupt->returned == 7 &&
+                            !pe.externalInterrupt->active && NativeGxInterruptCause(*pe.graphics) == 0 &&
+                            pe.graphics->peControl == 3 && pe.graphics->token == 0x1234 &&
+                            ppc_read_u8(pe, 0x803498e8u) == 1 &&
+                            std::equal(std::begin(pe.gpr), std::end(pe.gpr), std::begin(traced.gpr)) &&
+                            pe.fpr == traced.fpr && pe.cr == traced.cr && pe.xer == traced.xer &&
+                            pe.lr == traced.lr && pe.ctr == traced.ctr &&
+                            ppc_read_msr(pe) == ppc_read_msr(traced) && !pe.callGuest && !pe.callException,
+                        "Original PE handlers did not acknowledge both sources and restore interrupted context.");
+                std::cout << "Injected FIFO token/finish requests executed both original PE handlers "
+                             "and original exception/context return. Production startup issues no such requests.\n";
+            }
             auto damagedConstructor = CreateOriginalStartupState(image);
             InstallOriginalStartupDisc(damagedConstructor, disc);
             damagedConstructor.writeConsole = [](const std::string&) {};

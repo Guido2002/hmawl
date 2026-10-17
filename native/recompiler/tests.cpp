@@ -347,9 +347,10 @@ void TestInvalidFloatingPointInstructions() {
         (4u << 26) | (3u << 21) | (4u << 11) | (38u << 1),
         (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (6u << 1) | 1u,
         (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (38u << 1) | 1u,
-        (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (7u << 1),
-        (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (39u << 1),
-        (60u << 26) | (3u << 16), // psq_st is not supported.
+        (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (7u << 1) | 1u,
+        (4u << 26) | (3u << 21) | (3u << 16) | (4u << 11) | (39u << 1) | 1u,
+        (4u << 26) | (3u << 21) | (4u << 11) | (39u << 1),
+        (61u << 26) | (3u << 21), // Paired update stores require a nonzero base.
         0x7c70e3a7u, // GQR SPR writes have no record form.
         0x7c70e2a7u,
         0x7c78e2a7u,

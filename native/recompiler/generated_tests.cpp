@@ -662,6 +662,61 @@ void TestSingleWidening() {
     }
 }
 
+void TestPairedStores() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(512, 0xa5);
+    const uint32_t bits[] = {0, 0x80000000u, 1, 0x007fffffu, 0x00800000u,
+                            0x3f800000u, 0x7f7fffffu, 0x7f800000u, 0x7f812345u};
+    for (unsigned index = 0; index < 64; ++index) {
+        const auto gqr = (index % 32) / 4;
+        const bool single = (index & 2u) != 0, update = (index & 1u) != 0;
+        for (const auto alias : {0u, 0x80000000u, 0xc0000000u}) {
+            for (const auto first : bits) {
+                state.gqr.fill(7);
+                state.gqr[gqr] = 0xffff3f00u;
+                state.gpr[4] = alias + 0x104u;
+                state.gpr[5] = 0xfffffffcu;
+                state.fpr[3] = {ppc_widen_single_bits(first), ppc_widen_single_bits(0x40000000)};
+                state.fpscr = 0x12345678;
+                state.cr = 0x87654321;
+                state.xer = 0xe0000000;
+                ppc_write_u32(state, 0x104, 0xa5a5a5a5);
+                const auto fpr = state.fpr;
+                PairedStoreTestFunctions[index](state);
+                Require(ppc_read_u32(state, 0x100) == first &&
+                            ppc_read_u32(state, 0x104) == (single ? 0xa5a5a5a5u : 0x40000000u) &&
+                            state.gpr[4] == alias + (update ? 0x100u : 0x104u) &&
+                            state.fpr == fpr && state.fpscr == 0x12345678 &&
+                            state.cr == 0x87654321 && state.xer == 0xe0000000 &&
+                            state.memory[0xff] == 0xa5 && state.memory[0x108] == 0xa5 &&
+                            state.pc == 0xe004u + index * 16,
+                        "Compiled paired store lost lane bits, W/I/address/update fields or guards.");
+            }
+        }
+        state.gpr[4] = 0x203;
+        const auto memory = state.memory;
+        bool rejected = false;
+        try {
+            PairedStoreTestFunctions[index](state);
+        } catch (const std::out_of_range&) {
+            rejected = true;
+        }
+        Require(rejected && state.gpr[4] == 0x203 && state.memory == memory,
+                "Paired store boundary fault partially wrote RAM or updated base.");
+        state.gpr[4] = 0x104;
+        state.gqr[gqr] = 4;
+        rejected = false;
+        try {
+            PairedStoreTestFunctions[index](state);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("integer quantization") != std::string::npos;
+        }
+        Require(rejected && state.gpr[4] == 0x104 && state.memory == memory,
+                "Unsupported integer-quantized store changed RAM or base.");
+    }
+}
+
 void TestPairedLoads(bool indexed) {
     PpcState state;
     state.memoryMap = PpcMemoryMap::GameCubeRam;
@@ -3558,6 +3613,7 @@ int main() {
         TestL2ControlRegisters();
         TestRegisterAddCarry();
         TestPairedLoads(false);
+        TestPairedStores();
         TestPairedLoads(true);
         TestIntegerDequantization();
         TestCompiledQuantizedLoads(false);

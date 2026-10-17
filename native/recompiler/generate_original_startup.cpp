@@ -53,12 +53,19 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
     if (!terminated || pending.size() != 93) {
         throw std::runtime_error("Original USA constructor table differs from its bounded native profile.");
     }
-    // Original virtual and array-construction calls do not encode their targets in a branch.
+    // Adjacent GX attribute tables (17 each) and texcoord tables (7 and 21).
+    for (uint32_t index = 0; index < 62; ++index) {
+        const auto target = ppc_read_u32(source, 0x802e1be8u + index * 4);
+        leaders.insert(target);
+        pending.push_back(target);
+    }
+    // Indirect construction calls and graphics interrupt handlers need explicit original roots.
     for (uint32_t target : {0x80199eecu, 0x8001b920u, 0x80022790u, 0x800226f0u,
                             0x8002b80cu, 0x8002f27cu, 0x8002f100u, 0x8002efbcu,
                             0x80179ee8u, 0x80179c90u, 0x801059a4u,
                             0x8019ad5cu, 0x80190204u, 0x8000b4c4u, 0x80198f54u,
-                            0x80199ed8u, 0x8017a3a0u}) {
+                            0x80199ed8u, 0x8017a3a0u,
+                            0x801cc448u, 0x801ce08cu, 0x801ce158u}) {
         leaders.insert(target);
         pending.push_back(target);
     }

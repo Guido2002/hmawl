@@ -387,6 +387,25 @@ int main(int argc, char** argv) {
                      {XForm(3, 4, 5, opcode, true)});
             }
             Emit(output, 0x3000, {0x34640001u});
+            for (unsigned indexed = 0; indexed < 2; ++indexed) {
+                for (unsigned index = 0; index < 32; ++index) {
+                    const unsigned gqr = index / 4;
+                    const bool single = (index & 2) != 0;
+                    const bool update = (index & 1) != 0;
+                    const uint32_t word = indexed
+                        ? (4u << 26) | (3u << 21) | (4u << 16) | (5u << 11) |
+                            (uint32_t(single) << 10) | (gqr << 7) | ((update ? 39u : 7u) << 1)
+                        : ((update ? 61u : 60u) << 26) | (3u << 21) | (4u << 16) |
+                            (uint32_t(single) << 15) | (gqr << 12) | 0xffcu;
+                    Emit(output, 0xe000u + (indexed * 32 + index) * 16, {word});
+                }
+            }
+            output << "static void (*const PairedStoreTestFunctions[])(PpcState&) = {\n";
+            for (unsigned index = 0; index < 64; ++index) {
+                output << "ppc_0000" << std::hex << std::uppercase << (0xe000u + index * 16)
+                       << ",\n" << std::dec;
+            }
+            output << "};\n";
             Emit(output, 0x9300, {(31u << 26) | (3u << 21) | (83u << 1)});
             Emit(output, 0x9310, {(31u << 26) | (3u << 21) | (146u << 1)});
             Emit(output, 0x9320, {0x7c78e2a6u});

@@ -209,9 +209,10 @@ The original game-initialization call at `0x8000AD40` now executes its memory,
 resource-manager and Screen setup. Original `Memory::Initialize` constructs heaps
 from the real arena (`0x8035EFA0` to `0x81701FE0`). Nine original allocations,
 including a nested `0x1730` resource allocation and `0x60000` FIFO buffer, complete.
-The original Screen enters GXInit and prints the SDK's GX version.
-The runner's next dependency stop is `PC=0x801B3E00`, LR `0x801B3EEC`,
-SP `0x8035CEC0`, attempting PI mask `0x8FC` for graphics interrupts.
+The original Screen enters GXInit and prints the SDK's GX version. Original
+CP/PE setup, FIFO linking, write gathering and matrix stores execute as described below.
+The runner's next dependency stop is `PC=0x801CBE64`, LR `0x801CBE2C`,
+SP `0x8035CE48`, at untranslated `fsubs` in viewport setup.
 The original inquiry callback result remains `0x8001`, five external exceptions
 returned and the entire real FST is intact. GXInit has not returned.
 Real-disc tests verify every constructor in original table order and preservation
@@ -221,13 +222,40 @@ constructor words fail integrity validation without claiming later milestones.
 The game main loop, GX renderer,
 scheduled game threads, audio, input and saves have not run.
 
-The next connected milestone is checked CP/PE interrupt and GX FIFO handling,
-followed by original GX/VI initialization. Enabling PI bits without the actual
-graphics backend would hide missing dependencies and is deliberately rejected.
+The next connected milestone is original floating-point viewport/projection setup
+and completion of GXInit, followed by original VI initialization and a renderer.
 Reaching GXInit does not establish a completed graphics initialization, scheduled
 game thread or frame. Generated translation registration uses non-inlined batches
 of at most 64 regular bindings (plus the console binding in the final batch), avoiding
 MSVC's oversized temporary stack frames without increasing the executable stack.
+
+### Checked native graphics command pipeline
+
+The native graphics profile holds CP control/status, split low/high FIFO registers,
+PE interrupt enables/pending sources and token, PI CPU ring registers, WPAR and a
+byte-accurate write-gather buffer. CP/PE PI enables require this profile; removing
+it retains the previous explicit `0x801B3E00`/mask `0x8FC` dependency.
+PE acknowledge bits are write-only: reading control returns enables, not pending
+acknowledgements, so the original token handler cannot accidentally clear a
+simultaneous finish interrupt.
+
+Guest FIFO writes of one, two or four bytes assemble big-endian 32-byte bursts.
+Each complete burst is actually written to checked guest RAM, advancing/wrapping
+the CPU FIFO pointer. Linked CP consumption reads that RAM, tracks byte counts,
+watermarks and breakpoints, and retains incomplete commands across bursts.
+Disabled readers do not consume bytes; full/mismatched rings fail before
+overwriting unread data. CP/BP/XF register loads, BP write masks, NOPs and
+vertex-cache invalidation update explicit graphics state. Token/finish commands
+assert their PE sources only after decoding, rather than reporting success early.
+Draws, EFB copies, texture/TLUT DMA, display lists and unknown opcodes fail explicitly.
+There is no replacement scene or generated frame.
+
+The real Windows runner publishes **29 FIFO bursts** and decodes **121 register/NOP
+commands**, with 29 incomplete command bytes and 24 still-gathered bytes at the
+viewport arithmetic boundary. Original attribute/texcoord tables supply bounded
+build-time indirect branch roots. Original paired matrix stores use bit-preserving
+float transfers, including single-lane, immediate/indexed and update forms; integer
+store quantization remains an explicit failure. No general FP arithmetic is added.
 
 ## Targeted regression
 
@@ -266,8 +294,21 @@ console output and deterministic clock samples against the production runner.
 It also verifies original heap descriptors, nine allocation return addresses,
 requested sizes, 32-byte alignment, arena bounds, non-overlap, allocation count,
 manager singleton pointers and the Screen's FIFO pointer.
+It verifies exact CP/PE/ring state, burst/command counts and identical graphics
+state with/without observation. A separate injection into the stopped original
+state flushes the actual pending matrix and submits token/finish FIFO commands.
+Both original PE handlers run through the original OS interrupt vector/dispatcher,
+acknowledge their sources, wake the original empty finish queue and restore all
+interrupted GPR/FPR/CR/XER/LR/CTR/MSR state. Seven external exceptions then return.
+This injection is test-only; production startup still returns five exceptions.
+`hmawl_native_gx_tests` independently covers mixed-width gather, fragmented commands,
+BP masking, XF bounds, ring wrap/full/guards, breakpoint resume, disabled readers,
+watermark and PE interrupt state, and explicit unsupported command/access failures.
 The synthetic compiled-code suite additionally covers immediate single-precision
 loads/stores and update forms: signed zero, normal/subnormal values, infinities,
 NaN payloads, paired-lane behavior, truncating stores, four-byte write guards,
 RAM aliases, absolute addressing and transactional invalid accesses. These
-transfers do not add floating-point arithmetic or general paired-single stores.
+transfers do not add floating-point arithmetic. Compiled paired-store tests cover
+all eight GQR selectors, W/update and immediate/indexed variants, signed zeros,
+normal/subnormal/NaN/infinity bits, RAM aliases and transactional invalid RAM/type
+accesses. Integer-quantized stores remain unsupported.

@@ -100,6 +100,7 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.diConfiguration = 1;
     state.viDtvStatus = 0;
     state.serialInterface.emplace();
+    state.graphics.emplace();
     state.transferSi = TransferDisconnectedSi;
     ppc_write_u32(state, 0x800000f8u, 162000000u);
     ppc_write_u32(state, 0x800000fcu, 486000000u);

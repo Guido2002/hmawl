@@ -90,9 +90,15 @@ the original game `main` is entered in the Windows runner. Tests verify construc
 order, nonvolatile registers and exact observer/non-observer execution equivalence.
 Original game initialization now runs arena-backed memory setup, nine checked
 heap allocations, resource managers and `Screen` construction into original
-`GXInit`. The runner stops with **exit code 3** at its unsupported graphics
-interrupt enable, `PC=0x801B3E00`, `LR=0x801B3EEC` (PI mask `0x8FC`).
-GXInit has not returned; the game main loop and rendering have not run.
+`GXInit`. Original CP/PE setup, CPU/GPU FIFO linking, write gathering and matrix
+stores now execute: the Windows runner publishes **29 real 32-byte FIFO bursts**
+to guest RAM and decodes **121 register/NOP commands** into CP/BP/XF state.
+Separate injected-command tests execute both original PE interrupt handlers and
+restore the interrupted CPU context; production startup has not issued those interrupts.
+The runner stops with **exit code 3** at untranslated floating-point viewport setup,
+`PC=0x801CBE64`, `LR=0x801CBE2C`. GXInit has not returned.
+Draws, EFB copies and texture DMA fail explicitly; the game main loop and rendering
+have not run.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.
 The CLI creates an English/NTSC/stereo `native-console.sram` beside the input DOL
