@@ -201,8 +201,8 @@ queue. Full runtime scheduling and device services are still needed.
   initialization flag, record system start time and mask interrupts. Continue
   through six original performance-monitor reset wrappers, speculation disable
   and non-IEEE setup, boot-info/arena initialization and exception installation
-  plus system-call vector and alarm initialization to `0x801b0f68`,
-  before `__OSModuleInit`.
+  plus system-call vector, alarm and module initialization to `0x801b0f6c`,
+  before `__OSInterruptInit`.
   Test the already-initialized
   skip and epilogue separately; never claim they complete first-time startup.
 - [x] Compile FPSCR bit operations `mtfsb0`/`mtfsb1`, including record forms,
@@ -258,6 +258,12 @@ queue. Full runtime scheduling and device services are still needed.
   unsigned maximum priorities. Continue entry-derived OSInit to `0x801b0f68`.
   Alarm scheduling, decrementer delivery and reset-callback execution remain
   unsupported; registration is not execution.
+- [x] Execute original `__OSModuleInit` and continue entry-derived OSInit to
+  `0x801b0f6c`. Verify exact clearing of low-memory words `0x800030c8/cc/d0`,
+  poisoned/zero values, repeated initialization, both interrupt states and
+  unchanged module payloads/CPU state. This resets SDK metadata only; SDK
+  `OSLink`/`OSUnlink`, module-list integration and native binding lifetime
+  management remain pending.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic
@@ -469,7 +475,8 @@ systems and the executable can be packaged without the GameCube build toolchain.
    The initial `OSInit` prefix is independently verified through start-time
    capture/interrupt masking, MMCR/PMC resets and HID0 SPD/FPSCR NI setup
    plus boot-info/arena, exception and system-call vector installation
-   and alarm initialization (`0x801b0f68`); module setup and remaining subsystem initialization
+   and alarm/module initialization (`0x801b0f6c`);
+   interrupt setup and remaining subsystem initialization
    still follow.
 2. Expand the recompiler's opcode coverage, extend the tested REL/native-function
    bridge with function discovery and module lifetime management, implement

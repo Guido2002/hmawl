@@ -195,6 +195,7 @@ void RunHardwareDependency(uint32_t address, PpcState& state) {
     case 0x801b1618u: ppc_801B1618(state); break;
     case 0x801b147cu: ppc_801B147C(state); break;
     case 0x801b5550u: ppc_801B5550(state); break;
+    case 0x801b4c90u: ppc_801B4C90(state); break;
     case 0x801b1460u: ppc_801B1460(state); break;
     case 0x801d33c8u: ppc_801D33C8(state); break;
     case 0x801b2428u: ppc_801B2428(state); break;
@@ -964,6 +965,63 @@ void TestOriginalAlarmInitialization(const DolImage& image) {
                  "No alarm scheduling or decrementer delivery implemented.\n";
 }
 
+void TestOriginalModuleInitialization(const DolImage& image) {
+    for (bool interrupts : {false, true}) {
+        for (uint32_t pattern : {0u, 0x12345678u, UINT32_MAX}) {
+            auto state = image.CreateGameCubeState();
+            ppc_800032B0(state);
+            state.externalInterruptsEnabled = interrupts;
+            state.lr = 0x801b0f6cu;
+            state.ctr = 0x12345678u;
+            state.cr = 0x87654321u;
+            state.xer = 0xe0000000u;
+            state.fpscr = 4;
+            state.msr = 0x2030u;
+            state.hid0 = 0xc200u;
+            state.hid2 = 0xa0000000u;
+            state.l2cr = 0x80000000u;
+            state.fpr.fill({UINT64_MAX, UINT64_MAX});
+            state.gqr.fill(0x12345678u);
+            state.performanceMonitor.fill(0x87654321u);
+            for (uint32_t address : {0x800030c8u, 0x800030ccu, 0x800030d0u}) {
+                ppc_write_u32(state, address, pattern);
+            }
+            // An independent linked-module payload must not be cleared or traversed.
+            ppc_write_u32(state, 0x80004000u, 0x11223344u);
+            state.callGuest = [](uint32_t, PpcState&) {
+                throw std::runtime_error("Module initialization unexpectedly called another function.");
+            };
+            for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                const auto before = state;
+                auto expected = state;
+                ppc_write_u32(expected, 0x800030c8u, 0);
+                ppc_write_u32(expected, 0x800030ccu, 0);
+                ppc_write_u32(expected, 0x800030d0u, 0);
+                ppc_801B4C90(state);
+                Require(state.memory == expected.memory && state.pc == before.lr &&
+                            state.lr == before.lr && state.ctr == before.ctr &&
+                            state.cr == before.cr && state.xer == before.xer &&
+                            state.fpscr == before.fpscr && state.fpr == before.fpr &&
+                            state.gqr == before.gqr && state.msr == before.msr &&
+                            state.hid0 == before.hid0 && state.hid2 == before.hid2 &&
+                            state.l2cr == before.l2cr &&
+                            state.performanceMonitor == before.performanceMonitor &&
+                            state.externalInterruptsEnabled == interrupts &&
+                            state.gpr[0] == 0 && state.gpr[4] == 0x80000000u,
+                        "Original module initializer failed exact low-memory reset or CPU guards.");
+                for (unsigned reg = 0; reg < 32; ++reg) {
+                    if (reg == 0 || reg == 4) continue;
+                    Require(state.gpr[reg] == before.gpr[reg],
+                            "Module initializer damaged an unrelated integer register.");
+                }
+            }
+        }
+    }
+    std::cout << "Original __OSModuleInit resets exactly 0x800030c8/cc/d0; "
+                 "poisoned/zero state, repeated calls, both interrupt states and CPU/RAM guards passed. "
+                 "No REL link/unlink or native-binding lifecycle implied.\n";
+}
+
 void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     auto state = image.CreateGameCubeState();
     Require(ppc_read_u64(state, 0x803495d0u) == 0 &&
@@ -1076,6 +1134,9 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     std::vector<uint32_t> setupCalls;
     const auto fpr = state.fpr;
     state.performanceMonitor.fill(UINT32_MAX);
+    ppc_write_u32(state, 0x800030c8u, 0xdeadbeefu);
+    ppc_write_u32(state, 0x800030ccu, 0x12345678u);
+    ppc_write_u32(state, 0x800030d0u, UINT32_MAX);
     calls = 0;
     state.callGuest = [&](uint32_t address, PpcState& guest) {
         Require(++calls < 150, "OSInit fixture exceeded its dependency budget.");
@@ -1105,8 +1166,11 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     ppc_write_u32(expectedExceptions, 0x80349648u, 0x802dfe80u);
     ppc_write_u32(expectedExceptions, 0x8034964cu, 0x802dfe80u);
     ppc_write_u64(expectedExceptions, 0x802dfe88u, 0);
+    ppc_write_u32(expectedExceptions, 0x800030c8u, 0);
+    ppc_write_u32(expectedExceptions, 0x800030ccu, 0);
+    ppc_write_u32(expectedExceptions, 0x800030d0u, 0);
     ppc_801B0DE0(state);
-    Require(state.pc == 0x801b0f68u && reads == 3 &&
+    Require(state.pc == 0x801b0f6cu && reads == 3 &&
                 setupCalls == std::vector<uint32_t>{0x801b0a6cu, 0x801b0a74u,
                     0x801b0a7cu, 0x801b0a84u, 0x801b0a8cu, 0x801b0a94u,
                     0x801b0afcu, 0x801b0b24u} &&
@@ -1166,7 +1230,7 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
                  "interrupts, resets MMCR0/1 plus PMC1..4, sets HID0 SPD and FPSCR NI; "
                  "initializes boot info, arenas, exception and system-call vectors; "
                  "initializes the alarm queue/handler/reset node; "
-                 "stops at 0x801b0f68 before __OSModuleInit. "
+                 "resets module metadata, stops at 0x801b0f6c before __OSInterruptInit. "
                  "Re-entry skip/epilogue tested separately; first OSInit does not return.\n";
 }
 
@@ -1479,6 +1543,7 @@ int main(int argc, char** argv) {
         TestOriginalSystemCallInstallation(image);
         TestOriginalResetRegistration(image);
         TestOriginalAlarmInitialization(image);
+        TestOriginalModuleInitialization(image);
         TestOriginalCacheRanges(image);
         TestOriginalBootInfoAndArena(image);
         TestStartupHelpers(image);

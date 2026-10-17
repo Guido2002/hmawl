@@ -265,8 +265,8 @@ sets `AreWeInitialized`, calls the original `__OSGetSystemTime`, records
 reset wrappers, then executes original `PPCDisableSpeculation` and
 `PPCSetFpNonIEEEMode` to set HID0 SPD and FPSCR NI. The original boot-info
 and arena setup then runs through `OSSetArenaLo`/`OSSetArenaHi`, followed by
-original `OSExceptionInit`, `__OSInitSystemCall` and `OSInitAlarm`. It stops at
-`0x801b0f68`, before `__OSModuleInit`;
+original `OSExceptionInit`, `__OSInitSystemCall`, `OSInitAlarm` and
+`__OSModuleInit`. It stops at `0x801b0f6c`, before `__OSInterruptInit`;
 first-time `OSInit` does not yet return. Its
 already-initialized branch and return epilogue are tested separately, not used
 to skip the unfinished first-time path.
@@ -337,6 +337,13 @@ Original `OSRegisterResetFunction` is separately tested for empty/head/middle/
 tail insertion, stable equal priorities and unsigned maximum priority.
 This installs data and handler pointers only: alarm scheduling, decrementer
 interrupt delivery and execution of reset callbacks are not yet implemented.
+
+Original `__OSModuleInit` clears exactly the three low-memory module words at
+`0x800030c8`, `0x800030cc` and `0x800030d0`. Tests cover zero/poisoned values,
+repeated initialization, both interrupt states and exact CPU/RAM preservation,
+including untouched module payload data. The entry-derived OSInit continuation
+also clears poisoned module metadata. This does not link/unlink RELs, register
+native translations, or connect the SDK module list to the existing host linker.
 
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings
