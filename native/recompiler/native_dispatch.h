@@ -30,6 +30,7 @@ public:
     NativeDispatcher(const NativeDispatcher&) = delete;
     NativeDispatcher& operator=(const NativeDispatcher&) = delete;
 
+    // Registration is also allowed from onBlock, after code validation and before execution.
     void Register(uint32_t moduleId, const PpcState& state,
                   const std::vector<NativeTranslation>& translations);
     void RegisterRel(const RelImage& image, const LinkedRelModule& module,
@@ -54,6 +55,7 @@ private:
              const std::function<void(uint32_t)>& onBlock, bool externalException = false);
     std::map<uint32_t, Entry> entries_;
     bool executing_ = false;
+    bool registrationBoundary_ = false;
 };
 
 #endif

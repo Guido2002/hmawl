@@ -841,6 +841,29 @@ int main(int argc, char** argv) {
                 (31u << 26) | (4u << 21) | (27u << 16) | (467u << 1)});
             Emit(output, 0xb5f0u, {
                 (31u << 26) | (3u << 21) | (16u << 16) | (16u << 11) | (467u << 1)});
+            output << "static void (*const RelocatedOperandFunctions[])(PpcState&) = {";
+            std::ostringstream relocatedFunctions;
+            for (unsigned index = 0; index < 12; ++index) {
+                const unsigned opcode = index < 8 ? (index < 2 ? 14 + index : 22 + index) :
+                    (index == 8 ? 32 : index == 9 ? 36 : index == 10 ? 48 : 52);
+                const uint32_t address = 0xb900u + index * 0x10u;
+                RecompileOptions options{true, true};
+                options.relocationBase = 0xb000u;
+                options.addressExpression = [](uint32_t pc) {
+                    return "(relocationBase + " + std::to_string(pc - 0xb000u) + "u)";
+                };
+                options.immediate16Expression = [address](uint32_t) {
+                    return "uint32_t{ppc_read_u16(state, relocationBase + " +
+                        std::to_string(address - 0xb000u + 2) + "u)}";
+                };
+                const uint32_t word = (opcode << 26) | (3u << 21) | (4u << 16);
+                relocatedFunctions << RecompileFunction(address, {word}, options);
+                if (index) output << ", ";
+                output << "ppc_" << std::hex << std::uppercase << std::setw(8)
+                       << std::setfill('0') << address << std::dec;
+            }
+            output << "};\n";
+            generated += relocatedFunctions.str();
             generated += output.str();
         }
         std::ofstream output(argv[argc - 1], std::ios::binary);

@@ -25,6 +25,50 @@ void Require(bool condition, const char* message) {
     }
 }
 
+void TestRelocatedOperands() {
+    for (uint32_t base : {0x10000u, 0x18000u}) {
+        for (uint32_t immediate : {0u, 0x7fffu, 0x8000u, 0xffffu}) {
+            for (unsigned index = 0; index < 12; ++index) {
+                PpcState state;
+                state.memory.resize(0x20000);
+                const auto pc = base + 0x900u + index * 0x10u;
+                state.pc = pc;
+                ppc_write_u16(state, pc + 2, static_cast<uint16_t>(immediate));
+                const auto signedValue = static_cast<int32_t>(immediate ^ 0x8000u) - 0x8000;
+                state.gpr[3] = 0x12345678u;
+                state.gpr[4] = index < 8 ? 0x12345678u : 0x6000u - static_cast<uint32_t>(signedValue);
+                state.fpr[3] = {ppc_widen_single_bits(0x40200000u), 0x12345678u};
+                ppc_write_u32(state, 0x6000, 0x40600000u);
+                RelocatedOperandFunctions[index](state);
+                Require(state.pc == pc + 4, "Relocated native fallthrough used its compile-time PC.");
+                if (index < 2) {
+                    const uint32_t operand = index ? immediate << 16 : static_cast<uint32_t>(signedValue);
+                    Require(state.gpr[3] == 0x12345678u + operand,
+                            "Relocated addi/addis sign or high-half arithmetic differs.");
+                } else if (index < 8) {
+                    const auto operand = immediate << ((index & 1u) ? 16 : 0);
+                    const auto expected = index < 4 ? 0x12345678u | operand :
+                        index < 6 ? 0x12345678u ^ operand : 0x12345678u & operand;
+                    Require(state.gpr[4] == expected, "Relocated logical operand or shifted form differs.");
+                    if (index >= 6) {
+                        Require((state.cr >> 28) == (expected == 0 ? 2u : (expected >> 31) ? 8u : 4u),
+                                "Relocated andi/andis did not record CR0.");
+                    }
+                } else if (index == 8) {
+                    Require(state.gpr[3] == 0x40600000u, "Relocated lwz address differs.");
+                } else if (index == 9) {
+                    Require(ppc_read_u32(state, 0x6000) == 0x12345678u, "Relocated stw address differs.");
+                } else if (index == 10) {
+                    const auto bits = ppc_widen_single_bits(0x40600000u);
+                    Require(state.fpr[3] == PpcFpr{bits, bits}, "Relocated lfs address differs.");
+                } else {
+                    Require(ppc_read_u32(state, 0x6000) == 0x40200000u, "Relocated stfs address differs.");
+                }
+            }
+        }
+    }
+}
+
 void TestFloatingPointArithmetic() {
     for (unsigned index = 0; index < 24; ++index) {
         PpcState state;
@@ -4241,10 +4285,31 @@ void TestNativeDispatch() {
     Reject([&] { dispatcher.Execute(state, 0x4000); },
            "No native translation registered at 0x00004020");
     Reject([&] { dispatcher.Unregister(1); }, "not registered");
-    dispatcher.Register(1, state, module);
     state.lr = 0x4ff0;
-    dispatcher.Execute(state, 0x4000);
-    Require(state.pc == 0x4ff0, "Re-registering native module failed.");
+    state.gpr[3] = 10;
+    dispatcher.Execute(state, 0x4000, 3, 2, [&](uint32_t pc) {
+        if (pc == 0x4000) {
+            auto invalid = module;
+            invalid.back().expectedWords[0] ^= 1u;
+            Reject([&] { dispatcher.Register(1, state, invalid); }, "code mismatch");
+            Require(!dispatcher.Contains(0x4020), "Failed boundary registration leaked an entry.");
+            Reject([&] { dispatcher.Unregister(0); }, "during execution");
+            dispatcher.Register(1, state, module);
+        }
+    });
+    Require(state.pc == 0x4ff0 && state.gpr[3] == 17,
+            "Atomic native module registration at a block boundary failed.");
+    state.lr = 0x4ff0;
+    Reject([&] {
+        dispatcher.Execute(state, 0x4040, 1, 1, [&](uint32_t) {
+            ppc_write_u32(state, 0x4040, module.back().expectedWords[0] ^ 1u);
+        });
+    }, "code mismatch");
+    ppc_write_u32(state, 0x4040, module.back().expectedWords[0]);
+    state.lr = 0x4ff0;
+    Reject([&] {
+        dispatcher.Execute(state, 0x4040, 1, 1, [&](uint32_t) { state.pc = 0x4020; });
+    }, "observer changed execution PC");
     Reject([&] { dispatcher.Execute(state, 0x4001); }, "Invalid");
     state.lr = 0x4ff1;
     Reject([&] { dispatcher.Execute(state, 0x4000); }, "Invalid");
@@ -4286,6 +4351,7 @@ void TestNativeDispatch() {
 int main() {
     try {
         TestLogicalRegisters();
+        TestRelocatedOperands();
         TestYieldingBranchesAndPrecisePc();
         TestFloatingPointTransfers();
         TestFloatingPointArithmetic();

@@ -30,7 +30,7 @@ void NativeDispatcher::CheckCode(const PpcState& state,
 void NativeDispatcher::Register(
     uint32_t moduleId, const PpcState& state,
     const std::vector<NativeTranslation>& translations) {
-    if (executing_) {
+    if (executing_ && !registrationBoundary_) {
         throw std::runtime_error("Cannot change native bindings during execution.");
     }
     if (translations.empty()) {
@@ -158,10 +158,25 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
         if (entry == entries_.end()) {
             throw std::runtime_error("No native translation registered at " + Address(state.pc) + ".");
         }
+        const auto blockAddress = state.pc;
         CheckCode(state, entry->second.translation);
+        const auto function = entry->second.translation.function;
         --remaining;
-        if (onBlock) onBlock(state.pc);
-        entry->second.translation.function(state);
+        if (onBlock) {
+            registrationBoundary_ = true;
+            try {
+                onBlock(state.pc);
+            } catch (...) {
+                registrationBoundary_ = false;
+                throw;
+            }
+            registrationBoundary_ = false;
+            if (state.pc != blockAddress) {
+                throw std::runtime_error("Native block observer changed execution PC.");
+            }
+            CheckCode(state, entries_.at(blockAddress).translation);
+        }
+        function(state);
     } while (state.pc != returnAddress ||
              (externalException && state.externalInterrupt && state.externalInterrupt->active));
 }

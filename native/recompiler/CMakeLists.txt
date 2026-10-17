@@ -54,7 +54,17 @@ if(HMAWL_ORIGINAL_US_DOL)
             original_startup_manifest.h
         VERBATIM
     )
-    add_library(hmawl_original_startup_runtime original_startup.cpp "${generated_original_startup}")
+    get_filename_component(original_directory "${HMAWL_ORIGINAL_US_DOL}" DIRECTORY)
+    add_executable(hmawl_generate_original_scene generate_original_scene.cpp)
+    target_link_libraries(hmawl_generate_original_scene PRIVATE hmawl_recompiler_core)
+    set(generated_original_scene "${CMAKE_CURRENT_BINARY_DIR}/generated_original_scene.h")
+    add_custom_command(OUTPUT "${generated_original_scene}"
+        COMMAND hmawl_generate_original_scene "${original_directory}/wlp1.rel" "${generated_original_scene}"
+        DEPENDS hmawl_generate_original_scene "${original_directory}/wlp1.rel"
+        VERBATIM
+    )
+    add_library(hmawl_original_startup_runtime original_startup.cpp
+        "${generated_original_startup}" "${generated_original_scene}")
     target_include_directories(hmawl_original_startup_runtime PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(hmawl_original_startup_runtime PUBLIC hmawl_recompiler_core)
     add_executable(hmawl_original_startup original_startup_main.cpp)
@@ -65,6 +75,7 @@ if(HMAWL_ORIGINAL_US_DOL)
     endif()
     if(BUILD_TESTING)
         add_executable(hmawl_original_startup_tests original_startup_tests.cpp)
+        target_include_directories(hmawl_original_startup_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
         target_link_libraries(hmawl_original_startup_tests PRIVATE hmawl_original_startup_runtime)
         add_test(NAME hmawl_original_startup_tests
             COMMAND hmawl_original_startup_tests "${HMAWL_ORIGINAL_US_DOL}")

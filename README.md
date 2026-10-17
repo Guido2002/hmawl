@@ -50,6 +50,9 @@ cmake --build build\native --config Release --target hmawl_original_startup hmaw
 .\build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup .\build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz" --max-blocks 10000000
 ```
 
+Keep the extracted, verified `wlp1.rel` beside the DOL; its scene translations are
+generated locally at build time and are also included with `BUILD_TESTING=OFF`.
+
 The verified runner now completes original EXIInit and SIInit, including actual immediate
 ID-command/read transactions against explicitly empty external slots and
 native console output of both SDK versions. Original SI code configures sampling,
@@ -134,11 +137,15 @@ and a real 128-byte resource read through original SDK/game DVD completion callb
 update-mask calculation, resource-manager preparation and audio-update calls return.
 The original SystemTask transition now loads `wlp1.rel` and original `OSLink`
 relocates its sections, entries and available imports and clears its allocated BSS.
-With `--max-blocks 10000000`, it stops with **exit code 3** at the relocated
-module prolog, `PC=0x803A4A8C`, `LR=0x80177C88`, which has no native binding yet.
+**The relocated module prolog now executes all 28 original C++ constructors and
+enters mode-41 scene initialization**, including two additional real DVD reads.
+The static native bindings follow the actual allocation instead of requiring a fixed REL address.
+With `--max-blocks 10000000`, it stops with **exit code 3** at scene-manager
+initialization, `PC=0x80154604`, `LR=0x80154B94`, which has no native binding yet.
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
-imports), two real reads totaling 433440 bytes, 93 lists and 2943 DSP data DMAs/891660 bytes.
+imports), four real reads totaling 744192 bytes, 133 lists and 4223 DSP data DMAs/1280140 bytes.
+Alternate module/BSS allocations verify constructor order, ABI preservation and relocation guards.
 Windows timing changes these counts. Submitted PCM is still original zero samples,
 not intro music; general voice mixing/ADPCM remains unsupported.
 Device/queue errors fail explicitly;

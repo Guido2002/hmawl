@@ -1,5 +1,6 @@
 #include "original_startup.h"
 #include "rel_image.h"
+#include "generated_original_scene.h"
 #include "native_console.h"
 #include "native_exi_bus.h"
 #include "native_si_bus.h"
@@ -93,6 +94,103 @@ void RequireFailure(Function function, const char* message) {
     bool failed = false;
     try { function(); } catch (const std::exception&) { failed = true; }
     Require(failed, message);
+}
+
+struct SceneConstructors {
+    uint32_t module = 0;
+    unsigned returned = 0;
+    bool active = false;
+    std::array<uint32_t, 32> registers{};
+    std::array<PpcFpr, 32> floating{};
+
+    void Observe(uint32_t pc, const PpcState& state) {
+        if (!module) return;
+        if (pc == module + 0x45b0cu) {
+            Require(!active && returned < 28 &&
+                        state.gpr[12] == ppc_read_u32(state, module + 0x46250u + returned * 4),
+                    "Original scene constructor dispatch order differs.");
+            std::copy(std::begin(state.gpr), std::end(state.gpr), registers.begin());
+            floating = state.fpr;
+            active = true;
+        }
+        if (pc == module + 0x45b14u) {
+            Require(active && state.gpr[1] == registers[1] && state.gpr[2] == registers[2] &&
+                        state.gpr[13] == registers[13],
+                    "Original scene constructor changed stack/SDA state.");
+            for (unsigned i = 14; i < 32; ++i) {
+                Require(state.gpr[i] == registers[i] && state.fpr[i] == floating[i],
+                        "Original scene constructor did not preserve nonvolatile registers.");
+            }
+            ++returned;
+            active = false;
+        }
+    }
+};
+
+void TestScenePlacements(const DolImage& image, const std::vector<uint8_t>& bytes) {
+    for (const auto& placement : std::array<std::array<uint32_t, 2>, 2>{{
+             {{0x80508000u, 0x80e00000u}}, {{0x81012000u, 0x81504000u}}}}) {
+        auto state = CreateOriginalStartupState(image);
+        NativeDispatcher dispatcher;
+        RegisterOriginalStartup(dispatcher, state);
+        const auto module = placement[0], bss = placement[1];
+        const auto offset = ppc_memory_offset(state, module, bytes.size());
+        std::copy(bytes.begin(), bytes.end(), state.memory.begin() + offset);
+        const auto bssOffset = ppc_memory_offset(state, bss, 0x4af4);
+        std::fill_n(state.memory.begin() + bssOffset, 0x4af4, 0xa5);
+        state.gpr[1] = 0x8035cfa0u;
+        state.gpr[2] = 0x80351e40u;
+        state.gpr[13] = 0x8034e9c0u;
+        state.lr = 0x80003000u;
+        dispatcher.Execute(state, 0x801b6988u);
+        state.gpr[3] = module;
+        state.gpr[4] = bss;
+        state.lr = 0x80003000u;
+        dispatcher.Execute(state, 0x801b4860u, 1000000);
+        Require(state.gpr[3] == 1, "Original OSLink rejected an alternate scene placement.");
+        const auto prolog = VerifyOriginalSceneLink(state, bytes, module, bss);
+        const auto translations = OriginalSceneTranslations(state, module);
+        const auto first = ppc_read_u32(state, prolog);
+        ppc_write_u32(state, prolog, 0);
+        RequireFailure([&] { dispatcher.Register(2, state, translations); },
+                       "Corrupt scene code was bound as valid original code.");
+        Require(!dispatcher.Contains(prolog), "Rejected scene registration was not atomic.");
+        ppc_write_u32(state, prolog, first);
+        dispatcher.Register(2, state, translations);
+        SceneConstructors constructors;
+        constructors.module = module;
+        state.lr = 0x80003000u;
+        bool reachedScene = false;
+        try {
+            dispatcher.Execute(state, prolog, 100000, 128, [&](uint32_t pc) {
+                constructors.Observe(pc, state);
+                if (pc == module + 0x45b8cu) {
+                    reachedScene = true;
+                    throw std::runtime_error("Test stops before using uninitialized game managers.");
+                }
+            });
+        } catch (const std::exception&) {
+            if (!reachedScene) throw;
+        }
+        Require(reachedScene && constructors.returned == 28 && !constructors.active &&
+                    state.gpr[1] == 0x8035cf90u,
+                "Relocatable prolog did not execute all original constructors at an alternate placement.");
+        for (const auto& copy : std::array<std::array<uint32_t, 2>, 4>{{
+                 {{0x4c158u, 0x8025116cu}}, {{0x4c164u, 0x80251178u}},
+                 {{0x4c170u, 0x80251160u}}, {{0x4c17cu, 0x80251154u}}}}) {
+            for (unsigned i = 0; i < 12; ++i) {
+                Require(ppc_read_u8(state, module + copy[0] + i) == ppc_read_u8(state, copy[1] + i),
+                        "Relocated original static constructor data differs from its DOL source.");
+            }
+        }
+        const auto immediateWord = ppc_read_u32(state, prolog + 8);
+        ppc_write_u32(state, prolog + 8, immediateWord ^ 1u);
+        state.lr = 0x80003000u;
+        RequireFailure([&] { dispatcher.Execute(state, prolog); },
+                       "Modified relocated immediate bypassed native code integrity.");
+        dispatcher.Unregister(2);
+        Require(!dispatcher.Contains(prolog), "Scene code remained bound after unregister.");
+    }
 }
 
 class DolFixtures {
@@ -1143,6 +1241,7 @@ int main(int argc, char** argv) {
                 std::vector<uint8_t> pendingRead;
                 std::vector<uint8_t> sceneBytes;
                 uint32_t sceneModule = 0, sceneBss = 0, sceneProlog = 0;
+                SceneConstructors sceneConstructors;
                 const auto transfer = pcmState.transferDisc;
                 pcmState.transferDisc = [&](const std::array<uint32_t, 3>& command, uint32_t length) {
                     auto bytes = transfer(command, length);
@@ -1182,7 +1281,9 @@ int main(int argc, char** argv) {
                     if (pc == 0x80177c6cu) {
                         Require(pcmState.gpr[3] == 1, "Original OSLink rejected the scene module.");
                         sceneProlog = VerifyOriginalSceneLink(pcmState, sceneBytes, sceneModule, sceneBss);
+                        sceneConstructors.module = sceneModule;
                     }
+                    sceneConstructors.Observe(pc, pcmState);
                     if (!pendingRead.empty()) {
                         const auto offset = ppc_memory_offset(pcmState, pendingReadAddress, pendingRead.size());
                         Require(std::equal(pendingRead.begin(), pendingRead.end(), pcmState.memory.begin() + offset),
@@ -1228,35 +1329,40 @@ int main(int argc, char** argv) {
                           << " reads=" << resourceReads << "/" << resourceBytes
                           << " file callbacks=" << fileCallbacks << "/" << readNotifications << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            sceneProlog != 0 && pcmResult.pc == sceneProlog && pcmResult.lr == 0x80177c88 &&
-                            pcmResult.sceneModuleLinked &&
+                            sceneProlog != 0 && pcmResult.pc == 0x80154604u && pcmResult.lr == 0x80154b94u &&
+                            pcmResult.sceneModuleLinked && pcmResult.scenePrologEntered &&
+                            pcmResult.sceneInitializationEntered && !pcmResult.scenePrologReturned &&
+                            pcmResult.sceneConstructorsReturned == 28 &&
+                            sceneConstructors.returned == 28 && !sceneConstructors.active &&
+                            !dispatcher.Contains(sceneProlog) &&
                             pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
                             pcmResult.gameInitializationReturned && pcmResult.gameLoopEntered &&
                             pcmResult.firstLoopPreparationReturned &&
                             pcmState.pcm->active && pcmState.pcm->starts == 1 &&
-                            pcmState.pcm->completedBuffers == 93 && pcmState.pcm->submittedFrames == submittedFrames &&
-                            submittedFrames == 15040 && pcmHandlers == 93 && pcmCallbacks == 93 &&
-                            commandAddress != 0 && commandHandshakes == 93 &&
-                            pcmState.dspHardware->task->cpuMailSent == 289 &&
-                            pcmState.dspHardware->task->cpuMailConsumed == 289 &&
+                            pcmState.pcm->completedBuffers == 133 && pcmState.pcm->submittedFrames == submittedFrames &&
+                            submittedFrames == 21440 && pcmHandlers == 133 && pcmCallbacks == 133 &&
+                            commandAddress != 0 && commandHandshakes == 133 &&
+                            pcmState.dspHardware->task->cpuMailSent == 409 &&
+                            pcmState.dspHardware->task->cpuMailConsumed == 409 &&
                             !(pcmState.dspHardware->toDspMailbox & 0x80000000u) &&
-                            pcmState.dspHardware->task->dataTransfers == 2943 &&
-                            pcmState.dspHardware->task->transferredBytes == 891660 &&
+                            pcmState.dspHardware->task->dataTransfers == 4223 &&
+                            pcmState.dspHardware->task->transferredBytes == 1280140 &&
                             pcmState.dspHardware->instructionPc == 0x4a &&
-                            pcmState.dspHardware->task->interrupts == 94 &&
-                            pcmState.dspHardware->sentMail == 96 && pcmState.dspHardware->consumedMail == 96 &&
+                            pcmState.dspHardware->task->interrupts == 134 &&
+                            pcmState.dspHardware->sentMail == 136 && pcmState.dspHardware->consumedMail == 136 &&
                             pcmState.dspHardware->task->mode == NativeDspTaskMode::Running &&
                             pcmState.dspHardware->completedPrograms == 1 &&
                             !pcmState.systemCallActive && !pcmState.externalInterrupt->active &&
                             pcmState.externalInterrupt->suspended.empty(),
-                        "Original startup did not link the scene and reach its genuine prolog.");
+                        "Original startup did not execute the scene constructors and enter original scene initialization.");
                 Require(returnedObjects.size() == objectReturns.size() &&
                             loopSteps == loopReturns.size() && arrayConstructors == 2 &&
                             pcmResult.startupObjectsReturned == objectReturns.size() &&
                             pcmResult.resourceReadNotifications == readNotifications &&
-                            resourceReads == 2 && resourceBytes == 433440 &&
+                            resourceReads == 4 && resourceBytes == 744192 &&
                             fileCallbacks == resourceReads && readNotifications == resourceReads && pendingRead.empty(),
                         "Original startup resource reads did not complete through the real DVD callback chain.");
+                TestScenePlacements(image, sceneBytes);
                 const auto camera = returnedObjects.front();
                 Require(ppc_read_u32(pcmState, 0x80349228u) == camera &&
                             ppc_read_u32(pcmState, camera + 0x10) == 0x802aba5cu &&
@@ -1327,10 +1433,28 @@ int main(int argc, char** argv) {
                             plainResult.gameInitializationReturned &&
                             plainResult.gameLoopEntered && plainResult.firstLoopPreparationReturned &&
                             plainResult.sceneModuleLinked &&
+                            plainResult.scenePrologEntered && plainResult.sceneInitializationEntered &&
+                            !plainResult.scenePrologReturned && plainResult.sceneConstructorsReturned == 28 &&
+                            !dispatcher.Contains(sceneProlog) &&
                             plainResult.startupObjectsReturned == pcmResult.startupObjectsReturned &&
                             plainResult.resourceReadNotifications == pcmResult.resourceReadNotifications &&
                             plainPcm.discInterface->completedTransfers == pcmState.discInterface->completedTransfers,
                         "PCM observation changed CPU/RAM, DMA timing, original interrupts or native DSP execution.");
+                auto failedScene = CreateOriginalStartupState(image);
+                InstallOriginalStartupDisc(failedScene, disc);
+                failedScene.pcm.emplace();
+                uint64_t failedTicks = 1000000, failedFrames = 0;
+                bindPcmTest(failedScene, failedTicks, failedFrames);
+                const auto rejectedScene = RunOriginalStartup(dispatcher, failedScene, 10000000, 128,
+                    [&](uint32_t pc) {
+                        if (pc == sceneProlog) throw std::runtime_error("Injected scene observer failure.");
+                    });
+                Require(rejectedScene.reason == "Injected scene observer failure." &&
+                            rejectedScene.sceneModuleLinked && rejectedScene.scenePrologEntered &&
+                            rejectedScene.sceneConstructorsReturned == 0 &&
+                            !rejectedScene.sceneInitializationEntered && !rejectedScene.scenePrologReturned &&
+                            !dispatcher.Contains(sceneProlog) && !failedScene.callGuest && !failedScene.callException,
+                        "Scene execution failure leaked native bindings or fabricated initialization.");
                 auto damagedLink = CreateOriginalStartupState(image);
                 InstallOriginalStartupDisc(damagedLink, disc);
                 damagedLink.pcm.emplace();

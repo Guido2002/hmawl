@@ -98,6 +98,25 @@ void TestGeneratedCpp() {
             "blr did not translate to a native return.");
 }
 
+void TestInvalidRelocatableOptions() {
+    RecompileOptions options{};
+    options.relocationBase = 0x80000000u;
+    bool rejected = false;
+    try { RecompileFunction(0x80003100u, {0x38600005u}, options); }
+    catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("precise PC") != std::string::npos;
+    }
+    Require(rejected, "Relocatable code accepted non-yielding or imprecise execution.");
+    options.yieldAtBranches = options.precisePc = true;
+    options.immediate16Expression = [](uint32_t) { return "0u"; };
+    rejected = false;
+    try { RecompileFunction(0x80003100u, {0x2c030000u}, options); }
+    catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("relocated immediate") != std::string::npos;
+    }
+    Require(rejected, "Unsupported relocated immediate silently used its compile-time operand.");
+}
+
 void TestLinkRegisterAndRotateInstructions() {
     const std::string code = RecompileFunction(
         0x80003100u,
@@ -531,6 +550,7 @@ int main() {
     try {
         TestDolTextSectionRead();
         TestGeneratedCpp();
+        TestInvalidRelocatableOptions();
         TestLinkRegisterAndRotateInstructions();
         TestInternalBranchAndUnsupportedInstruction();
         TestGuestMemoryAndBranchCondition();

@@ -45,6 +45,11 @@ std::string EffectiveAddress(uint32_t base, int32_t displacement) {
            "] + static_cast<uint32_t>(" + std::to_string(displacement) + ")";
 }
 
+std::string EffectiveAddress(uint32_t base, const std::string& displacement) {
+    return (base ? "state.gpr[" + std::to_string(base) + "] + " : "") +
+        "static_cast<uint32_t>(" + displacement + ")";
+}
+
 void EmitRecordResult(std::ostringstream& output, bool record,
                       const std::string& result) {
     if (record) {
@@ -115,19 +120,22 @@ void EmitPairedTransfer(std::ostringstream& output, uint32_t pc, uint32_t reg,
 
 void EmitBranch(std::ostringstream& output, uint32_t target, uint32_t address,
                 uint32_t next, uint32_t nextAddress, uint64_t end,
-                bool conditional, bool yieldAtBranches) {
-    if (!yieldAtBranches && IsInFunction(target, address, end)) {
+                bool conditional, const RecompileOptions& options) {
+    const auto location = [&](uint32_t value) {
+        return options.addressExpression ? options.addressExpression(value) : Hex(value);
+    };
+    if (!options.yieldAtBranches && IsInFunction(target, address, end)) {
         output << "        goto " << Label(target) << ";\n";
     } else {
-        output << "        state.pc = " << Hex(target) << ";\n"
+        output << "        state.pc = " << location(target) << ";\n"
                << "        return;\n";
     }
     if (conditional) {
-        if (!yieldAtBranches && static_cast<uint64_t>(nextAddress) < end) {
+        if (!options.yieldAtBranches && static_cast<uint64_t>(nextAddress) < end) {
             output << "    } else {\n        goto " << Label(nextAddress)
                    << ";\n    }\n";
         } else {
-            output << "    } else {\n        state.pc = " << Hex(next)
+            output << "    } else {\n        state.pc = " << location(next)
                    << ";\n        return;\n    }\n";
         }
     }
@@ -142,6 +150,13 @@ std::string RecompileFunction(uint32_t address,
         throw std::runtime_error(
             "Function requires a 4-byte-aligned address and at least one instruction.");
     }
+    if ((options.addressExpression || options.immediate16Expression || options.relocationBase) &&
+        (!options.precisePc || !options.yieldAtBranches)) {
+        throw std::runtime_error("Relocatable translations require precise PC and yielding branches.");
+    }
+    const auto location = [&](uint32_t value) {
+        return options.addressExpression ? options.addressExpression(value) : Hex(value);
+    };
 
     const uint64_t end = static_cast<uint64_t>(address) +
                          instructions.size() * sizeof(uint32_t);
@@ -162,6 +177,10 @@ std::string RecompileFunction(uint32_t address,
     }
     output << "static void ppc_" << Hex(address).substr(2)
            << "(PpcState& state) {\n";
+    if (options.relocationBase) {
+        output << "    const uint32_t relocationBase = state.pc - "
+               << Hex(address - options.relocationBase) << "u;\n";
+    }
     if (hasIndirectBranch) {
         output << "    uint32_t indirect_target = 0;\n";
     }
@@ -176,11 +195,19 @@ std::string RecompileFunction(uint32_t address,
         const uint32_t ra = Bits(instruction, 16, 5);
         const uint32_t rb = Bits(instruction, 11, 5);
         const uint32_t immediate = Bits(instruction, 0, 16);
+        const auto relocated = options.immediate16Expression ? options.immediate16Expression(pc) : "";
+        const auto signedImmediate = relocated.empty() ? std::to_string(SignExtend(immediate, 16)) :
+            "(static_cast<int32_t>((static_cast<uint32_t>(" + relocated +
+                ") ^ 0x8000u) & 0xffffu) - 32768)";
+        if (!relocated.empty() && opcode != 14 && opcode != 15 &&
+            (opcode < 24 || opcode > 29) && (opcode < 32 || opcode > 55)) {
+            throw std::runtime_error("Unsupported relocated immediate encoding at " + Hex(pc) + ".");
+        }
 
         output << "\n" << Label(pc) << ": {\n"
                << "    // " << Hex(pc) << ": " << Hex(instruction) << "\n";
         if (options.precisePc) {
-            output << "    state.pc = " << Hex(pc) << ";\n";
+            output << "    state.pc = " << location(pc) << ";\n";
         }
 
         switch (opcode) {
@@ -210,7 +237,10 @@ std::string RecompileFunction(uint32_t address,
                 opcode == 15 ? static_cast<int64_t>(value) * 65536 : value;
             output << "    state.gpr[" << rt << "] = "
                    << (ra == 0 ? "0u" : "state.gpr[" + std::to_string(ra) + "]")
-                   << " + static_cast<uint32_t>(" << shifted << ");\n";
+                   << " + static_cast<uint32_t>(";
+            if (relocated.empty()) output << shifted;
+            else output << signedImmediate;
+            output << ")" << (!relocated.empty() && opcode == 15 ? " * 65536u" : "") << ";\n";
             break;
         }
         case 8:
@@ -252,22 +282,22 @@ std::string RecompileFunction(uint32_t address,
             const uint32_t target =
                 RelativeTarget(pc, displacement, (instruction & 2u) != 0);
             if ((instruction & 1u) != 0) {
-                output << "    state.lr = " << Hex(next) << ";\n";
+                output << "    state.lr = " << location(next) << ";\n";
             }
             output << "    if (ppc_branch_condition(state, " << bo << ", "
                    << bi << ")) {\n";
             if ((instruction & 1u) != 0) {
-                output << "        ppc_call_guest(state, " << Hex(target) << ");\n"
+                output << "        ppc_call_guest(state, " << location(target) << ");\n"
                        << "    }\n";
                 if (!options.yieldAtBranches && static_cast<uint64_t>(next) < end) {
                     output << "    goto " << Label(next) << ";\n";
                 } else {
-                    output << "    state.pc = " << Hex(next) << ";\n"
+                    output << "    state.pc = " << location(next) << ";\n"
                            << "    return;\n";
                 }
             } else {
                 EmitBranch(output, target, address, next, next, end, true,
-                           options.yieldAtBranches);
+                           options);
             }
             break;
         }
@@ -277,17 +307,17 @@ std::string RecompileFunction(uint32_t address,
             const uint32_t target =
                 RelativeTarget(pc, displacement, (instruction & 2u) != 0);
             if ((instruction & 1u) != 0) {
-                output << "    state.lr = " << Hex(next) << ";\n"
-                       << "    ppc_call_guest(state, " << Hex(target) << ");\n";
+                output << "    state.lr = " << location(next) << ";\n"
+                       << "    ppc_call_guest(state, " << location(target) << ");\n";
                 if (!options.yieldAtBranches && static_cast<uint64_t>(next) < end) {
                     output << "    goto " << Label(next) << ";\n";
                 } else {
-                    output << "    state.pc = " << Hex(next) << ";\n"
+                    output << "    state.pc = " << location(next) << ";\n"
                            << "    return;\n";
                 }
             } else {
                 EmitBranch(output, target, address, next, next, end, false,
-                           options.yieldAtBranches);
+                           options);
             }
             break;
         }
@@ -298,13 +328,15 @@ std::string RecompileFunction(uint32_t address,
         case 28:
         case 29: {
             const uint32_t source = rt;
-            const uint32_t shift = (opcode == 25 || opcode == 27) ? 16 : 0;
+            const uint32_t shift = (opcode == 25 || opcode == 27 || opcode == 29) ? 16 : 0;
             const char* operation =
                 (opcode == 26 || opcode == 27) ? "^" :
                 (opcode == 28 || opcode == 29) ? "&" : "|";
             const uint32_t value = immediate << shift;
             output << "    state.gpr[" << ra << "] = state.gpr[" << source
-                   << "] " << operation << " " << Hex(value) << ";\n";
+                   << "] " << operation << " "
+                   << (relocated.empty() ? Hex(value) : "((" + relocated + ") << " +
+                       std::to_string(shift) + ")") << ";\n";
             if (opcode == 28 || opcode == 29) {
                 EmitRecordResult(output, true,
                                  "state.gpr[" + std::to_string(ra) + "]");
@@ -437,7 +469,7 @@ std::string RecompileFunction(uint32_t address,
         case 54:
         case 55:
             EmitFloatingTransfer(output, pc, rt, ra,
-                EffectiveAddress(ra, SignExtend(immediate, 16)),
+                EffectiveAddress(ra, signedImmediate),
                 opcode <= 51, opcode == 49 || opcode == 51 || opcode == 53 || opcode == 55,
                 opcode == 48 || opcode == 49 || opcode == 52 || opcode == 53);
             break;
@@ -573,9 +605,8 @@ std::string RecompileFunction(uint32_t address,
         case 45:
         case 46:
         case 47: {
-            const int32_t displacement = SignExtend(immediate, 16);
             const std::string ea =
-                EffectiveAddress(ra == 0 ? 0 : ra, displacement);
+                EffectiveAddress(ra, signedImmediate);
             const bool update = opcode == 33 || opcode == 35 ||
                                 opcode == 37 || opcode == 39 ||
                                 opcode == 41 || opcode == 43 ||
@@ -645,8 +676,8 @@ std::string RecompileFunction(uint32_t address,
             if (instruction != 0x44000002u) {
                 throw std::runtime_error("Unsupported sc encoding at " + Hex(pc) + ".");
             }
-            output << "    ppc_system_call(state, " << Hex(next) << "u);\n"
-                   << "    state.pc = " << Hex(next) << "u;\n";
+            output << "    ppc_system_call(state, " << location(next) << ");\n"
+                   << "    state.pc = " << location(next) << ";\n";
             if (!options.yieldAtBranches && static_cast<uint64_t>(next) < end) {
                 output << "    goto " << Label(next) << ";\n";
             } else {
@@ -697,7 +728,7 @@ std::string RecompileFunction(uint32_t address,
             output << "    const uint32_t " << target << " = state."
                    << (extendedOpcode == 16 ? "lr" : "ctr") << " & ~3u;\n";
             if (link != 0) {
-                output << "    state.lr = " << Hex(next) << ";\n";
+                output << "    state.lr = " << location(next) << ";\n";
             }
             output << "    if (ppc_branch_condition(state, " << bo << ", " << bi
                    << ")) {\n";
@@ -706,7 +737,7 @@ std::string RecompileFunction(uint32_t address,
                 if (!options.yieldAtBranches && static_cast<uint64_t>(next) < end) {
                     output << "        goto " << Label(next) << ";\n";
                 } else {
-                    output << "        state.pc = " << Hex(next) << ";\n"
+                    output << "        state.pc = " << location(next) << ";\n"
                            << "        return;\n";
                 }
             } else if (extendedOpcode == 528 && !options.yieldAtBranches) {
@@ -720,7 +751,7 @@ std::string RecompileFunction(uint32_t address,
                 output << "    } else {\n        goto " << Label(next)
                        << ";\n    }\n";
             } else {
-                output << "    } else {\n        state.pc = " << Hex(next)
+                output << "    } else {\n        state.pc = " << location(next)
                        << ";\n        return;\n    }\n";
             }
             break;
@@ -1133,7 +1164,7 @@ std::string RecompileFunction(uint32_t address,
         if (!branch && static_cast<uint64_t>(next) < end) {
             output << "    goto " << Label(next) << ";\n";
         } else if (!branch) {
-            output << "    state.pc = " << Hex(next) << ";\n"
+            output << "    state.pc = " << location(next) << ";\n"
                    << "    return;\n";
         }
         output << "}\n";

@@ -18,6 +18,9 @@ cmake --build build\native --config Release --target hmawl_original_startup
 build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz" --max-blocks 10000000
 ```
 
+The extracted `wlp1.rel` must be beside the DOL. The scene generator verifies its
+USA SHA-1 and emits native C++ locally, including for `BUILD_TESTING=OFF`.
+
 Optional positive decimal limits are `--max-blocks 1000000` and
 `--max-depth 128`. The runner never reports a successful game boot. Exit codes:
 `1` input/configuration error, `2` invalid invocation, `3` unsupported dependency
@@ -170,8 +173,8 @@ Initial silent command lists now execute their output DMA and send their own
 `0xDCD10002` completion mail/IRQ. The original CPU handler responds with
 `0xCDD10003`; the task's scheduler-control dispatch returns to word `0x4A` to wait
 for another list, rather than halting or synthesizing completion. The deterministic
-disc fixture verifies 93 lists, 2943 data transfers/891660 bytes, 289/289 CPU mails,
-96/96 DSP mails and 94 task IRQs (including task initialization). Production Windows
+disc fixture verifies 133 lists, 4223 data transfers/1280140 bytes, 409/409 CPU mails,
+136/136 DSP mails and 134 task IRQs (including task initialization). Production Windows
 counts vary with host time. This does not implement general voice mixing, multiply/
 accumulate or ADPCM; initial output buffers remain silent.
 
@@ -215,7 +218,8 @@ The first game-system initialization returns to main at `0x8000AA6C`, followed b
 eleven original startup objects and a real DVD resource read. The original loop
 enters at `0x8000AC34`; preparation returns through `0x8000AC64` before the
 SystemTask transition at `0x8017755C`. It now loads and links the original scene REL,
-then stops at the unbound relocated prolog `0x803A4A8C`, LR `0x80177C88`.
+executes all 28 module constructors and enters mode-41 scene initialization.
+The next dependency is manager initialization at `0x80154604`, LR `0x80154B94`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -388,7 +392,8 @@ and, with `--max-blocks 10000000`, executes eleven post-system-init constructors
 and a real 128-byte resource read. Its original main loop enters the first iteration;
 reset dispatch, update-mask calculation and resource/audio preparation return.
 SystemTask now loads and links `wlp1.rel` through the original SDK `OSLink`.
-It reaches `PC=0x803A4A8C`, LR `0x80177C88`, the unbound relocated module prolog;
+The relocated prolog executes its 28 constructors and enters scene initialization.
+It reaches `PC=0x80154604`, LR `0x80154B94`, the unbound scene-manager initialization;
 DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier.
 Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
@@ -409,15 +414,15 @@ of its stack, SDA and nonvolatile integer/floating registers. Traced and untrace
 startup produce identical RAM, CPU state, AI/DSP/ARAM state, output and sampled time; damaged
 constructor words fail integrity validation without claiming later milestones.
 The separate deterministic PCM fixture uses 8 ticks while either AI sampling or PCM
-DMA is active. 93 actual timed DMA periods execute 93 original handlers/
-callbacks and 93 complete DSP lists. It reaches the relocated scene prolog
-with 15040 submitted silent frames, 289 CPU mail words sent/consumed, 96 DSP mails
-sent/consumed and 94 task IRQs. The task is still running/waiting, not a completed
+DMA is active. 133 actual timed DMA periods execute 133 original handlers/
+callbacks and 133 complete DSP lists. It reaches original scene-manager initialization
+with 21440 submitted silent frames, 409 CPU mail words sent/consumed, 136 DSP mails
+sent/consumed and 134 task IRQs. The task is still running/waiting, not a completed
 program; no active or suspended CPU interrupt remains. Observed and unobserved executions
 match RAM/CPU state, DSP DRAM/registers, clock samples, DMA phase/counts and
-interrupt/DSP steps. 2943 DSP data DMAs transfer 891660 bytes; all 18 words of the
+interrupt/DSP steps. 4223 DSP data DMAs transfer 1280140 bytes; all 18 words of the
 last command list match the actual CPU RAM source. The original CPU submission
-handshake completes 93 times, and game-system initialization returns to main.
+handshake completes 133 times, and game-system initialization returns to main.
 Eleven subsequent original object constructors return in the actual main-call order.
 Tests verify the camera's actual vtable pointers and signed projection bounds for
 the 640x448 screen. The resource read uses the original 13-status eligibility table,
@@ -443,10 +448,39 @@ Tests inspect all 15170 relocation records: DOL/self imports resolve to the actu
 addresses, while imports from not-yet-loaded modules retain their original bytes.
 OSLink success does not mean those other modules have been loaded.
 Corrupt original OSLink code is rejected before the linked-module milestone.
-The next connected milestone is binding the statically translated `wlp1.rel`
-prolog to its runtime allocation, then executing original module initialization.
-Neither the prolog nor scene code has executed yet. No runtime PPC decoder or
+The scene generator now compiles 1005 original instructions: the prolog, all 28
+constructors, mode-41 scene creation and the connected state-24 asset setup case.
+Branches, PC and LR use the actual code allocation. For relocated immediates,
+the operation/register selection remains statically compiled; only the operand at
+its known instruction location is loaded after the dispatcher's exact word check.
+Expected words are independently constructed from build-verified originals and
+actual linked section addresses at registration, never accepted from a RAM snapshot.
+Changing a relocated operand fails integrity validation, not runtime opcode decoding.
+Registration is atomic and allowed only outside execution or at the validated
+block-observer boundary. Native guest function bodies still cannot change bindings.
+The current block is revalidated after the observer; changing its code or PC
+cannot bypass the relocation guards.
+Run-scoped scene bindings are removed on stop/failure, so subsequent fresh runs
+cannot reuse stale addresses. General OSUnlink/reload integration is not implemented.
+
+The original prolog now executes all 28 constructors in table order, preserving
+stack/SDA and nonvolatile GPR/FPR state. Two alternative code/BSS placements are
+linked by the actual SDK OSLink and execute the same constructors, including HA/LO
+carry and separate BSS addressing. Tests check the constructor's DOL-to-module
+data copies, atomic rejection of damaged code and post-binding operand guards.
+Synthetic compiled tests cover relocated addi/addis, logical and shifted logical
+forms (including correct high-half `andis.`), integer loads/stores and single-float
+transfers at two bases with zero, signed-boundary and all-ones operands.
+Original mode-41 scene/asset construction also executes; four DVD reads totaling
+744192 bytes complete, each checked against actual RVZ bytes in guest RAM.
+The next connected milestone is completing the manager initialization beginning
+at `0x80154604`. Unrestricted recursion from this manager exceeds the existing
+code-discovery bound; retain that bound and compile its connected dependencies
+with scoped ranges. The module prolog has not returned, and neither a complete
+scene nor a completed loop iteration is verified. No runtime PPC decoder or
 replacement linker is involved in the original startup path.
+An independent `BUILD_TESTING=OFF` Windows build reaches the same dependency;
+production execution does not depend on the test generator or fixture bindings.
 General voice processing/
 ADPCM remains an audio dependency, not a reason to substitute a replacement mixer.
 The native loader, task startup, initial command output/completion and Windows PCM
@@ -606,7 +640,7 @@ complete original task IRAM bytes and guards, host/DSP mailbox counts, actual
 task interrupt and CPU callback, running/waiting versus completed program state,
 and corrupt-task rejection before IRAM upload or init callback,
 original PCM start/remaining/reload/handler/buffer callback, real DSP header/pointer
-consumption, exact command-list copy, 2943 data DMAs, 93 original list completions,
+consumption, exact command-list copy, 4223 data DMAs, 133 original list completions,
 all-silent submitted samples, system-initialization return and next-constructor
 dependency, system-call/nested-interrupt returns and complete observed/unobserved
 PCM-path equivalence using an explicitly test-only output sink,

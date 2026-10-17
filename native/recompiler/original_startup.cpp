@@ -7,6 +7,7 @@
 #include "sha1.h"
 #include "disc_import.h"
 #include "generated_original_startup.h"
+#include "generated_original_scene.h"
 
 #include <fstream>
 #include <iomanip>
@@ -140,7 +141,13 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
         throw std::runtime_error("Original startup requires a fresh entry state and nonzero execution limits.");
     }
     OriginalStartupResult result{};
+    bool sceneRegistered = false;
+    uint32_t sceneModule = 0;
     const auto finish = [&](OriginalStartupStop stop, const std::string& reason) {
+        if (sceneRegistered) {
+            dispatcher.Unregister(2);
+            sceneRegistered = false;
+        }
         result.stop = stop;
         result.pc = state.pc;
         result.lr = state.lr;
@@ -164,7 +171,16 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
                 pc == 0x8000abccu || pc == 0x8000ac04u) ++result.startupObjectsReturned;
             if (pc == 0x8000ac34u) result.gameLoopEntered = true;
             if (pc == 0x8000ac64u) result.firstLoopPreparationReturned = true;
-            if (pc == 0x80177c6cu && state.gpr[3] == 1) result.sceneModuleLinked = true;
+            if (pc == 0x80177c6cu && state.gpr[3] == 1) {
+                result.sceneModuleLinked = true;
+                sceneModule = ppc_read_u32(state, state.gpr[31] + 0x70u);
+                dispatcher.Register(2, state, OriginalSceneTranslations(state, sceneModule));
+                sceneRegistered = true;
+            }
+            if (sceneRegistered && pc == sceneModule + 0x45aecu) result.scenePrologEntered = true;
+            if (sceneRegistered && pc == sceneModule + 0x45b14u) ++result.sceneConstructorsReturned;
+            if (sceneRegistered && pc == sceneModule + 0x45b8cu) result.sceneInitializationEntered = true;
+            if (sceneRegistered && pc == 0x80177c88u) result.scenePrologReturned = true;
             if (pc == 0x8017ad4cu && state.gpr[3] == 0) ++result.resourceReadNotifications;
             if (pc == 0x8000ad5cu) result.memoryInitialized = true;
             if (pc == 0x8017a3e0u) result.screenInitEntered = true;
@@ -232,6 +248,10 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.gameLoopEntered) text << "Original main loop entered its first iteration. ";
     if (result.firstLoopPreparationReturned) text << "Original first-loop preparation returned before SystemTask transition. ";
     if (result.sceneModuleLinked) text << "Original SystemTask loaded a scene REL and original OSLink returned success. ";
+    if (result.scenePrologEntered) text << "Original relocated scene prolog entered. ";
+    if (result.sceneConstructorsReturned) text << result.sceneConstructorsReturned << " original scene C++ constructors returned. ";
+    if (result.sceneInitializationEntered) text << "Original mode-41 scene initialization entered. ";
+    if (result.scenePrologReturned) text << "Original scene prolog returned to SystemTask. ";
     text << "This is NOT a playable game boot; no complete game-loop iteration or rendered frame is verified.";
     return text.str();
 }

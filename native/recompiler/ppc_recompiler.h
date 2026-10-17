@@ -2,6 +2,7 @@
 #define HMAWL_PPC_RECOMPILER_H
 
 #include <cstdint>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -9,6 +10,9 @@
 struct RecompileOptions {
     bool yieldAtBranches = false;
     bool precisePc = false;
+    std::function<std::string(uint32_t)> addressExpression;
+    std::function<std::string(uint32_t)> immediate16Expression;
+    uint32_t relocationBase = 0;
 };
 
 class UnsupportedPpcInstruction : public std::runtime_error {
