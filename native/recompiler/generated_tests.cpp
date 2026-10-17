@@ -1936,6 +1936,73 @@ void TestCompiledInterruptRegisters() {
                 state.sprg0 == 0x82345678u, "Compiled exception SPR targets differ.");
 }
 
+void TestThreadContextReturn() {
+    const auto create = [] {
+        PpcState state;
+        state.memoryMap = PpcMemoryMap::GameCubeRam;
+        state.memory.resize(0x4000);
+        state.ramBats.emplace();
+        state.msr = 0x30;
+        state.externalInterruptsEnabled = false;
+        state.lr = 0xfffffffcu;
+        state.gpr[1] = 0x80003f00u;
+        state.srr0 = 0x80003000u;
+        state.srr1 = 0x8032u;
+        ppc_write_u32(state, 0x800000d4u, 0x80003810u);
+        ppc_write_u32(state, 0x80003810u + 4, state.gpr[1]);
+        ppc_write_u32(state, 0x80003810u + 0x198, state.srr0);
+        ppc_write_u32(state, 0x80003810u + 0x19c, state.srr1);
+        for (uint32_t address : {0x1000u, 0x2000u, 0x2100u, 0x3000u}) {
+            ppc_write_u32(state, address, 0x60000000u);
+        }
+        return state;
+    };
+    auto state = create();
+    NativeDispatcher dispatcher;
+    dispatcher.Register(0, state, {
+        {0x80001000u, [](PpcState& guest) {
+            guest.lr = 0x80001004u;
+            guest.callGuest(0x80002000u, guest);
+            ++guest.gpr[30];
+        }, {0x60000000u}},
+        {0x80002000u, [](PpcState& guest) {
+            guest.lr = 0x80002004u;
+            guest.callGuest(0x80002100u, guest);
+            ++guest.gpr[30];
+        }, {0x60000000u}},
+        {0x80002100u, [](PpcState& guest) { ppc_0000B5C0(guest); }, {0x60000000u}},
+        {0x80003000u, [](PpcState& guest) {
+            Require(guest.lr == 0x80002004u && guest.gpr[1] == 0x80003f00u &&
+                        ppc_read_msr(guest) == 0x8032u,
+                    "Thread context return corrupted saved CPU state.");
+            ++guest.gpr[31];
+            guest.pc = 0xfffffffcu;
+        }, {0x60000000u}}
+    });
+    dispatcher.Execute(state, 0x80001000u);
+    Require(state.threadContextReturns == 1 && state.gpr[30] == 0 && state.gpr[31] == 1 &&
+                !state.callGuest && !state.callException && state.pc == 0xfffffffcu,
+            "Compiled thread rfi did not abandon the guest call chain and resume the original context.");
+    auto limited = create();
+    Reject([&] { dispatcher.Execute(limited, 0x80001000u, 3); }, "budget exceeded");
+    Require(limited.threadContextReturns == 1 && limited.gpr[31] == 0 &&
+                !limited.callGuest && !limited.callException,
+            "Thread context unwinding reset the shared dispatch budget or leaked callbacks.");
+    for (uint32_t offset : {4u, 0x198u, 0x19cu}) {
+        auto invalid = create();
+        ppc_write_u32(invalid, 0x80003810u + offset, 0);
+        Reject([&] { dispatcher.Execute(invalid, 0x80001000u); }, "original current OS context");
+        Require(invalid.threadContextReturns == 0 && ppc_read_msr(invalid) == 0x30 &&
+                    !invalid.callGuest && !invalid.callException,
+                "Rejected thread context mutated MSR, counted success or leaked dispatcher ownership.");
+    }
+    auto changed = create();
+    ppc_write_u32(changed, 0x80003000u, 0);
+    Reject([&] { dispatcher.Execute(changed, 0x80001000u); }, "code mismatch");
+    Require(!changed.callGuest && !changed.callException,
+            "Thread continuation bypassed translation integrity checks.");
+}
+
 void TestExternalInterruptDelivery() {
     const auto create = [] {
         PpcState state;
@@ -3442,6 +3509,36 @@ void TestSubtractExtended() {
 }
 
 void TestMultiplyDivideWords() {
+    for (uint32_t left : {0u, 1u, 7u, 0xfffffff9u, 0x80000000u, 0x7fffffffu}) {
+        for (uint32_t right : {0u, 1u, 3u, 0xfffffffdu, UINT32_MAX, 0x80000000u}) {
+            PpcState state;
+            state.gpr[3] = 0x12345678;
+            state.gpr[4] = left;
+            state.gpr[5] = right;
+            state.cr = 0x12345678;
+            state.xer = 0xe0000000;
+            if (right == 0 || (left == 0x80000000u && right == UINT32_MAX)) {
+                Reject([&] { ppc_0000F300(state); }, "Undefined PowerPC divw");
+                Reject([&] { ppc_0000F310(state); }, "Undefined PowerPC divw");
+                Require(state.gpr[3] == 0x12345678 && state.gpr[4] == left && state.cr == 0x12345678 &&
+                            state.xer == 0xe0000000,
+                        "Undefined signed division partially mutated CPU state.");
+                continue;
+            }
+            const int64_t a = left <= INT32_MAX ? int64_t(left) : int64_t(left) - 0x100000000LL;
+            const int64_t b = right <= INT32_MAX ? int64_t(right) : int64_t(right) - 0x100000000LL;
+            const auto expected = static_cast<uint32_t>(a / b);
+            ppc_0000F300(state);
+            const uint32_t condition = expected == 0 ? 3 : expected >= 0x80000000u ? 9 : 5;
+            Require(state.gpr[3] == expected && state.gpr[4] == left && state.gpr[5] == right &&
+                        state.cr == ((0x12345678u & 0x0fffffffu) | (condition << 28)) &&
+                        state.xer == 0xe0000000,
+                    "Signed division truncation, CR0 or preserved carry/overflow differs.");
+            const auto cr = state.cr;
+            ppc_0000F310(state);
+            Require(state.gpr[4] == expected && state.cr == cr, "Non-record aliased signed division differs.");
+        }
+    }
     for (uint32_t left : {0u, 1u, 2u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
         for (uint32_t right : {0u, 1u, 2u, 31u, 0x80000000u, 0xffffffffu}) {
             PpcState state;
@@ -3649,6 +3746,7 @@ int main() {
         TestNativeSramAndDma();
         TestCompiledSystemCall();
         TestCompiledInterruptRegisters();
+        TestThreadContextReturn();
         TestExternalInterruptDelivery();
         TestDspResetAndAramDma();
         TestCompiledDspInitialization();

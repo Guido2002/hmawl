@@ -27,6 +27,9 @@ struct OriginalStartupResult {
     bool gxInitEntered = false;
     bool gxInitReturned = false;
     bool viInitEntered = false;
+    bool viInitReturned = false;
+    bool viConfigured = false;
+    bool viRetraceReturned = false;
     uint32_t constructorsReturned = 0;
 };
 

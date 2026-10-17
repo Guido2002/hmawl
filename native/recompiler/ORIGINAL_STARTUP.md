@@ -69,8 +69,9 @@ It emits the actual SDK
 version string; it does not discard logging.
 The loader supplies 24 MiB physical/simulated memory size, a cold PI reset code,
 162 MHz bus and 486 MHz CPU clock metadata in low memory,
-consistent with the 40.5 MHz time base. VI cable status is explicitly analog
-(DTV bit zero); this does not implement a display or renderer.
+consistent with the 40.5 MHz time base. VI uses the NTSC 27 MHz clock selection at
+`0xCC00206C`; the disconnected digital-cable pins read zero at `0xCC00206E`.
+Neither register readback nor beam timing implements pixel scanout or a renderer.
 SI has disabled-polling timing, communication RAM, error W1C and checked transfer
 semantics. All four controller ports are explicitly disconnected. A transaction
 sets the selected channel's NOREP error and COMERR/TCINT, without inventing reply
@@ -207,27 +208,39 @@ runs at runtime. Persistent milestones observe verified compiled block entry,
 without replacing original instructions or changing guest registers.
 The original game-initialization call at `0x8000AD40` now executes its memory,
 resource-manager and Screen setup. Original `Memory::Initialize` constructs heaps
-from the real arena (`0x8035EFA0` to `0x81701FE0`). Nine original allocations,
-including a nested `0x1730` resource allocation and `0x60000` FIFO buffer, complete.
+from the real arena (`0x8035EFA0` to `0x81701FE0`). Eleven original allocations,
+including a nested `0x1730` resource allocation, `0x60000` FIFO buffer and two
+640x448x2-byte framebuffers, complete.
 The original Screen enters GXInit and prints the SDK's GX version. Original
 CP/PE setup, FIFO linking, write gathering, matrix stores, viewport/projection
 arithmetic, texture-region callbacks and PE poke configuration execute.
 **Original GXInit returns to Screen at `0x8017A41C`**, with SP `0x8035CF28`
-and the original FIFO object `0x80318B20`. Screen calls original VIInit and prints
-the SDK's VI version. The next dependency stop is `PC=0x801BE410`,
-LR `0x801BE3FC`, SP `0x8035CF10`, reading unmapped VI control `0xCC002002`.
-The original inquiry callback result remains `0x8001`, five external exceptions
-returned and the entire real FST is intact. VIInit has not returned.
+and the original FIFO object `0x80318B20`. **Original VIInit returns at
+`0x8017A42C`, VIConfigure at `0x8017A4C0`, and VIWaitForRetrace at `0x8017A674`.**
+The real guest VI interrupt handler acknowledges the timed display source and
+wakes the waiting original thread. Original OSSaveContext/OSLoadContext restore
+the saved scheduler continuation at `0x801B6F80`; native dispatch unwinds the
+abandoned C++ guest-call chain, not the guest's saved stack. The original current
+context's PC/MSR/SP are checked, and the dispatch budget and code-integrity checks
+remain in force. This is not a replacement scheduler; interrupt-time thread
+switches beyond restoring the interrupted context remain explicitly unsupported.
+The next dependency stop is `PC=0x801CEADC`, LR `0x8017A8F0`, SP `0x8035CF18`:
+the FIFO reaches the original EFB copy while Screen subsequently emits copy-clear
+registers. The copy remains unconsumed without a renderer/copy backend.
+The inquiry result remains `0x8001` and the entire real FST is intact.
+The deterministic 1000-tick/block regression returns seven external exceptions
+(five SI/DI, two VI) and one scheduler context; steady-clock runner field/interrupt
+counts depend on elapsed host time, not a forced completion.
 Real-disc tests verify every constructor in original table order and preservation
 of its stack, SDA and nonvolatile integer/floating registers. Traced and untraced
 startup produce identical RAM, CPU state, output and sampled time; damaged
 constructor words fail integrity validation without claiming later milestones.
 The game main loop, GX renderer,
-scheduled game threads, audio, input and saves have not run.
+general scheduled game-thread execution, audio, input and saves have not run.
 
-The next connected milestone is original VI initialization, scanout/retrace and a renderer.
-Returning from GXInit does not establish a completed graphics initialization, scheduled
-game thread or frame. Generated translation registration uses non-inlined batches
+The next connected milestone is a real EFB rendering/copy and XFB pixel-scanout backend.
+Returning from the retrace wait does not establish a rendered frame or game main loop.
+Generated translation registration uses non-inlined batches
 of at most 64 regular bindings (plus the console binding in the final batch), avoiding
 MSVC's oversized temporary stack frames without increasing the executable stack.
 
@@ -252,12 +265,14 @@ assert their PE sources only after decoding, rather than reporting success early
 Draws, EFB copies, texture/TLUT DMA, display lists and unknown opcodes fail explicitly.
 There is no replacement scene or generated frame.
 
-The real Windows runner publishes **63 FIFO bursts** and decodes **315 register/NOP
-commands**, with seven incomplete command bytes and 12 still-gathered bytes at the
-VI boundary. Original attribute/texcoord/texture-format tables supply bounded
+The real Windows runner publishes **68 FIFO bursts** and decodes **337 register/NOP
+commands**, with 34 pending command bytes and one still-gathered byte at the
+EFB-copy boundary. The unconsumed CP burst retains a 32-byte FIFO distance; a
+rejected copy is not counted as decoded work. Original attribute/texcoord/texture-format tables supply bounded
 build-time indirect branch roots, alongside original texture-region callbacks.
-The six XF viewport words at `0x101A` are exactly `43A00000 C3700000 4B800000
-44258000 44118000 4B800000` (640x480, original depth scale 16777216).
+The six XF viewport words at `0x101A` are exactly `43A00000 C3600000 4B800000
+44258000 440D8000 4B800000` (640x448 after original overscan adjustment,
+original depth scale 16777216).
 PE poke depth/blend/destination-alpha/alpha-test/alpha-read retain their actual
 register state (`001F F038 0000 0700 0005`); no pixel operation is synthesized.
 CP offset `+6` holds the performance selector, while `+0xE` holds the token.
@@ -279,6 +294,32 @@ against independent host IEEE arithmetic compiled with strict FP semantics.
 Original startup NI mode works for normal inputs/results; denormal NI behavior,
 enabled FP exceptions and Gekko's 25-bit rounding for non-single `fmuls` multipliers
 fail explicitly before mutation. Fused arithmetic is not implemented.
+
+### Checked NTSC video timing and context continuation
+
+The opt-in VI profile maps configuration, framebuffer and filter registers plus
+four independent display-interrupt pairs. Reads are big-endian byte/halfword/word;
+writes are checked halfword/word accesses, with rejected wide writes leaving the
+whole profile unchanged. Reset clears interrupt pairs and scan state, retaining
+programmed timing/filter coefficients. Display interrupts latch at programmed
+beam crossings even when masked; mask bits gate PI bit `0x100`, and writing zero
+to a status bit acknowledges only that comparator.
+
+Only NTSC interlaced timing with half-line width 429 and the 27 MHz clock selection
+is supported. The model advances at three 40.5 MHz time-base ticks per output pixel,
+858 pixels per line and 525 half-lines per field. Dispatch samples the same clock
+before each compiled block when display output is enabled; MMIO beam reads expose
+that last sample. No host sleep, fabricated retrace callback or forced guest return
+is used. Backwards time, elapsed-time overflow, invalid enabled comparators,
+live scan-clock changes and other display modes fail explicitly.
+PAL/MPAL/progressive modes, external beam latches, pixel scanout and EFB/XFB
+conversion are not implemented.
+
+`hmawl_native_vi_tests` verifies exact before/at/after comparator thresholds,
+frame wrap, large jumps, masked latches/unmasking, independent acknowledgements,
+read lanes and atomic invalid access/timing failures. Compiled CPU tests verify
+signed division and nested thread-context RFI unwinding, saved-context validation,
+shared entry budgets, callback cleanup and resumed-block code integrity.
 
 ## Targeted regression
 
@@ -314,16 +355,19 @@ the user-init return and the exact graphics-initialization dependency boundary. 
 observer checks each original table target and per-constructor ABI restoration;
 a second execution compares the complete 24 MiB RAM image, CPU registers,
 console output and deterministic clock samples against the production runner.
-It also verifies original heap descriptors, nine allocation return addresses,
+It also verifies original heap descriptors, eleven allocation return addresses,
 requested sizes, 32-byte alignment, arena bounds, non-overlap, allocation count,
-manager singleton pointers and the Screen's FIFO pointer.
+manager singleton pointers, the Screen's FIFO pointer and both XFB pointers.
 It verifies exact CP/PE/ring state, burst/command counts and identical graphics
-state with/without observation. A separate injection into the stopped original
-state flushes the actual pending matrix and submits token/finish FIFO commands.
+state with/without observation, plus exact VI registers, elapsed timing, field counts,
+original interrupt delivery and scheduler context-return counts. A separate injection
+into the original GXInit-return snapshot, before VI startup, flushes the actual pending
+matrix and submits token/finish FIFO commands.
 Both original PE handlers run through the original OS interrupt vector/dispatcher,
 acknowledge their sources, wake the original empty finish queue and restore all
 interrupted GPR/FPR/CR/XER/LR/CTR/MSR state. Seven external exceptions then return.
-This injection is test-only; production startup still returns five exceptions.
+This injection is test-only; normal startup additionally delivers real timed VI
+interrupts, not injected PE token/finish events.
 `hmawl_native_gx_tests` independently covers mixed-width gather, fragmented commands,
 BP masking, XF bounds, ring wrap/full/guards, breakpoint resume, disabled readers,
 watermark and PE interrupt state, and explicit unsupported command/access failures.

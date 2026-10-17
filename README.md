@@ -88,16 +88,21 @@ Expired decrementer delivery, general DSP tasks and audio playback remain unfini
 All **93 original DOL C++ constructors now return**, followed by `__init_user`;
 the original game `main` is entered in the Windows runner. Tests verify constructor
 order, nonvolatile registers and exact observer/non-observer execution equivalence.
-Original game initialization now runs arena-backed memory setup, nine checked
-heap allocations, resource managers and `Screen` construction into original
+Original game initialization now runs arena-backed memory setup, eleven checked
+heap/framebuffer allocations, resource managers and `Screen` construction into original
 `GXInit`. **Original GXInit now returns to Screen in the Windows runner** after
 viewport/projection, texture-region callbacks and PE configuration. It publishes
-**63 real 32-byte FIFO bursts** to guest RAM and decodes **315 register/NOP commands**
-into CP/BP/XF state, including exact 640x480 viewport coefficients.
+**68 real 32-byte FIFO bursts** to guest RAM and decodes **337 register/NOP commands**
+into CP/BP/XF state, including the original overscanned 640x448 viewport.
 Separate injected-command tests execute both original PE interrupt handlers and
 restore the interrupted CPU context; production startup has not issued those interrupts.
-The runner enters original `VIInit`, then stops with **exit code 3** on the first
-unmapped VI control-register read at `PC=0x801BE410`, `LR=0x801BE3FC`.
+**Original VIInit, VIConfigure and VIWaitForRetrace now return in the runner.**
+Native NTSC beam timing drives the original VI interrupt handler, and the
+original scheduler saves/loads its real guest context to resume the waiting thread.
+Both original 640x448 YUV framebuffer allocations complete. The runner then stops
+with **exit code 3** at `PC=0x801CEADC`, `LR=0x8017A8F0`: the FIFO reaches the
+original EFB copy command, which requires a renderer/copy backend. That command
+has not been consumed or reported as a completed frame.
 Draws, EFB copies and texture DMA fail explicitly; the game main loop and rendering
 have not run.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices

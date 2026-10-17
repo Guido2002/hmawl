@@ -44,9 +44,12 @@ and `__init_user` also return, reaching original game `main`. Original memory se
 resource managers and Screen construction execute through to original GXInit.
 Original CP/PE/FIFO setup, viewport/projection arithmetic, texture-region callbacks
 and PE configuration execute; **original GXInit returns to Screen in the runner**.
-It decodes 63 actual FIFO bursts and 315 commands into graphics-register state.
-Original VIInit then stops at its first unmapped control read (`0x801BE410`).
-VI initialization, the main loop and a rendered game frame remain unfinished.
+It publishes 68 actual FIFO bursts and decodes 337 register/NOP commands.
+Original VIInit, VIConfigure and VIWaitForRetrace return using native NTSC timing,
+the original VI interrupt handler and a checked scheduler context restore.
+Eleven original allocations include both 640x448 framebuffers. The runner stops
+at `0x801CEADC` on the first decoded EFB copy requiring a renderer/copy backend.
+Pixel scanout, the main loop and a rendered game frame remain unfinished.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
 ## Phases and completion criteria
@@ -558,6 +561,22 @@ queue. Full runtime scheduling and device services are still needed.
   Verify exact 640x480 XF viewport coefficients, nine allocations, full traced
   equivalence and original PE handlers at the new boundary. VI scanout/retrace,
   the game main loop and a real rendered frame remain unfinished.
+- [x] Run original VIInit/VIConfigure and retrace wait in the production runner.
+  Add checked mixed-width VI register access, NTSC interlaced beam/field timing,
+  four independently latched display comparators and the real PI video source.
+  Reset clears scan/interrupt state without discarding timing coefficients;
+  digital-cable pins report the explicitly disconnected profile. Unsupported
+  modes, live clock changes and invalid comparator timing fail explicitly.
+  Compile signed word division and the original bounded VI timing-table switch.
+  Preserve the original scheduler's saved-context/RFI flow by unwinding abandoned
+  native guest calls and resuming verified compiled blocks with the same budget.
+  Validate context PC/MSR/SP and keep interrupt, syscall and BAT transitions separate.
+  Production returns from VIInit, VIConfigure and VIWaitForRetrace, allocates both
+  640x448 XFBs (eleven total allocations), and stops at `0x801CEADC`,
+  LR `0x8017A8F0`, SP `0x8035CF18`: the first decoded EFB copy has no renderer.
+  Verify original VI interrupts, scheduler wake/resume, exact overscanned viewport,
+  68 FIFO bursts/337 commands, complete observed/unobserved CPU/RAM/VI/GX equivalence
+  and separate original PE handler injection. No pixels or game main loop yet.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

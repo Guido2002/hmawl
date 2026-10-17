@@ -926,6 +926,9 @@ std::string RecompileFunction(uint32_t address,
             case 459:
                 expression = "ppc_divide_unsigned32(" + left + ", " + right + ")";
                 break;
+            case 491:
+                expression = "ppc_divide_signed32(" + left + ", " + right + ")";
+                break;
             case 444:
                 destination = ra;
                 expression = "state.gpr[" + std::to_string(rt) + "] | " + right;

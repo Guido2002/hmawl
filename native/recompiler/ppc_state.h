@@ -3,6 +3,7 @@
 
 #include "native_gx.h"
 #include "ppc_float.h"
+#include "native_vi.h"
 
 #include <algorithm>
 #include <array>
@@ -122,6 +123,7 @@ struct PpcDecrementer {
 };
 
 struct PpcInterruptContextReturn {};
+struct PpcThreadContextReturn {};
 
 struct PpcState {
     uint32_t gpr[32] = {};
@@ -130,6 +132,7 @@ struct PpcState {
     uint32_t fpscr = 0;
     std::array<uint32_t, 8> gqr = {};
     uint32_t msr = 0; // EE is owned by externalInterruptsEnabled.
+    uint64_t threadContextReturns = 0;
     uint32_t hid2 = 0;
     uint32_t hid0 = 0;
     uint32_t l2cr = 0;
@@ -165,6 +168,7 @@ struct PpcState {
     std::optional<uint32_t> diConfiguration;
     std::optional<PpcDiscInterface> discInterface;
     std::optional<NativeGx> graphics;
+    std::optional<NativeVi> video;
     std::function<std::vector<uint8_t>(const std::array<uint32_t, 3>&, uint32_t)> transferDisc;
     std::optional<uint16_t> viDtvStatus;
     std::optional<PpcSerialInterface> serialInterface;
@@ -208,6 +212,7 @@ inline void ppc_reset_performance_monitor(PpcState& state, unsigned index, uint3
 
 inline uint32_t ppc_pi_interrupt_cause(const PpcState& state) {
     uint32_t cause = state.graphics ? NativeGxInterruptCause(*state.graphics) : 0;
+    if (state.video) cause |= NativeViInterruptCause(*state.video);
     if (state.serialInterface &&
         (state.serialInterface->communication & 0xc0000000u) == 0xc0000000u) cause |= 8u;
     if (state.dspHardware && state.dspControl) {
@@ -228,7 +233,7 @@ inline bool ppc_si_interrupt_pending(const PpcState& state) {
 }
 
 inline bool ppc_external_interrupt_pending(const PpcState& state) {
-    return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & 0xe0cu) != 0;
+    return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & 0xf0cu) != 0;
 }
 
 inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
@@ -352,6 +357,9 @@ inline void ppc_write_ram_bat(PpcState& state, unsigned spr, uint32_t value) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
+        return NativeViRead(state, address, 4);
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
         return NativeGxRead(state, address, 4);
     }
@@ -485,6 +493,9 @@ inline void ppc_write_u64(PpcState& state, uint32_t address, uint64_t value) {
 }
 
 inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
+        return static_cast<uint16_t>(NativeViRead(state, address, 2));
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
         return static_cast<uint16_t>(NativeGxRead(state, address, 2));
     }
@@ -535,6 +546,10 @@ inline uint16_t ppc_read_u16(PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
+        NativeViWrite(state, address, value, 4);
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
         NativeGxWrite(state, address, value, 4);
         return;
@@ -822,8 +837,9 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003004u &&
         state.piInterruptMask.has_value()) {
         const auto graphicsBits = value & 0xe00u;
-        const auto startupBits = value & ~0xe00u;
-        if ((graphicsBits != 0 && !state.graphics) ||
+        const auto startupBits = value & ~0xf00u;
+        if (((value & 0x100u) != 0 && !state.video) ||
+            (graphicsBits != 0 && !state.graphics) ||
             (startupBits != 0xf0u && !(state.serialInterface && startupBits == 0xf8u) &&
              !(state.discInterface && (startupBits == 0xf4u ||
                                       (state.serialInterface && startupBits == 0xfcu))))) {
@@ -840,6 +856,10 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
 }
 
 inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
+        NativeViWrite(state, address, value, 2);
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
         NativeGxWrite(state, address, value, 2);
         return;
@@ -930,6 +950,9 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
 }
 
 inline uint8_t ppc_read_u8(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
+        return static_cast<uint8_t>(NativeViRead(state, address, 1));
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
         return static_cast<uint8_t>(NativeGxRead(state, address, 1));
     }
@@ -994,6 +1017,10 @@ inline void ppc_store_float_pair(PpcState& state, uint32_t address, PpcFpr value
 }
 
 inline void ppc_write_u8(PpcState& state, uint32_t address, uint8_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.video && NativeViAddress(address)) {
+        NativeViWrite(state, address, value, 1);
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.graphics && NativeGxAddress(address)) {
         NativeGxWrite(state, address, value, 1);
         return;
@@ -1027,7 +1054,17 @@ inline uint32_t ppc_divide_unsigned32(uint32_t dividend, uint32_t divisor) {
     if (divisor == 0) {
         throw std::runtime_error("Undefined PowerPC divwu result: zero divisor");
     }
+
     return dividend / divisor;
+}
+
+inline uint32_t ppc_divide_signed32(uint32_t dividend, uint32_t divisor) {
+    if (divisor == 0 || (dividend == 0x80000000u && divisor == UINT32_MAX)) {
+        throw std::runtime_error("Undefined PowerPC divw result: zero divisor or signed overflow");
+    }
+    const int64_t left = dividend < 0x80000000u ? int64_t(dividend) : int64_t(dividend) - 0x100000000LL;
+    const int64_t right = divisor < 0x80000000u ? int64_t(divisor) : int64_t(divisor) - 0x100000000LL;
+    return static_cast<uint32_t>(left / right);
 }
 
 inline uint32_t ppc_rotate_left32(uint32_t value, uint32_t shift) {
@@ -1167,6 +1204,27 @@ inline void ppc_return_from_system_call(PpcState& state) {
     }
     if (!state.systemCallActive) {
         const auto current = ppc_read_msr(state);
+        if (state.memoryMap == PpcMemoryMap::GameCubeRam &&
+            (current & 0x8030u) == 0x30u && (state.srr1 & 0x30u) == 0x30u &&
+            !state.ramBats->realModeActive) {
+            const auto context = ppc_read_u32(state, 0x800000d4u);
+            ppc_memory_offset(state, context, 0x2c8);
+            if ((context & 3u) != 0 || ppc_read_u32(state, context + 0x198) != state.srr0 ||
+                ppc_read_u32(state, context + 0x19c) != state.srr1 ||
+                ppc_read_u32(state, context + 4) != state.gpr[1]) {
+                throw std::runtime_error("Native thread rfi requires the original current OS context: context=" +
+                    std::to_string(context) + " saved PC=" + std::to_string(ppc_read_u32(state, context + 0x198)) +
+                    " saved MSR=" + std::to_string(ppc_read_u32(state, context + 0x19c)) +
+                    " saved SP=" + std::to_string(ppc_read_u32(state, context + 4)) +
+                    " actual SP=" + std::to_string(state.gpr[1]) + ".");
+            }
+            ppc_memory_offset(state, state.srr0, 4);
+            ppc_memory_offset(state, state.gpr[1], 4);
+            ppc_write_msr(state, state.srr1);
+            state.pc = state.srr0;
+            ++state.threadContextReturns;
+            throw PpcThreadContextReturn{};
+        }
         if (state.memoryMap != PpcMemoryMap::GameCubeRam ||
             ((current ^ state.srr1) & ~0x30u) != 0 || (current & 0x8000u) != 0) {
             throw std::runtime_error("Unsupported native real-mode rfi context.");

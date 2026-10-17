@@ -66,7 +66,8 @@ int RunCli(int argc, Character** argv) {
                      "using compiled native blocks only.\n"
                      "Profile: loader IR/DR, EE disabled, coherent RAM, idle opt-in "
                      "PI/MI/DSP/AI/EXI/SI, native CP/PE and checked GX register-command FIFO "
-                     "(draw/copy/texture DMA unimplemented), cold PI reset, 24 MiB RAM BAT profile, analog VI cable status, "
+                     "(draw/copy/texture DMA unimplemented), native NTSC VI timing/configuration/interrupts "
+                     "(pixel scanout unimplemented), cold PI reset, 24 MiB RAM BAT profile, disconnected digital cable, "
                      "empty memory-card slots/SP1 and disconnected controllers, native console "
                      "(bounded strings/32-bit integers), persisted SRAM reads (writes/RTC/ROM unimplemented); "
                      "16 MiB ARAM, compiled DSP init/native bootstrap (general DSP tasks/audio unimplemented); "
@@ -85,6 +86,15 @@ int RunCli(int argc, Character** argv) {
                       << gx.decodedCommands << " decoded register/NOP commands, "
                       << gx.commands.size() << " pending command bytes, "
                       << gx.gathered.size() << " gathered bytes. No rendered frame.\n";
+        }
+        if (state.video) {
+            const auto& vi = *state.video;
+            std::cerr << "Native VI: " << vi.writes << " register writes, " << vi.resets
+                      << " reset(s), " << vi.fields << " timed fields, "
+                      << (state.externalInterrupt ? state.externalInterrupt->returned : 0)
+                      << " total returned external interrupts. SRR0=0x" << std::hex << state.srr0
+                      << " SRR1=0x" << state.srr1 << std::dec << ", "
+                      << state.threadContextReturns << " restored thread context(s). No pixel scanout.\n";
         }
         return result.stop == OriginalStartupStop::Budget ? 4 :
                result.stop == OriginalStartupStop::UnexpectedReturn ? 5 : 3;

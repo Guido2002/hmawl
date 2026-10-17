@@ -65,6 +65,12 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
         leaders.insert(target);
         pending.push_back(target);
     }
+    // The original VI timing selector guards this 27-entry indirect branch table.
+    for (uint32_t index = 0; index < 27; ++index) {
+        const auto target = ppc_read_u32(source, 0x802e127cu + index * 4);
+        leaders.insert(target);
+        pending.push_back(target);
+    }
     // Indirect construction calls and graphics interrupt handlers need explicit original roots.
     for (uint32_t target : {0x80199eecu, 0x8001b920u, 0x80022790u, 0x800226f0u,
                             0x8002b80cu, 0x8002f27cu, 0x8002f100u, 0x8002efbcu,
@@ -73,7 +79,7 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
                             0x80199ed8u, 0x8017a3a0u,
                             0x801cc448u, 0x801ce08cu, 0x801ce158u,
                             0x801cb0c8u, 0x801cb1c4u,
-                            0x801be410u}) {
+                            0x801be410u, 0x801bde64u}) {
         leaders.insert(target);
         pending.push_back(target);
     }
@@ -82,7 +88,7 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
         const auto address = pending[index];
         if (!visited.insert(address).second) continue;
         if (address == 0x802383c0u) continue; // Existing original-word-verified native console boundary.
-        if (visited.size() > 50000) throw std::runtime_error("Original constructor compilation exceeds its code bound.");
+        if (visited.size() > 100000) throw std::runtime_error("Original startup compilation exceeds its code bound.");
         const auto word = image.ReadWords(address, 4).front();
         try {
             RecompileFunction(address, {word}, {true, true});

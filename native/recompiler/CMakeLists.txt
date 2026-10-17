@@ -27,6 +27,7 @@ add_library(hmawl_recompiler_core
     native_dvd_queue.cpp
     native_sram.cpp
     native_gx.cpp
+    native_vi.cpp
 )
 target_compile_features(hmawl_recompiler_core PUBLIC cxx_std_17)
 target_include_directories(hmawl_recompiler_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -67,6 +68,9 @@ if(BUILD_TESTING)
     add_executable(hmawl_native_gx_tests native_gx_tests.cpp)
     target_link_libraries(hmawl_native_gx_tests PRIVATE hmawl_recompiler_core)
     add_test(NAME hmawl_native_gx_tests COMMAND hmawl_native_gx_tests)
+    add_executable(hmawl_native_vi_tests native_vi_tests.cpp)
+    target_link_libraries(hmawl_native_vi_tests PRIVATE hmawl_recompiler_core)
+    add_test(NAME hmawl_native_vi_tests COMMAND hmawl_native_vi_tests)
     add_executable(hmawl_ppc_float_tests ppc_float_tests.cpp)
     target_link_libraries(hmawl_ppc_float_tests PRIVATE hmawl_recompiler_core)
     if(MSVC)

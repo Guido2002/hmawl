@@ -101,6 +101,7 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.viDtvStatus = 0;
     state.serialInterface.emplace();
     state.graphics.emplace();
+    state.video.emplace();
     state.transferSi = TransferDisconnectedSi;
     ppc_write_u32(state, 0x800000f8u, 162000000u);
     ppc_write_u32(state, 0x800000fcu, 486000000u);
@@ -153,6 +154,9 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x801cb378u) result.gxInitEntered = true;
             if (pc == 0x8017a41cu) result.gxInitReturned = true;
             if (pc == 0x801be3bcu) result.viInitEntered = true;
+            if (pc == 0x8017a42cu) result.viInitReturned = true;
+            if (pc == 0x8017a4c0u) result.viConfigured = true;
+            if (pc == 0x8017a674u) result.viRetraceReturned = true;
         });
     } catch (const std::exception& error) {
         const std::string reason = error.what();
@@ -184,7 +188,10 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.screenInitEntered) text << "Original Screen initialization entered. ";
     if (result.gxInitReturned) text << "Original GXInit returned to Screen. ";
     else if (result.gxInitEntered) text << "Original GXInit entered (not completed). ";
-    if (result.viInitEntered) text << "Original VIInit entered (not completed). ";
+    if (result.viInitReturned) text << "Original VIInit returned to Screen. ";
+    else if (result.viInitEntered) text << "Original VIInit entered (not completed). ";
+    if (result.viConfigured) text << "Original VIConfigure returned. ";
+    if (result.viRetraceReturned) text << "Original VIWaitForRetrace returned. ";
     text << "This is NOT a game boot; no game main loop or renderer ran.";
     return text.str();
 }

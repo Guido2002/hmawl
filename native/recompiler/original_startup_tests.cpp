@@ -410,6 +410,7 @@ int main(int argc, char** argv) {
                 "Missing SI backend fabricated a response or completion.");
         auto missingDtv = CreateOriginalStartupState(image);
         missingDtv.viDtvStatus.reset();
+        missingDtv.video.reset();
         const auto dtvFailure = RunOriginalStartup(dispatcher, missingDtv);
         Require(dtvFailure.pc == 0x801f6180u &&
                     dtvFailure.reason.find("not mapped") != std::string::npos,
@@ -511,23 +512,31 @@ int main(int argc, char** argv) {
             discState.writeConsole = [&](const std::string& text) { discConsole += text; };
             const auto discResult = RunOriginalStartup(dispatcher, discState);
             std::cout << DescribeOriginalStartupStop(discResult) << '\n';
+            std::cout << "Original VI startup: PI mask=0x" << std::hex << discState.piInterruptMask.value()
+                      << std::dec << " interrupts=" << discState.externalInterrupt->delivered
+                      << "/" << discState.externalInterrupt->returned
+                      << " EE=" << discState.externalInterruptsEnabled
+                      << " thread returns=" << discState.threadContextReturns
+                      << " DI transfers=" << discState.discInterface->completedTransfers
+                      << " VI fields=" << discState.video->fields << '\n';
             Require(discResult.stop == OriginalStartupStop::Dependency &&
-                        discResult.pc == 0x801be410u && discResult.lr == 0x801be3fcu &&
-                        discResult.stack == 0x8035cf10u && discResult.osInitReturned &&
+                        discResult.pc == 0x801ceadcu && discResult.lr == 0x8017a8f0u &&
+                        discResult.stack == 0x8035cf18u && discResult.osInitReturned &&
                         discResult.constructorsReturned == 93 && discResult.userInitReturned &&
                         discResult.gameMainEntered && discResult.memoryInitialized &&
                         discResult.screenInitEntered && discResult.gxInitEntered &&
                         discResult.gxInitReturned && discResult.viInitEntered &&
+                        discResult.viInitReturned && discResult.viConfigured && discResult.viRetraceReturned &&
                         !discState.callGuest && !discState.callException &&
-                        discResult.reason.find("not mapped to GameCube RAM") != std::string::npos &&
+                        discResult.reason.find("EFB copy requires a renderer/copy backend") != std::string::npos &&
                         discState.discInterface->completedTransfers == 1 &&
                         discState.discInterface->status == 0x2au &&
                         discState.discInterface->dmaLength == 0 &&
                         discState.discInterface->control == 2 &&
-                        discState.externalInterrupt->delivered == 5 &&
-                        discState.externalInterrupt->returned == 5 &&
+                        discState.externalInterrupt->delivered == 7 &&
+                        discState.externalInterrupt->returned == 7 && discState.threadContextReturns == 1 &&
                         !discState.externalInterrupt->active && discState.externalInterruptsEnabled &&
-                        discState.piInterruptMask == 0xefcu &&
+                        discState.piInterruptMask == 0xffcu &&
                         ppc_read_u16(discState, 0x800030e6u) == 0x8001u &&
                         ppc_read_u32(discState, 0x80317a6cu) == 0 &&
                         ppc_read_u32(discState, 0x80349698u) == 0 &&
@@ -548,25 +557,25 @@ int main(int argc, char** argv) {
             for (const auto value : gx.poke) std::cout << " " << std::hex << value;
             std::cout << std::dec << " metric resets=" << gx.performanceResets
                       << " interval bursts/commands=" << gx.performanceBursts << "/" << gx.performanceCommands << '\n';
-            Require(gx.bursts == 63 && gx.decodedCommands == 315 &&
-                        gx.gathered.size() == 12 && gx.commands.size() == 7 &&
+            Require(gx.bursts == 68 && gx.decodedCommands == 337 &&
+                        gx.gathered.size() == 1 && gx.commands.size() == 34 &&
                         gx.cpuBase == fifo && gx.cpuEnd == fifo + 0x5ffe0 &&
-                        gx.cpuWrite == fifo + 63 * 32 && gx.fifo[0] == gx.cpuBase &&
-                        gx.fifo[1] == gx.cpuEnd && gx.fifo[4] == 0 &&
-                        gx.fifo[5] == gx.cpuWrite && gx.fifo[6] == gx.cpuWrite &&
+                        gx.cpuWrite == fifo + 68 * 32 && gx.fifo[0] == gx.cpuBase &&
+                        gx.fifo[1] == gx.cpuEnd && gx.fifo[4] == 32 &&
+                        gx.fifo[5] == gx.cpuWrite && gx.fifo[6] == gx.cpuWrite - 32 &&
                         gx.writeGatherAddress == 0x0c008000u && (discState.hid2 & 0x40000000u) != 0 &&
                         gx.peControl == 3 && gx.performanceResets == 1 &&
-                        gx.performanceBursts == 0 && gx.performanceCommands == 0 &&
+                        gx.performanceBursts == 5 && gx.performanceCommands == 22 &&
                         gx.poke == std::array<uint16_t, 5>{0x1f, 0xf038, 0, 0x700, 5} &&
                         NativeGxInterruptCause(gx) == 0,
                     "Original GX FIFO/PE setup did not consume the exact actual command bursts.");
-            const uint32_t viewport[] = {0x43a00000, 0xc3700000, 0x4b800000,
-                                         0x44258000, 0x44118000, 0x4b800000};
+            const uint32_t viewport[] = {0x43a00000, 0xc3600000, 0x4b800000,
+                                         0x44258000, 0x440d8000, 0x4b800000};
             std::cout << "XF viewport:";
             for (unsigned index = 0; index < 6; ++index) std::cout << " " << std::hex << gx.xf[0x101a + index];
             std::cout << std::dec << '\n';
             Require(std::equal(std::begin(viewport), std::end(viewport), gx.xf.begin() + 0x101a),
-                    "Original floating-point viewport did not publish exact 640x480 XF coefficients.");
+                    "Original floating-point viewport did not publish exact overscanned 640x448 XF coefficients.");
             for (uint32_t address = 0x80317a40u; address < 0x80317a60u; ++address) {
                 Require(ppc_read_u8(discState, address) == (address == 0x80317a43u ? 1 : 0),
                         "Native virtual-drive identity differs or claims console firmware.");
@@ -590,6 +599,10 @@ int main(int argc, char** argv) {
             size_t entered = 0, returned = 0;
             bool initializedHeap = false;
             bool gxReturned = false;
+            bool viReturned = false, viConfigured = false, retraceReturned = false;
+            unsigned viHandlers = 0;
+            std::optional<PpcState> peSource;
+            uint64_t peSourceTicks = 0;
             std::vector<std::pair<uint32_t, uint32_t>> allocations;
             std::array<uint32_t, 32> savedRegisters{};
             std::array<uint64_t, 18> savedFprs{};
@@ -622,6 +635,23 @@ int main(int argc, char** argv) {
                                 traced.gpr[3] == 0x80318b20u,
                             "Original GXInit did not return its FIFO object and restore the Screen stack.");
                     gxReturned = true;
+                    peSource = traced;
+                    peSource->callGuest = {};
+                    peSource->callException = {};
+                    peSourceTicks = tracedTicks;
+                } else if (pc == 0x8017a42cu) {
+                    Require(gxReturned && traced.gpr[1] == 0x8035cf28u,
+                            "Original VIInit did not restore the Screen stack.");
+                    viReturned = true;
+                } else if (pc == 0x8017a4c0u) {
+                    Require(viReturned, "VIConfigure returned before VIInit.");
+                    viConfigured = true;
+                } else if (pc == 0x801bde64u) {
+                    ++viHandlers;
+                } else if (pc == 0x8017a674u) {
+                    Require(viConfigured && viHandlers == 2 && traced.threadContextReturns == 1,
+                            "VIWaitForRetrace did not use the original VI interrupt and scheduler context restore.");
+                    retraceReturned = true;
                 } else if (pc == 0x8000ad5cu) {
                     const uint32_t size = (0x81701fe0u - 0x8035efa0u) & ~31u;
                     Require(ppc_read_u32(traced, 0x80000030u) == 0x8035efa0u &&
@@ -646,6 +676,8 @@ int main(int argc, char** argv) {
                     case 0x8000adb0u: size = 0xa0; break;
                     case 0x8000add0u: size = 0xac; break;
                     case 0x8017a40cu: size = 0x60000; break;
+                    case 0x8017a634u:
+                    case 0x8017a64cu: size = 640 * 448 * 2; break;
                     }
                     if (size != 0) {
                         const auto address = traced.gpr[3];
@@ -662,22 +694,26 @@ int main(int argc, char** argv) {
             try {
                 dispatcher.Execute(traced, image.entryPoint(), 1000000, 128, observe);
             } catch (const std::exception& error) {
-                reachedBoundary = traced.pc == 0x801be410u &&
-                    std::string(error.what()).find("not mapped to GameCube RAM") != std::string::npos;
+                reachedBoundary = traced.pc == 0x801ceadcu &&
+                    std::string(error.what()).find("EFB copy requires a renderer/copy backend") != std::string::npos;
                 if (!reachedBoundary) throw;
             }
             std::cout << "Observed original initialization allocations=" << allocations.size()
                       << ", allocator count=" << ppc_read_u32(traced, 0x80349494u) << '\n';
-            Require(initializedHeap && allocations.size() == 9,
-                    "Original initialization did not return all nine observed heap allocations.");
+            Require(initializedHeap && allocations.size() == 11,
+                    "Original initialization did not return all eleven observed heap/framebuffer allocations.");
             Require(ppc_read_u32(traced, 0x80349494u) == allocations.size(),
-                    "Original allocation counter differs from nine observed allocations.");
+                    "Original allocation counter differs from eleven observed allocations.");
             Require(ppc_read_u32(traced, 0x8034915cu) == allocations[0].first &&
                         ppc_read_u32(traced, 0x8034919cu) == allocations[1].first &&
                         ppc_read_u32(traced, 0x803491b4u) == allocations[7].first &&
-                        ppc_read_u32(traced, allocations[7].first + 12) == allocations[8].first,
+                        ppc_read_u32(traced, allocations[7].first + 12) == allocations[8].first &&
+                        ppc_read_u32(traced, allocations[7].first) == allocations[9].first &&
+                        ppc_read_u32(traced, allocations[7].first + 4) == allocations[10].first &&
+                        ppc_read_u32(traced, allocations[7].first + 8) == allocations[10].first,
                     "Original manager singletons or Screen FIFO pointer differ from allocated objects.");
-            Require(reachedBoundary && gxReturned && entered == 93 && returned == 93 &&
+            Require(reachedBoundary && gxReturned && viReturned && viConfigured && retraceReturned &&
+                        entered == 93 && returned == 93 &&
                         traced.memory == discState.memory && tracedConsole == discConsole &&
                         tracedTicks == ticks && traced.pc == discState.pc && traced.lr == discState.lr &&
                         std::equal(std::begin(traced.gpr), std::end(traced.gpr), std::begin(discState.gpr)) &&
@@ -688,6 +724,19 @@ int main(int argc, char** argv) {
                         !traced.callGuest && !traced.callException,
                     "Observed startup changed original initialization, memory, registers or callback cleanup.");
             const auto& observedGx = *traced.graphics;
+            const auto& vi = *discState.video;
+            const auto& observedVi = *traced.video;
+            Require(vi.resets == 1 && vi.fields == 2 && vi.clockStarted &&
+                        vi.registers[1] == 1 && vi.registers[3] == 429 &&
+                        NativeViInterruptCause(vi) == 0 &&
+                        observedVi.registers == vi.registers && observedVi.lastTicks == vi.lastTicks &&
+                        observedVi.elapsedTicks == vi.elapsedTicks && observedVi.fields == vi.fields &&
+                        observedVi.writes == vi.writes && observedVi.resets == vi.resets &&
+                        observedVi.clockStarted == vi.clockStarted &&
+                        traced.threadContextReturns == discState.threadContextReturns &&
+                        traced.externalInterrupt->delivered == discState.externalInterrupt->delivered &&
+                        traced.externalInterrupt->returned == discState.externalInterrupt->returned,
+                    "Observed execution changed actual VI timing/register/interrupt or original scheduler state.");
             Require(observedGx.control == gx.control && observedGx.peControl == gx.peControl &&
                         observedGx.pePending == gx.pePending &&
                         observedGx.fifo == gx.fifo && observedGx.cp == gx.cp &&
@@ -706,10 +755,13 @@ int main(int argc, char** argv) {
                         observedGx.vertexCacheInvalidations == gx.vertexCacheInvalidations,
                     "Observed execution changed actual GX command, FIFO or interrupt state.");
             {
-                auto pe = traced;
-                uint64_t peTicks = tracedTicks;
+                Require(peSource.has_value(), "Missing pre-VI original GX return snapshot.");
+                const auto& interrupted = *peSource;
+                auto pe = interrupted;
+                uint64_t peTicks = peSourceTicks;
                 pe.readTimeBase = [&] { return peTicks += 1000; };
-                for (unsigned byte = 0; byte < 20; ++byte) ppc_write_u8(pe, 0xcc008000u, 0);
+                const auto padding = 32 - pe.graphics->gathered.size();
+                for (size_t byte = 0; byte < padding; ++byte) ppc_write_u8(pe, 0xcc008000u, 0);
                 Require(pe.graphics->commands.empty() && pe.graphics->gathered.empty(),
                         "Original pending matrix command did not finish on an actual gather flush.");
                 const uint8_t requests[] = {0x61, 0x48, 0, 0x12, 0x34, 0x61, 0x45, 0, 0, 2};
@@ -721,13 +773,14 @@ int main(int argc, char** argv) {
                 unsigned tokenHandlers = 0, finishHandlers = 0;
                 bool resumed = false;
                 try {
-                    dispatcher.Execute(pe, traced.pc, 100000, 128, [&](uint32_t pc) {
+                    dispatcher.Execute(pe, interrupted.pc, 100000, 128, [&](uint32_t pc) {
                         if (pc == 0x801ce08cu) ++tokenHandlers;
                         if (pc == 0x801ce158u) ++finishHandlers;
+                        if (pc == interrupted.pc) throw std::runtime_error("PE test context resumed.");
                     });
                 } catch (const std::exception& error) {
-                    resumed = pe.pc == traced.pc &&
-                        std::string(error.what()).find("not mapped to GameCube RAM") != std::string::npos;
+                    resumed = pe.pc == interrupted.pc &&
+                        std::string(error.what()) == "PE test context resumed.";
                     if (!resumed) throw;
                 }
                 Require(resumed && tokenHandlers == 1 && finishHandlers == 1 &&
@@ -735,10 +788,10 @@ int main(int argc, char** argv) {
                             !pe.externalInterrupt->active && NativeGxInterruptCause(*pe.graphics) == 0 &&
                             pe.graphics->peControl == 3 && pe.graphics->token == 0x1234 &&
                             ppc_read_u8(pe, 0x803498e8u) == 1 &&
-                            std::equal(std::begin(pe.gpr), std::end(pe.gpr), std::begin(traced.gpr)) &&
-                            pe.fpr == traced.fpr && pe.cr == traced.cr && pe.xer == traced.xer &&
-                            pe.lr == traced.lr && pe.ctr == traced.ctr &&
-                            ppc_read_msr(pe) == ppc_read_msr(traced) && !pe.callGuest && !pe.callException,
+                            std::equal(std::begin(pe.gpr), std::end(pe.gpr), std::begin(interrupted.gpr)) &&
+                            pe.fpr == interrupted.fpr && pe.cr == interrupted.cr && pe.xer == interrupted.xer &&
+                            pe.lr == interrupted.lr && pe.ctr == interrupted.ctr &&
+                            ppc_read_msr(pe) == ppc_read_msr(interrupted) && !pe.callGuest && !pe.callException,
                         "Original PE handlers did not acknowledge both sources and restore interrupted context.");
                 std::cout << "Injected FIFO token/finish requests executed both original PE handlers "
                              "and original exception/context return. Production startup issues no such requests.\n";

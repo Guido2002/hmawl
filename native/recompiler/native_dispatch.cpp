@@ -134,6 +134,10 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
     }
     state.pc = address;
     do {
+        if (state.video && (state.video->registers[1] & 1)) {
+            if (!state.readTimeBase) throw std::runtime_error("Native VI requires a time-base backend.");
+            NativeViAdvance(*state.video, state.readTimeBase());
+        }
         ppc_check_pending_interrupts(state, state.externalInterruptsEnabled);
         while (state.externalInterruptsEnabled && ppc_external_interrupt_pending(state)) {
             ppc_deliver_external_interrupt(state);
@@ -199,7 +203,19 @@ void NativeDispatcher::Execute(PpcState& state, uint32_t address,
             }
             --depth;
         };
-        Run(state, address, state.lr, remaining, depth, maxCallDepth, onBlock);
+        const auto returnAddress = state.lr;
+        for (;;) {
+            try {
+                Run(state, address, returnAddress, remaining, depth, maxCallDepth, onBlock);
+                break;
+            } catch (const PpcThreadContextReturn&) {
+                if (depth != 1 || state.systemCallActive ||
+                    (state.externalInterrupt && state.externalInterrupt->active)) {
+                    throw std::runtime_error("Invalid native thread context-return signal.");
+                }
+                address = state.pc;
+            }
+        }
     } catch (...) {
         state.callGuest = std::move(previous);
         state.callException = std::move(previousException);

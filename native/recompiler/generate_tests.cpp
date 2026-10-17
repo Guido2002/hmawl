@@ -507,6 +507,8 @@ int main(int argc, char** argv) {
             Emit(output, 0x3150, {XForm(3, 4, 5, 459, true)});
             Emit(output, 0x3160, {XForm(3, 4, 5, 235, false)});
             Emit(output, 0x3170, {XForm(3, 4, 5, 459, false)});
+            Emit(output, 0xf300, {XForm(3, 4, 5, 491, true)});
+            Emit(output, 0xf310, {XForm(4, 4, 5, 491, false)});
             Emit(output, 0x3180, {XForm(3, 4, 0, 954, true)});
             Emit(output, 0x3190, {XForm(3, 3, 0, 954)});
             Emit(output, 0x31a0, {XForm(3, 4, 0, 104, true)});
