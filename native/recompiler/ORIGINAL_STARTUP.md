@@ -65,9 +65,22 @@ This deliberately limited platform profile is not complete GameCube hardware.
 
 DSP hardware is explicitly mapped with 16 MiB ARAM, halted reset/mailbox
 clearing and checked bidirectional RAM/ARAM DMA. DMA completion follows actual
-byte copies; W1C status/masks are retained. Native DSP execution is not supplied.
-Unhalting, sending or consuming mail that requires DSP execution fails explicitly,
-without writing an invented acknowledgement. Unmasked pending DSP interrupts,
+byte copies; W1C status/masks are retained. A BIOS-free native bootstrap validates
+all 128 installed payload bytes before executing the build-time-compiled original
+DSP initializer. The DSP ROM loader itself is not executed; this is an explicit
+native handoff contract, not DSP-ROM emulation. General DSP tasks, outgoing CPU
+mail and DSP/audio interrupts remain unsupported and fail explicitly.
+
+The bounded DSP compiler emits native C++ for the init subset, not a runtime
+instruction decoder. Instruction/data-ROM load loops can be eliminated only when
+the loaded accumulator is immediately unconditionally overwritten, no other
+instruction observes its value and address/wrap/range guards are satisfied.
+It retains loop counts and address increments without supplying invented ROM
+contents. Unsupported or live-ROM-dependent code is rejected. RAM stores and
+mailbox stores still execute from the original instructions. Execution is limited
+to 65536 DSP instructions; busy mailbox waits fail at that bound, not with a
+fabricated acknowledgement. Reading mailbox high does not consume a message;
+reading low consumes its pending bit once. Unmasked pending DSP interrupts,
 like SI interrupts, cannot silently pass an enabled EE.
 
 ### Native console SRAM
@@ -133,9 +146,13 @@ This does not implement scheduling, context switching or guest interrupt deliver
 Original **__OSInitAudioSystem now executes** its RAM backup/DSP-payload copy,
 DCFlushRange and installed system-call exception vector, halted DSP reset,
 ARAM configuration, both real 32-byte RAM-to-ARAM transfers and original tick wait.
-It then stops at **DSP unhalt, PC `0x801B223C`, LR `0x801B21E0`**, with an explicit
-missing DSP execution backend error. DSP remains halted; no mailbox reply is
-invented. Audio initialization and `OSInit` have **not** returned.
+At unhalt the native bootstrap validates the installed program and executes its
+compiled DSP instructions: 16404 original instruction steps, including eliminated
+dead-ROM reads, all 4096 DSP RAM word clears, one real program-derived mailbox
+message and HALT. The original PPC initializer consumes that message, resets the
+DSP a second time, restores its complete 128-byte RAM backup and **returns**.
+Startup then disables HID2 LSQE and reaches **__OSInitMemoryProtection,
+PC `0x801B506C`, LR `0x801B0FB8`**. `OSInit` has **not** returned.
 The game main loop, GX renderer,
 DVD startup, scheduled game threads, audio, input and saves have not run.
 
@@ -143,7 +160,7 @@ DVD startup, scheduled game threads, audio, input and saves have not run.
 
 With testing enabled, build `hmawl_original_startup_tests` and run CTest's
 `hmawl_original_startup_tests`. It uses the production library and real verified
-DOL, checking the exact DSP-unhalt stop, two original external EXI transaction
+DOL, checking the exact memory-protection entry, two original external EXI transaction
 requests, cleared channel lock, both empty-slot probe results, exact console
 messages, the original SI command and three queued probes, sampling/handler state,
 pending no-response completion, missing SI backend/VI profile,
@@ -151,7 +168,9 @@ exact original SRAM command/DMA bytes, SRAM locks/sync, default thread/context,
 active/run queues, stack guard and MSR state, missing DMA backend and preserved
 malformed profiles plus fresh-profile persistence/reload,
 original sc/rfi return state and original DSP payload, both ARAM DMA transfers,
-complete ARAM guards, halted reset/mailboxes and missing DSP hardware,
+complete ARAM guards, compiled DSP instruction/mail counts, poisoned DSP RAM
+clearing, RAM backup restoration, halted reset/mailboxes, missing DSP hardware
+and execution backend plus modified DSP program rejection,
 missing EXI peripheral backend/console failures, initialization
 evidence, missing clock and unbound dispatcher dependencies, on-disk DOL
 truncation/mutation rejection, loaded-code integrity, block/call-depth bounds,

@@ -1,4 +1,5 @@
 #include "dol_image.h"
+#include "dsp_init_recompiler.h"
 #include "original_startup_manifest.h"
 #include "ppc_recompiler.h"
 #include "sha1.h"
@@ -54,12 +55,12 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < words.size(); ++i) {
                 instructions.emplace(range.address + static_cast<uint32_t>(i * 4), words[i]);
             }
-            const auto systemCallWords = image.ReadWords(0x801b6968u, 0x1cu);
-            for (size_t i = 0; i < systemCallWords.size(); ++i) {
-                instructions.emplace(0xc00u + static_cast<uint32_t>(i * 4), systemCallWords[i]);
-            }
-            leaders.insert(0xc00u);
         }
+        const auto systemCallWords = image.ReadWords(0x801b6968u, 0x1cu);
+        for (size_t i = 0; i < systemCallWords.size(); ++i) {
+            instructions.emplace(0xc00u + static_cast<uint32_t>(i * 4), systemCallWords[i]);
+        }
+        leaders.insert(0xc00u);
         for (const auto& instruction : instructions) {
             if (IsBranch(instruction.second)) {
                 leaders.insert(instruction.first + 4);
@@ -70,6 +71,25 @@ int main(int argc, char** argv) {
             }
         }
         std::ostringstream functions, bindings;
+        std::vector<uint16_t> dspProgram;
+        const auto dspSource = image.CreateGameCubeState();
+        for (uint32_t offset = 0; offset < 0x80u; offset += 2) {
+            dspProgram.push_back(ppc_read_u16(dspSource, 0x802e0228u + offset));
+        }
+        functions << RecompileDspInitialization(dspProgram, "OriginalDspInitialization");
+        functions << "static void ExecuteOriginalDspInitialization(PpcState& state) {\n"
+                     "    static constexpr uint16_t expected[] = {";
+        for (const auto word : dspProgram) functions << word << "u,";
+        functions << "};\n"
+                     "    if (!state.dspHardware || !state.dspControl || "
+                     "(*state.dspControl & 0x805u) != 0 || "
+                     "state.dspHardware->aramConfiguration != 0x43u)\n"
+                     "        throw std::runtime_error(\"Unsupported native DSP bootstrap handoff.\");\n"
+                     "    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {\n"
+                     "        if (ppc_read_u16(state, 0x81000000u + static_cast<uint32_t>(2 * i)) != expected[i])\n"
+                     "            throw std::runtime_error(\"Native DSP bootstrap payload differs from compiled DOL microcode.\");\n"
+                     "    }\n"
+                     "    OriginalDspInitialization(*state.dspHardware);\n}\n";
         bindings << "static std::vector<NativeTranslation> OriginalStartupTranslations() {\n"
                     "    return {\n";
         for (auto at = instructions.begin(); at != instructions.end();) {
@@ -98,7 +118,8 @@ int main(int argc, char** argv) {
         }
         bindings << "}},\n    };\n}\n";
         std::ofstream output(argv[2], std::ios::binary);
-        output << "#include \"native_dispatch.h\"\n#include \"native_console.h\"\n\n"
+        output << "#include \"native_dispatch.h\"\n#include \"native_console.h\"\n"
+                  "#include \"native_dsp_init.h\"\n\n"
                << functions.str() << bindings.str();
         output.close();
         if (!output) throw std::runtime_error("Could not write original startup bindings.");

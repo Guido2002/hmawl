@@ -40,6 +40,7 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.dspControl = 0;
     state.dspHardware.emplace();
     state.dspHardware->aram.resize(16u * 1024u * 1024u);
+    state.executeDspInitialization = ExecuteOriginalDspInitialization;
     state.aiControl = 0;
     state.diConfiguration = 1;
     state.viDtvStatus = 0;

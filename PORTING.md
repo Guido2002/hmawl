@@ -31,8 +31,11 @@ interrupt setup, a real no-response transaction under an explicit disconnected-
 controller profile and queuing the other probes. Original SRAM and default-thread
 initialization now return as well, using a persisted native console profile and
 actual EXI DMA. Original audio initialization now executes its cache-flush
-system-call vector, halted DSP reset and two real ARAM DMA transfers. It stops at
-DSP unhalt (`0x801B223C`), before DSP execution/mailbox delivery; full OSInit,
+system-call vector, halted DSP reset and two real ARAM DMA transfers. The bounded
+original DSP-init program now executes as compiled C++ through an explicit
+BIOS-free native bootstrap, clears DSP RAM and sends its actual compiled stores.
+Original audio initialization consumes its message, resets and returns. The
+runner reaches `__OSInitMemoryProtection` (`0x801B506C`); full OSInit,
 game initialization, the main loop and a rendered game frame remain unachieved.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
@@ -440,6 +443,25 @@ queue. Full runtime scheduling and device services are still needed.
   missing/modified vectors, exception budgets, DMA bounds/direction and RAM guards.
   Audio initialization and full OSInit remain incomplete.
   Hardware reference: [YAGCD DSP and ARAM](https://gc-forever.com/yagcd/chap5.html#sec5.6).
+- [x] Compile the embedded DSP initialization microprogram from the verified DOL
+  during the build; never decode DSP instructions at runtime or hardcode a ready
+  packet. A bounded compiler handles the initialization subset and rejects
+  unsupported instructions, uninitialized inputs and unproved data flow. It
+  eliminates instruction/data-ROM loads only in exact two-instruction loops
+  whose result is immediately overwritten by CLR or mailbox LR, retaining
+  address increments and loop/instruction accounting, with runtime ROM-region
+  and wrapping guards. A BIOS-free native bootstrap verifies every installed
+  payload word; it replaces the ROM loader contract, not the microprogram's
+  side effects, and does not claim original DSP-ROM execution. Execute all
+  original DSP RAM clears and actual mailbox stores, pending/read consumption
+  and HALT, with an explicit 65536-instruction budget. Tests verify two different
+  synthetic message payloads, exact instruction/store counts, a busy-mail budget
+  failure, ROM liveness/loop/wrap/range rejection, poisoned DSP RAM, absent backend
+  and modified original payload failures. The production runner executes 16404
+  DSP instructions including optimized dead reads, consumes one real compiled
+  message and returns through original audio reset/backup restoration, then
+  reaches memory protection at `0x801B506C`, LR `0x801B0FB8`.
+  General DSP execution, scheduling and audio playback remain unsupported.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

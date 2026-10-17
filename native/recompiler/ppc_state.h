@@ -58,6 +58,13 @@ struct PpcDspHardware {
     uint32_t fromDspMailbox = 0;
     uint32_t resetCount = 0;
     uint32_t dmaTransfers = 0;
+    std::array<uint16_t, 4096> dataRam = {};
+    uint16_t instructionPc = 0;
+    bool programHalted = true;
+    uint64_t executedInstructions = 0;
+    uint32_t completedPrograms = 0;
+    uint32_t sentMail = 0;
+    uint32_t consumedMail = 0;
     std::vector<uint8_t> aram;
 };
 
@@ -101,6 +108,7 @@ struct PpcState {
     std::optional<uint16_t> miInterruptMask;
     std::optional<uint16_t> dspControl;
     std::optional<PpcDspHardware> dspHardware;
+    std::function<void(PpcState&)> executeDspInitialization;
     std::optional<uint32_t> aiControl;
     std::optional<uint32_t> diConfiguration;
     std::optional<uint16_t> viDtvStatus;
@@ -342,6 +350,7 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
             if ((dsp.fromDspMailbox & 0x80000000u) != 0) {
                 throw std::runtime_error("DSP mailbox consumption requires a native DSP execution backend.");
             }
+
             return static_cast<uint16_t>(dsp.fromDspMailbox);
         }
         if (address == 0xcc005012u) return dsp.aramConfiguration;
@@ -362,6 +371,20 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
     return static_cast<uint16_t>(
         (static_cast<uint16_t>(state.memory[offset]) << 8) |
         static_cast<uint16_t>(state.memory[offset + 1]));
+}
+
+inline uint16_t ppc_read_u16(PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc005006u &&
+        state.dspHardware.has_value() && state.executeDspInitialization) {
+        auto& dsp = *state.dspHardware;
+        const auto value = static_cast<uint16_t>(dsp.fromDspMailbox);
+        if ((dsp.fromDspMailbox & 0x80000000u) != 0) {
+            dsp.fromDspMailbox &= ~0x80000000u;
+            ++dsp.consumedMail;
+        }
+        return value;
+    }
+    return ppc_read_u16(static_cast<const PpcState&>(state), address);
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
@@ -634,7 +657,8 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
                 throw std::runtime_error("Unsupported native DSP control write.");
             }
             const auto previous = *state.dspControl;
-            if ((value & 4u) == 0 && ((previous & 4u) != 0 || (value & 1u) != 0)) {
+            const bool unhalt = (value & 4u) == 0 && ((previous & 4u) != 0 || (value & 1u) != 0);
+            if (unhalt && !state.executeDspInitialization) {
                 throw std::runtime_error("DSP unhalt requires a native DSP execution backend; no mailbox acknowledgement was fabricated.");
             }
             if ((value & 1u) != 0 && (value & 0x804u) != 0x804u) {
@@ -644,9 +668,18 @@ inline void ppc_write_u16(PpcState& state, uint32_t address, uint16_t value) {
                 dsp.toDspMailbox = 0;
                 dsp.fromDspMailbox = 0;
                 ++dsp.resetCount;
+                dsp.programHalted = true;
             }
             *state.dspControl = static_cast<uint16_t>(
                 (previous & 0x02a8u & ~value) | (value & 0x0954u));
+            if (unhalt) {
+                dsp.programHalted = false;
+                state.executeDspInitialization(state);
+                if (!dsp.programHalted) {
+                    throw std::runtime_error("Native DSP initialization returned without a compiled HALT.");
+                }
+                *state.dspControl |= 4u;
+            }
             return;
         }
     }

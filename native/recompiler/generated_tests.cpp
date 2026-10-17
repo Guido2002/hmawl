@@ -5,6 +5,7 @@
 #include "native_console.h"
 #include "native_si_bus.h"
 #include "native_sram.h"
+#include "dsp_init_recompiler.h"
 
 #include <algorithm>
 #include <cfenv>
@@ -1345,6 +1346,80 @@ void TestSiStartupHardwareAndArithmetic() {
     state.serialInterface->communication = 1;
     Reject([&] { ppc_read_u32(state, 0xcc006434u); }, "completion backend");
     Reject([&] { ppc_write_u32(state, 0xcc006480u, 0); }, "pending");
+}
+
+void TestCompiledDspInitialization() {
+    for (unsigned variant = 0; variant < 2; ++variant) {
+        PpcState state;
+        state.memoryMap = PpcMemoryMap::GameCubeRam;
+        state.dspControl = 4;
+        state.dspHardware.emplace();
+        auto& dsp = *state.dspHardware;
+        dsp.dataRam.fill(0xa55au);
+        state.executeDspInitialization = [variant](PpcState& guest) {
+            if (variant == 0) SyntheticDspInitialization(*guest.dspHardware);
+            else OtherSyntheticDspInitialization(*guest.dspHardware);
+        };
+        ppc_write_u16(state, 0xcc00500au, 0);
+        const auto mail = variant == 0 ? 0x92345678u : 0xa3456789u;
+        Require(dsp.fromDspMailbox == mail && dsp.programHalted &&
+                    dsp.completedPrograms == 1 && dsp.sentMail == 1 &&
+                    dsp.executedInstructions == 36 && state.dspControl == 4,
+                "Compiled DSP program did not derive its mailbox from actual store instructions.");
+        for (size_t index = 0; index < dsp.dataRam.size(); ++index) {
+            Require(dsp.dataRam[index] == (index < 4 ? 0 : 0xa55au),
+                    "Compiled DSP program lost its RAM store count or guard.");
+        }
+        const auto high = ppc_read_u16(state, 0xcc005004u);
+        Require(high == mail >> 16 && dsp.fromDspMailbox == mail,
+                "Reading DSP mailbox high consumed its pending flag.");
+        Reject([&] { ppc_read_u16(static_cast<const PpcState&>(state), 0xcc005006u); },
+               "consumption");
+        Require(ppc_read_u16(state, 0xcc005006u) == static_cast<uint16_t>(mail) &&
+                    dsp.fromDspMailbox == (mail & 0x7fffffffu) && dsp.consumedMail == 1,
+                "DSP mailbox low did not consume exactly one real program message.");
+        ppc_read_u16(state, 0xcc005006u);
+        Require(dsp.consumedMail == 1, "Empty DSP mailbox read counted a nonexistent message.");
+    }
+    PpcDspHardware busy;
+    busy.fromDspMailbox = 0x80000001u;
+    Reject([&] { SyntheticDspInitialization(busy); }, "instruction budget exceeded");
+    Require(busy.fromDspMailbox == 0x80000001u && busy.sentMail == 0 &&
+                busy.completedPrograms == 0 && busy.executedInstructions == 65536,
+            "Busy DSP mailbox was overwritten or its compiled wait bypassed the execution bound.");
+    PpcDspHardware invalid;
+    invalid.dataRam.fill(0xa55au);
+    Reject([&] { OutOfRangeDspInitialization(invalid); }, "proven region");
+    Reject([&] { WrappedDspInitialization(invalid); }, "proven region");
+    Require(invalid.sentMail == 0 && invalid.completedPrograms == 0 &&
+                std::all_of(invalid.dataRam.begin(), invalid.dataRam.end(),
+                            [](uint16_t word) { return word == 0xa55au; }),
+            "Invalid DSP ROM elimination fabricated data or ran later program effects.");
+    for (size_t length = 0; length + 1 < SyntheticDspWords.size(); ++length) {
+        Reject([&] {
+            RecompileDspInitialization({SyntheticDspWords.begin(), SyntheticDspWords.begin() + length},
+                                      "TruncatedDsp");
+        }, "DSP");
+    }
+    auto mutated = SyntheticDspWords;
+    const auto loop = std::find(mutated.begin(), mutated.end(), 0x0064u) - mutated.begin();
+    mutated[loop + 4] = 0x1c1eu;
+    Reject([&] { RecompileDspInitialization(mutated, "LiveRom"); }, "data flow");
+    mutated = SyntheticDspWords;
+    mutated[loop + 3] = 0x1c1eu;
+    Reject([&] { RecompileDspInitialization(mutated, "ObservedRom"); }, "data flow");
+    mutated = SyntheticDspWords;
+    mutated[loop + 1] -= 1;
+    Reject([&] { RecompileDspInitialization(mutated, "WrongLoopEnd"); }, "data flow");
+    mutated = SyntheticDspWords;
+    mutated[7] = 0x0085u;
+    Reject([&] { RecompileDspInitialization(mutated, "UndefinedCounter"); }, "data flow");
+    mutated = SyntheticDspWords;
+    mutated[8] = 0x1001u;
+    const auto rangeChecked = RecompileDspInitialization(mutated, "RangeCheckedDsp");
+    Require(rangeChecked.find("proven region") != std::string::npos,
+            "DSP ROM elimination did not emit runtime bounds checks.");
+    Reject([&] { RecompileDspInitialization(SyntheticDspWords, "invalid-name"); }, "function name");
 }
 
 void TestSiTransactionsAndPendingInterrupt() {
@@ -3020,6 +3095,7 @@ int main() {
         TestNativeSramAndDma();
         TestCompiledSystemCall();
         TestDspResetAndAramDma();
+        TestCompiledDspInitialization();
         TestNativeConsoleAndEmptyExi();
         TestAndComplement();
         TestCacheBlockInstructions();

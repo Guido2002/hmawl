@@ -158,19 +158,23 @@ int main(int argc, char** argv) {
             return TransferDisconnectedSi(request);
         };
         state.writeConsole = [&](const std::string& text) { console += text; };
+        state.dspHardware->dataRam.fill(0xfeedu);
+        for (unsigned index = 0; index < 128; ++index) {
+            ppc_write_u8(state, 0x81000000u + index, static_cast<uint8_t>(index ^ 0xa5u));
+        }
         const auto expectedVersion = ReadGuestConsoleString(state, 0x802e6150u) + '\n' +
             ReadGuestConsoleString(state, ppc_read_u32(state, 0x80348cd8u)) + '\n';
         const auto result = RunOriginalStartup(dispatcher, state);
         std::cout << DescribeOriginalStartupStop(result) << '\n';
-        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801b223cu &&
-                    result.lr == 0x801b21e0u && transfers == 2 && siTransfers == 1 &&
+        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801b506cu &&
+                    result.lr == 0x801b0fb8u && transfers == 2 && siTransfers == 1 &&
                     sramCommands == 1 && sramDmas == 1 &&
                     console == expectedVersion && state.exiStatus[0] == 0x2008u &&
                     state.exiTransferControl[0] == 2u &&
                     ppc_read_u32(state, 0x80340c6cu) == 0 &&
                     ppc_read_u32(state, 0x800030c0u) == 0 &&
                     ppc_read_u32(state, 0x800030c4u) == 0 &&
-                    result.reason.find("DSP unhalt requires a native DSP execution backend") != std::string::npos &&
+                    result.reason.find("No native translation registered") != std::string::npos &&
                     ppc_read_u32(state, 0x80349ad0u) == 0,
                 "Production startup stopped at an unexpected boundary.");
         Require(state.srr0 == 0x801b23f4u && state.srr1 == 0x32u &&
@@ -178,18 +182,25 @@ int main(int argc, char** argv) {
                 "Original cache-flush exception vector did not execute and return through rfi.");
         for (unsigned index = 0; index < 128; ++index) {
             Require(ppc_read_u8(state, 0x81000000u + index) ==
-                        ppc_read_u8(state, 0x802e0228u + index),
-                    "Original audio startup did not install its real DSP initialization payload.");
+                        static_cast<uint8_t>(index ^ 0xa5u),
+                    "Original audio startup did not restore its exact RAM backup.");
         }
-        Require(state.dspControl == 4 && state.dspHardware->aramConfiguration == 0x43u &&
-                    state.dspHardware->resetCount == 1 && state.dspHardware->dmaTransfers == 2 &&
+        Require(state.dspControl == 0x804u && state.dspHardware->aramConfiguration == 0x43u &&
+                    state.dspHardware->resetCount == 2 && state.dspHardware->dmaTransfers == 2 &&
                     state.dspHardware->dmaMainAddress == 0x01000000u &&
                     state.dspHardware->dmaAramAddress == 0 && state.dspHardware->dmaCount == 32 &&
                     state.dspHardware->toDspMailbox == 0 && state.dspHardware->fromDspMailbox == 0,
-                "Original audio reset/DMA chain fabricated DSP execution or lost actual transfer evidence.");
+                "Original audio reset/DMA chain lost actual transfer evidence.");
+        Require(state.dspHardware->programHalted && state.dspHardware->completedPrograms == 1 &&
+                    state.dspHardware->sentMail == 1 && state.dspHardware->consumedMail == 1 &&
+                    state.dspHardware->executedInstructions == 16404,
+                "Original audio initialization did not execute and consume its compiled DSP program.");
+        for (auto word : state.dspHardware->dataRam) {
+            Require(word == 0, "Original compiled DSP program did not clear poisoned DSP RAM.");
+        }
         for (unsigned index = 0; index < state.dspHardware->aram.size(); ++index) {
             Require(state.dspHardware->aram[index] ==
-                        (index < 32 ? ppc_read_u8(state, 0x81000000u + index) : 0),
+                        (index < 32 ? ppc_read_u8(state, 0x802e0228u + index) : 0),
                     "Original audio ARAM DMA payload or full ARAM guard differs.");
         }
         auto noDspHardware = CreateOriginalStartupState(image);
@@ -197,6 +208,22 @@ int main(int argc, char** argv) {
         const auto dspFailure = RunOriginalStartup(dispatcher, noDspHardware);
         Require(dspFailure.pc == 0x801b2144u && dspFailure.reason.find("not mapped") != std::string::npos,
                 "Missing DSP hardware profile was silently substituted.");
+        auto noDspExecution = CreateOriginalStartupState(image);
+        noDspExecution.executeDspInitialization = {};
+        const auto noDspResult = RunOriginalStartup(dispatcher, noDspExecution);
+        Require(noDspResult.pc == 0x801b223cu &&
+                    noDspResult.reason.find("DSP unhalt requires") != std::string::npos &&
+                    noDspExecution.dspHardware->sentMail == 0 &&
+                    noDspExecution.dspHardware->completedPrograms == 0,
+                "Absent DSP compiler backend was silently replaced by a ready response.");
+        auto damagedDspCode = CreateOriginalStartupState(image);
+        ppc_write_u16(damagedDspCode, 0x802e0228u, 0);
+        const auto damagedDspResult = RunOriginalStartup(dispatcher, damagedDspCode);
+        Require(damagedDspResult.pc == 0x801b223cu &&
+                    damagedDspResult.reason.find("bootstrap payload differs") != std::string::npos &&
+                    damagedDspCode.dspHardware->executedInstructions == 0 &&
+                    damagedDspCode.dspHardware->sentMail == 0,
+                "Modified DSP payload ran a stale compiled program or fabricated mail.");
         const auto sram = NewNativeSram();
         for (unsigned index = 0; index < sram.size(); ++index) {
             Require(ppc_read_u8(state, 0x80317b00u + index) == sram[index],

@@ -15,6 +15,7 @@ FetchContent_MakeAvailable(zstd)
 add_library(hmawl_recompiler_core
     dol_image.cpp
     ppc_recompiler.cpp
+    dsp_init_recompiler.cpp
     rvz_image.cpp
     disc_import.cpp
     clz_image.cpp

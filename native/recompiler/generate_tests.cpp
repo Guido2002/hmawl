@@ -1,5 +1,6 @@
 #include "dol_image.h"
 #include "ppc_recompiler.h"
+#include "dsp_init_recompiler.h"
 #include "sha1.h"
 #include "us_module_fixture.h"
 
@@ -592,6 +593,35 @@ int main(int argc, char** argv) {
                        << (0x8500u + i * 16u) << ",\n" << std::dec;
             }
             output << "};\n";
+            std::vector<uint16_t> dsp = {
+                0x029f, 2, 0x1200,
+                0x0080, 0x8000, 0x0088, 0xffff, 0x0084, 4
+            };
+            const auto romLoop = [&](uint16_t load) {
+                const auto pc = dsp.size();
+                dsp.insert(dsp.end(), {0x0064, static_cast<uint16_t>(pc + 3), load, 0});
+            };
+            romLoop(0x0218);
+            dsp.insert(dsp.end(), {0x8100, 0x1c1e, 0x0044, 0x1b1e,
+                                   0x0080, 0x1000, 0x0084, 3});
+            romLoop(0x191e);
+            const auto readPc = dsp.size();
+            dsp.insert(dsp.end(), {0x00de, 0xfffc, 0x02a0, 0x8000,
+                                   0x029c, static_cast<uint16_t>(readPc),
+                                   0x16fc, 0x1234, 0x16fd, 0x5678, 0x0021});
+            output << "#include \"native_dsp_init.h\"\n";
+            output << RecompileDspInitialization(dsp, "SyntheticDspInitialization");
+            output << "static const std::vector<uint16_t> SyntheticDspWords = {";
+            for (auto word : dsp) output << word << "u,";
+            output << "};\n";
+            dsp[dsp.size() - 4] = 0x2345;
+            dsp[dsp.size() - 2] = 0x6789;
+            output << RecompileDspInitialization(dsp, "OtherSyntheticDspInitialization");
+            dsp[8] = 0x1001;
+            output << RecompileDspInitialization(dsp, "OutOfRangeDspInitialization");
+            dsp[8] = 4;
+            dsp[6] = 0xfffe;
+            output << RecompileDspInitialization(dsp, "WrappedDspInitialization");
             generated += output.str();
         }
         std::ofstream output(argv[argc - 1], std::ios::binary);

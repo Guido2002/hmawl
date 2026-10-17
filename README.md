@@ -62,8 +62,14 @@ a local native console profile. Original default-thread/context and scheduler
 queue initialization then returns. Original audio initialization now installs its
 real DSP payload, executes the installed cache-flush exception vector via `sc`/`rfi`,
 resets the halted DSP and performs both real RAM-to-ARAM transfers.
-It stops at DSP unhalt, `PC=0x801B223C`, `LR=0x801B21E0`: DSP program execution
-and mailbox delivery are not implemented, so no acknowledgement is fabricated.
+The small original DSP-init program is now also compiled to native C++ at build
+time. Its RAM clears and mailbox stores execute; the original audio initializer
+consumes that message, resets the DSP and restores its RAM backup before returning.
+A BIOS-free native bootstrap validates the installed payload; it does not execute
+a console DSP boot ROM. Only ROM loads proven dead before an unconditional
+overwrite are eliminated, never replaced by fabricated ROM data.
+The runner reaches `__OSInitMemoryProtection`, `PC=0x801B506C`,
+`LR=0x801B0FB8`. General DSP tasks, audio playback and full OSInit remain unfinished.
 This is an **explicit dependency stop (exit code 3)**, not successful OSInit,
 game initialization or rendering. RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.
