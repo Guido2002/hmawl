@@ -48,6 +48,7 @@ void NativeDvdQueue::Invoke(uint32_t callback, uint32_t result, uint32_t info) {
     const auto gqr = state_.gqr;
     const auto msr = state_.msr, hid2 = state_.hid2, hid0 = state_.hid0;
     const auto l2cr = state_.l2cr;
+    const auto performanceMonitor = state_.performanceMonitor;
     const auto cr = state_.cr, xer = state_.xer, lr = state_.lr;
     const auto ctr = state_.ctr, pc = state_.pc;
     const bool interrupts = state_.externalInterruptsEnabled;
@@ -60,6 +61,7 @@ void NativeDvdQueue::Invoke(uint32_t callback, uint32_t result, uint32_t info) {
         state_.hid2 = hid2;
         state_.hid0 = hid0;
         state_.l2cr = l2cr;
+        state_.performanceMonitor = performanceMonitor;
         state_.cr = cr;
         state_.xer = xer;
         state_.lr = lr;

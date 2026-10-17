@@ -180,6 +180,12 @@ void TestHardwareFprInitialization(const DolImage& image) {
 
 void RunHardwareDependency(uint32_t address, PpcState& state) {
     switch (address) {
+    case 0x801b0a6cu: ppc_801B0A6C(state); break;
+    case 0x801b0a74u: ppc_801B0A74(state); break;
+    case 0x801b0a7cu: ppc_801B0A7C(state); break;
+    case 0x801b0a84u: ppc_801B0A84(state); break;
+    case 0x801b0a8cu: ppc_801B0A8C(state); break;
+    case 0x801b0a94u: ppc_801B0A94(state); break;
     case 0x801b7bf0u: ppc_801B7BF0(state); break;
     case 0x801b7c10u: ppc_801B7C10(state); break;
     case 0x801b1584u: ppc_801B1584(state); break;
@@ -672,6 +678,17 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     constexpr uint64_t offset = 2;
     ppc_write_u64(state, 0x800030d8u, offset);
     unsigned reads = 0;
+    std::vector<uint32_t> performanceCalls;
+    state.performanceMonitor.fill(UINT32_MAX);
+    state.callGuest = [&](uint32_t address, PpcState& guest) {
+        Require(++calls < 150, "OSInit fixture exceeded its dependency budget.");
+        if (address >= 0x801b0a6cu && address <= 0x801b0a94u) {
+            Require(!guest.externalInterruptsEnabled && guest.gpr[3] == 0,
+                    "OSInit did not reset performance monitoring under its interrupt mask.");
+            performanceCalls.push_back(address);
+        }
+        RunHardwareDependency(address, guest);
+    };
     state.readTimeBase = [&] {
         Require(!state.externalInterruptsEnabled,
                 "OSInit system-time sampling did not mask interrupts.");
@@ -681,12 +698,16 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     state.lr = 0x80003268u;
     const auto beforeOs = state.memory;
     ppc_801B0DE0(state);
-    Require(state.pc == 0x801b0e2cu && reads == 3 &&
+    Require(state.pc == 0x801b0e5cu && reads == 3 &&
+                performanceCalls == std::vector<uint32_t>{0x801b0a6cu, 0x801b0a74u,
+                    0x801b0a7cu, 0x801b0a84u, 0x801b0a8cu, 0x801b0a94u} &&
+                std::all_of(state.performanceMonitor.begin(), state.performanceMonitor.end(),
+                            [](uint32_t value) { return value == 0; }) &&
                 state.gpr[1] == stack - 0x18u &&
                 ppc_read_u32(state, 0x803495e0u) == 1 &&
                 ppc_read_u64(state, 0x803495f8u) == ticks + offset &&
                 !state.externalInterruptsEnabled,
-            "Original OSInit prefix did not record system time or mask interrupts.");
+            "Original OSInit prefix did not record time, mask interrupts or reset monitoring.");
     const auto prefixFrame = ppc_memory_offset(state, stack - 0x38u, 0x40);
     for (size_t i = 0; i < beforeOs.size(); ++i) {
         if ((i >= prefixFrame && i < prefixFrame + 0x40) ||
@@ -702,8 +723,13 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
                 state.gpr[29] == r29 && state.gpr[30] == r30 && state.gpr[31] == r31,
             "Original OSInit epilogue did not restore its saved frame.");
     state.externalInterruptsEnabled = true;
+    performanceCalls.clear();
+    state.performanceMonitor.fill(0x12345678u);
     ppc_801B0DE0(state);
-    Require(state.pc == 0x801b119cu && reads == 3 && state.externalInterruptsEnabled,
+    Require(state.pc == 0x801b119cu && reads == 3 && state.externalInterruptsEnabled &&
+                performanceCalls.empty() &&
+                std::all_of(state.performanceMonitor.begin(), state.performanceMonitor.end(),
+                            [](uint32_t value) { return value == 0x12345678u; }),
             "Original OSInit re-entry did not skip initialization.");
     ppc_801B119C(state);
     Require(state.pc == state.lr && state.gpr[1] == stack &&
@@ -715,8 +741,9 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
         Require(state.memory[i] == started[i],
                 "OSInit re-entry changed memory outside its stack frame.");
     }
-    std::cout << "Original OSInit prefix sets initialization flag/start time and masks "
-                 "interrupts; stops at 0x801b0e2c before performance-monitor setup. "
+    std::cout << "Original OSInit prefix sets initialization flag/start time, masks "
+                 "interrupts and resets MMCR0/1 plus PMC1..4; stops at 0x801b0e5c "
+                 "before speculation setup. "
                  "Re-entry skip/epilogue tested separately; first OSInit does not return.\n";
 }
 

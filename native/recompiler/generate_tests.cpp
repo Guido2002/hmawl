@@ -319,7 +319,9 @@ int main(int argc, char** argv) {
                 {0x801b34ecu, 0x218}, {0x801b3a44u, 0x14},
                 {0x801b3a6cu, 0x24}, {0x801d33e4u, 0x50},
                 {0x801d3348u, 0x28},
-                {0x801b0de0u, 0x4c}, {0x801b119cu, 0x1c},
+                {0x801b0de0u, 0x7c}, {0x801b119cu, 0x1c},
+                {0x801b0a6cu, 8}, {0x801b0a74u, 8}, {0x801b0a7cu, 8},
+                {0x801b0a84u, 8}, {0x801b0a8cu, 8}, {0x801b0a94u, 8},
                 {0x801b7bf0u, 0x18}, {0x801b7c10u, 0x64},
                 {0x801b0b24u, 8},
                 {0x801b0a9cu, 0x20}, {0x801b0abcu, 0x28},
@@ -344,6 +346,17 @@ int main(int argc, char** argv) {
             Emit(output, 0x9370, {0x4c00012cu});
             Emit(output, 0x9380, {0x7c79faa6u});
             Emit(output, 0x9390, {0x7c79fba6u});
+            unsigned monitor = 0;
+            for (unsigned spr : {952u, 956u, 953u, 954u, 957u, 958u}) {
+                Emit(output, 0xb000u + monitor++ * 16u, {
+                    XForm(3, spr & 31u, spr >> 5, 467)});
+            }
+            output << "static void (*const PerformanceResetTestFunctions[])(PpcState&) = {\n";
+            for (unsigned i = 0; i < monitor; ++i) {
+                output << "    ppc_0000" << std::hex << std::uppercase
+                       << (0xb000u + i * 16u) << ",\n" << std::dec;
+            }
+            output << "};\n";
             for (unsigned extended = 0; extended < 2; ++extended) {
                 for (unsigned record = 0; record < 2; ++record) {
                     for (unsigned alias = 0; alias < 3; ++alias) {

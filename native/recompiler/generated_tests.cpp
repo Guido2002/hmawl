@@ -287,6 +287,70 @@ void TestFpscrWrites() {
     }
 }
 
+void TestPerformanceMonitorResets() {
+    for (unsigned index = 0; index < 6; ++index) {
+        PpcState state;
+        for (unsigned reg = 0; reg < 32; ++reg) state.gpr[reg] = reg + 0x100u;
+        state.gpr[3] = 0;
+        state.fpr.fill({UINT64_MAX, UINT64_MAX});
+        state.gqr.fill(0x12345678u);
+        state.performanceMonitor.fill(0x87654321u);
+        state.memory.resize(64, 0xa5);
+        state.cr = 0x12345678u;
+        state.xer = 0xe0000000u;
+        state.lr = 0x80001000u;
+        state.ctr = 0x11111111u;
+        state.fpscr = 4;
+        state.msr = 0x2030u;
+        state.hid0 = 0xc000u;
+        state.hid2 = 0xa0000000u;
+        state.l2cr = 0x80000000u;
+        const auto before = state;
+        auto expected = state.performanceMonitor;
+        expected[index] = 0;
+        const auto check = [&] {
+            Require(state.memory == before.memory && state.fpr == before.fpr &&
+                        state.gqr == before.gqr && state.cr == before.cr &&
+                        state.xer == before.xer && state.lr == before.lr &&
+                        state.ctr == before.ctr && state.fpscr == before.fpscr &&
+                        state.msr == before.msr && state.hid0 == before.hid0 &&
+                        state.hid2 == before.hid2 && state.l2cr == before.l2cr,
+                    "Performance-monitor reset changed unrelated CPU state or RAM.");
+            for (unsigned reg = 0; reg < 32; ++reg) {
+                if (reg == 3) continue;
+                Require(state.gpr[reg] == before.gpr[reg],
+                        "Performance-monitor reset changed an integer register.");
+            }
+        };
+        for (bool interrupts : {false, true}) {
+            state.externalInterruptsEnabled = interrupts;
+            for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                PerformanceResetTestFunctions[index](state);
+                Require(state.performanceMonitor == expected &&
+                            state.pc == 0xb004u + index * 16u && state.gpr[3] == 0 &&
+                            state.externalInterruptsEnabled == interrupts,
+                        "Performance reset targeted the wrong register or changed interrupt state.");
+                check();
+            }
+        }
+        for (unsigned bit = 0; bit < 32; ++bit) {
+            state.gpr[3] = 1u << bit;
+            state.pc = 0xb000u + index * 16u;
+            bool rejected = false;
+            try {
+                PerformanceResetTestFunctions[index](state);
+            } catch (const std::runtime_error& error) {
+                rejected = std::string(error.what()).find("only zero resets") != std::string::npos;
+            }
+            Require(rejected && state.performanceMonitor == expected &&
+                        state.pc == 0xb000u + index * 16u && state.gpr[3] == (1u << bit) &&
+                        state.externalInterruptsEnabled,
+                    "Unsupported performance-monitor mode did not fail before mutation.");
+            check();
+        }
+    }
+}
+
 void TestFpscrBits() {
     const int rounding = std::fegetround();
     const unsigned exceptionBits[] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 21, 22, 23};
@@ -1437,6 +1501,7 @@ int main() {
         TestFloatingPointMoves();
         TestFpscrWrites();
         TestFpscrBits();
+        TestPerformanceMonitorResets();
         TestFpscrReads();
         TestSingleWidening();
         TestQuantizationRegisters();

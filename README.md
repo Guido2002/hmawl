@@ -260,8 +260,9 @@ MMIO, throw rather than being silently treated as RAM.
 
 Continuing that verified state, an independent original `OSInit` prefix now
 sets `AreWeInitialized`, calls the original `__OSGetSystemTime`, records
-`__OSStartTime`, and masks interrupts. It stops at `0x801b0e2c` before the
-performance-monitor setup; first-time `OSInit` does not yet return. Its
+`__OSStartTime`, masks interrupts and calls the six original MMCR0/1 and PMC1..4
+reset wrappers. It stops at `0x801b0e5c` before speculation setup;
+first-time `OSInit` does not yet return. Its
 already-initialized branch and return epilogue are tested separately, not used
 to skip the unfinished first-time path.
 
@@ -273,6 +274,13 @@ New compiled `addc`/`adde` reuse checked carry-state logic, including record
 forms, overlapping registers and preservation of other XER bits; overflow-enable
 forms remain unsupported. No performance counters, OS scheduler or RTC backend
 are implied by these time tests.
+
+Performance-monitor SPR writes currently support zero resets only, with
+explicit guest register state preserved across native DVD callbacks.
+Nonzero writes (including enabling measurement), reads and record forms are
+rejected; hardware event counting is not implemented. Tests cover each register,
+every nonzero single-bit input, repeated resets, interrupt/state preservation,
+original reset-call order and the unchanged already-initialized skip path.
 
 Compiled `mtfsb0`/`mtfsb1` now clear/set individual FPSCR bits, recompute VX/FEX
 and optionally update CR1. Setting a previously clear exception-cause bit also

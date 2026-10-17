@@ -842,6 +842,19 @@ std::string RecompileFunction(uint32_t address,
             }
             case 467: {
                 const uint32_t spr = ra | (rb << 5);
+                if (spr == 952 || spr == 956 || spr == 953 || spr == 954 ||
+                    spr == 957 || spr == 958) {
+                    if (record) {
+                        throw std::runtime_error("Invalid performance-monitor transfer at " +
+                                                 Hex(pc) + ".");
+                    }
+                    const unsigned index = spr == 952 ? 0 : spr == 956 ? 1 :
+                        spr == 953 ? 2 : spr == 954 ? 3 : spr == 957 ? 4 : 5;
+                    output << "    ppc_reset_performance_monitor(state, " << index
+                           << "u, state.gpr[" << rt << "]);\n";
+                    emitted = true;
+                    break;
+                }
                 if (record || (spr != 1 && spr != 8 && spr != 9 && spr != 1008 && spr != 1017 &&
                                (spr < 912 || spr > 920))) {
                     throw std::runtime_error("Unsupported mtspr instruction " +

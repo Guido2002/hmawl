@@ -32,6 +32,7 @@ struct PpcState {
     uint32_t hid2 = 0;
     uint32_t hid0 = 0;
     uint32_t l2cr = 0;
+    std::array<uint32_t, 6> performanceMonitor = {}; // MMCR0/1, PMC1..4; reset only.
     uint32_t cr = 0;
     uint32_t xer = 0;
     uint32_t lr = 0;
@@ -48,6 +49,13 @@ struct PpcState {
 
 inline uint32_t ppc_read_msr(const PpcState& state) {
     return (state.msr & ~0x8000u) | (state.externalInterruptsEnabled ? 0x8000u : 0u);
+}
+
+inline void ppc_reset_performance_monitor(PpcState& state, unsigned index, uint32_t value) {
+    if (index >= state.performanceMonitor.size() || value != 0) {
+        throw std::runtime_error("Unsupported PowerPC performance-monitor write (only zero resets supported).");
+    }
+    state.performanceMonitor[index] = 0;
 }
 
 inline void ppc_write_msr(PpcState& state, uint32_t value) {

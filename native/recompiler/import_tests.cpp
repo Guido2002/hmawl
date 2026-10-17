@@ -429,6 +429,7 @@ void TestNativeDvdQueue() {
         guest.hid2 = 0;
         guest.hid0 = 0;
         guest.l2cr = 0;
+        guest.performanceMonitor.fill(0);
     };
     state.gpr[1] = 0x8035cfa0u;
     state.lr = 0x80003000u;
@@ -450,6 +451,8 @@ void TestNativeDvdQueue() {
     state.hid2 = 0xa0000000u;
     state.hid0 = 0xc000u;
     state.l2cr = 0x80000000u;
+    state.performanceMonitor.fill(0x12345678u);
+    const auto monitor = state.performanceMonitor;
     const auto prepare = [&](uint32_t block, uint32_t destination, uint32_t priority) {
         const auto offset = ppc_memory_offset(state, block, 0x3c);
         std::fill(state.memory.begin() + offset, state.memory.begin() + offset + 0x3c, 0);
@@ -494,6 +497,7 @@ void TestNativeDvdQueue() {
                     state.gqr == quantizationRegisters &&
                     state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
                     state.hid0 == 0xc000u && state.l2cr == 0x80000000u &&
+                    state.performanceMonitor == monitor &&
                     state.pc == 0x80003004u && state.externalInterruptsEnabled,
                 "DVD completion priority/FIFO, status, result or CPU restoration differs.");
     }
@@ -516,7 +520,8 @@ void TestNativeDvdQueue() {
     Require(state.fpr == floatingRegisters && state.fpscr == 0xf1234567u &&
                 state.gqr == quantizationRegisters &&
                 state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
-                state.hid0 == 0xc000u && state.l2cr == 0x80000000u,
+                state.hid0 == 0xc000u && state.l2cr == 0x80000000u &&
+                state.performanceMonitor == monitor,
             "DVD cancellation callback damaged floating-point context.");
     const auto rejectSubmit = [&](const char* message) {
         const auto before = state.memory;
@@ -573,6 +578,7 @@ void TestNativeDvdQueue() {
         guest.hid2 = UINT32_MAX;
         guest.hid0 = UINT32_MAX;
         guest.l2cr = UINT32_MAX;
+        guest.performanceMonitor.fill(UINT32_MAX);
         throw std::runtime_error("Intentional DVD callback failure.");
     };
     const uint32_t previousPc = state.pc;
@@ -586,7 +592,8 @@ void TestNativeDvdQueue() {
     Require(state.fpr == floatingRegisters && state.fpscr == 0xf1234567u &&
                 state.gqr == quantizationRegisters &&
                 state.msr == 0x2000u && state.hid2 == 0xa0000000u &&
-                state.hid0 == 0xc000u && state.l2cr == 0x80000000u,
+                state.hid0 == 0xc000u && state.l2cr == 0x80000000u &&
+                state.performanceMonitor == monitor,
             "Throwing DVD callback damaged floating-point context.");
     prepare(info, output, 0);
     queue.Submit(state);

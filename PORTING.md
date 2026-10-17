@@ -198,8 +198,9 @@ queue. Full runtime scheduling and device services are still needed.
   callback and original interrupt wrappers. Test torn-read retry, 64-bit offset
   carry/wrap, both interrupt states and RAM/ABI guards.
   Continue the verified entry state with the original `OSInit` prefix: set the
-  initialization flag, record system start time and mask interrupts. Stop at
-  `0x801b0e2c` before performance-monitor setup. Test the already-initialized
+  initialization flag, record system start time and mask interrupts. Continue
+  through six original performance-monitor reset wrappers to `0x801b0e5c`,
+  before speculation setup. Test the already-initialized
   skip and epilogue separately; never claim they complete first-time startup.
 - [x] Compile FPSCR bit operations `mtfsb0`/`mtfsb1`, including record forms,
   derived VX/FEX summaries and sticky FX on newly set exception causes.
@@ -207,6 +208,12 @@ queue. Full runtime scheduling and device services are still needed.
   CR1, reserved encoding rejection and unchanged RAM/registers/host rounding.
   Execute original `PPCSetFpNonIEEEMode` independently: NI is guest status,
   not arithmetic behavior or a bypass of the pending OSInit dependencies.
+- [x] Compile zero-only `mtspr` resets for MMCR0/1 (SPR 952/956) and PMC1..4
+  (953/954/957/958). Preserve their guest state across DVD completion,
+  cancellation and throwing callbacks. Test all registers, repeated writes,
+  both interrupt states, every nonzero single-bit rejection before mutation,
+  unsupported read/record encodings and the original OSInit reset-call order.
+  Nonzero monitor writes and hardware event counting remain unsupported.
 - [x] Parse version 3 REL sections, imports and relocation streams. Stage
   module loading and BSS initialization, resolve DOL/self/cross-module imports,
   and apply the relocation types present in the original US files. Synthetic
@@ -416,7 +423,7 @@ systems and the executable can be packaged without the GameCube build toolchain.
    Implement remaining OS/platform dependencies explicitly rather than treating
    unsupported hardware instructions as successful no-ops.
    The initial `OSInit` prefix is independently verified through start-time
-   capture/interrupt masking (`0x801b0e2c`); performance-monitor setup,
+   capture/interrupt masking and MMCR/PMC resets (`0x801b0e5c`);
    speculation/FPSCR setup and the remaining OS subsystem initialization
    still follow.
 2. Expand the recompiler's opcode coverage, extend the tested REL/native-function

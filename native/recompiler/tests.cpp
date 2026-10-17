@@ -294,6 +294,20 @@ void TestInvalidDolRange() {
 }
 
 void TestInvalidFloatingPointInstructions() {
+    for (uint32_t spr : {952u, 956u, 953u, 954u, 957u, 958u}) {
+        for (uint32_t operation : {339u, 467u}) {
+            const uint32_t instruction = (31u << 26) | (3u << 21) |
+                ((spr & 31u) << 16) | ((spr >> 5) << 11) |
+                (operation << 1) | (operation == 467 ? 1u : 0u);
+            bool rejected = false;
+            try {
+                RecompileFunction(0x80003100u, {instruction});
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            Require(rejected, "Unsupported performance-monitor read/record form was accepted.");
+        }
+    }
     const std::vector<uint32_t> instructions = {
         (51u << 26) | (3u << 21),
         (55u << 26) | (3u << 21),
