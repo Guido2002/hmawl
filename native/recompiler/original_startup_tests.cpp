@@ -1,4 +1,6 @@
 #include "original_startup.h"
+#include "native_console.h"
+#include "native_exi_bus.h"
 
 #include <chrono>
 #include <fstream>
@@ -106,13 +108,45 @@ int main(int argc, char** argv) {
         Require(dispatcher.Contains(image.entryPoint()) && dispatcher.Contains(0x80003264u) &&
                     dispatcher.Contains(0x801b0de0u) && dispatcher.Contains(0x801b0f88u),
                 "Production bindings omit the original entry-to-OSInit chain.");
+        auto missingPeripheral = CreateOriginalStartupState(image);
+        missingPeripheral.transferExiImmediate = {};
+        const auto missingTransfer = RunOriginalStartup(dispatcher, missingPeripheral);
+        Require(missingTransfer.pc == 0x801f6518u &&
+                    missingTransfer.reason.find("requires a native peripheral backend") != std::string::npos &&
+                    missingPeripheral.exiStatus[0] == 0x2200u &&
+                    missingPeripheral.exiTransferControl[0] == 0,
+                "Missing EXI backend fabricated response/completion or stopped at the wrong instruction.");
+        unsigned transfers = 0;
+        state.transferExiImmediate = [&](const ExiImmediateRequest& request) {
+            Require(request.channel == 0 && request.device == 2 &&
+                        request.direction == (transfers == 0 ? 1u : 0u) &&
+                        request.length == (transfers == 0 ? 2u : 4u) &&
+                        request.data == 0 && transfers < 2,
+                    "Original EXI ID command/read sequence differs.");
+            ++transfers;
+            return TransferEmptyExternalExi(request);
+        };
+        std::string console;
+        state.writeConsole = [&](const std::string& text) { console += text; };
+        const auto expectedVersion = ReadGuestConsoleString(state, 0x802e6150u) + '\n';
         const auto result = RunOriginalStartup(dispatcher, state);
         std::cout << DescribeOriginalStartupStop(result) << '\n';
-        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801f6f24u &&
-                    result.reason.find("Unsupported EXI status write") != std::string::npos &&
-                    state.gpr[4] == 0xcc006800u && state.gpr[5] == 0x200u &&
+        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801f52f4u &&
+                    result.lr == 0x801b0f90u && transfers == 2 &&
+                    console == expectedVersion && state.exiStatus[0] == 0x2008u &&
+                    state.exiTransferControl[0] == 0x30u &&
+                    ppc_read_u32(state, 0x80340c6cu) == 0 &&
+                    ppc_read_u32(state, 0x800030c0u) == 0 &&
+                    ppc_read_u32(state, 0x800030c4u) == 0 &&
+                    result.reason.find("No native translation registered") != std::string::npos &&
                     ppc_read_u32(state, 0x80349ad0u) == 0,
                 "Production startup stopped at an unexpected boundary.");
+        auto noConsole = CreateOriginalStartupState(image);
+        noConsole.writeConsole = {};
+        const auto consoleFailure = RunOriginalStartup(dispatcher, noConsole);
+        Require(consoleFailure.pc == 0x802383c0u &&
+                    consoleFailure.reason.find("requires a native console sink") != std::string::npos,
+                "Original version logging silently ignored a missing native console.");
         Require(!state.callGuest && state.hid0 == 0xc200u && state.hid2 == 0xa0000000u &&
                     state.l2cr == 0x80000000u && !state.externalInterruptsEnabled &&
                     ppc_read_u32(state, 0x80349904u) == 1u &&

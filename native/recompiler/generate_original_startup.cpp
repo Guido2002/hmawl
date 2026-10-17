@@ -83,9 +83,14 @@ int main(int argc, char** argv) {
             for (auto word : words) bindings << "0x" << Hex(word) << "u,";
             bindings << "}},\n";
         }
-        bindings << "    };\n}\n";
+        bindings << "        {0x802383C0u, NativeGuestVprintf, {";
+        for (auto word : image.ReadWords(0x802383c0u, 0x7cu)) {
+            bindings << "0x" << Hex(word) << "u,";
+        }
+        bindings << "}},\n    };\n}\n";
         std::ofstream output(argv[2], std::ios::binary);
-        output << "#include \"native_dispatch.h\"\n\n" << functions.str() << bindings.str();
+        output << "#include \"native_dispatch.h\"\n#include \"native_console.h\"\n\n"
+               << functions.str() << bindings.str();
         output.close();
         if (!output) throw std::runtime_error("Could not write original startup bindings.");
     } catch (const std::exception& error) {

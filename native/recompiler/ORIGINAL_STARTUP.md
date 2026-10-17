@@ -32,15 +32,25 @@ The build-time generator and runtime independently verify DOL SHA-1
 sections into 24 MiB of coherent guest RAM, with physical/cached/uncached aliases.
 Unspecified RAM starts zero; this is a documented native loader profile, not
 emulation of IPL/apploader execution or a dump of physical-console power-on RAM.
-No disc identity, EXI identity or device responses are invented.
+No connected disc/EXI identity is invented.
 
 The loader handoff has IR/DR set (`MSR=0x30`), external interrupts disabled and
 idle zero PI/MI/DSP/AI/EXI register state explicitly enabled. EXI idle transfer
-controls and the restricted original initialization/ROMDIS writes are enabled;
-chip selection and transfers remain unsupported. Cache operations use the
+controls, status W1C, sticky ROMDIS, one-hot chip selection and immediate
+transactions are enabled. External memory-card slots and Serial Port 1 are
+explicitly empty: the backend consumes writes and returns zero for absent
+external devices, rather than claiming a connected peripheral identity.
+Internal RTC/SRAM/ROM and AD16 transactions fail explicitly. No saves exist.
+DI configuration is an explicitly mapped read-only value of 1, not a DVD
+command implementation. Cache operations use the
 existing checked coherent-RAM implementation. Time-base reads use the real
-monotonic native clock at the GameCube's 40.5 MHz rate. No guest calls are
-replaced with test hooks, native service callbacks or success-returning stubs.
+monotonic native clock at the GameCube's 40.5 MHz rate. Original `OSReport`
+and `OSRegisterVersion` run as compiled game code. The C-library `vprintf`
+boundary is an original-word-verified native console service with bounded
+guest strings and PowerPC GPR/overflow argument decoding. Currently only plain
+text, `%s` and `%%` are supported; other conversions, missing sinks and output
+errors fail explicitly before a success return. It emits the actual SDK
+version string; it does not discard logging.
 This deliberately limited platform profile is not complete GameCube hardware.
 
 `original_startup_manifest.h` is the reusable list of original address ranges.
@@ -63,19 +73,23 @@ ROM/BSS initialization, argument setup and `DBInit`, then executes the original
 exception/system-call setup, alarms/modules, complete interrupt setup, reset
 handler, context and warm cache initialization. It enters original `EXIInit`,
 resets idle EXI status/ROMDIS state, installs the original EXI handlers and
-follows original `EXIGetID`/lock/select code.
+follows original `EXIGetID`/lock/select/immediate/sync/deselect code. The two-byte
+ID command and four-byte read run against the explicit empty SP1 port. Original
+code unlocks the channel, probes both empty memory-card slots, reports the SDK
+version to the console and returns from **EXIInit**.
 
-It stops explicitly at **PC `0x801F6F24`**, original `EXISelect`'s attempt to
-write **`0x00000200` to `0xCC006800`**, selecting channel 0 device 2.
-This requires a real supported EXI peripheral model; no ID is fabricated.
-`EXIInit` and `OSInit` have **not returned**. The game main loop, GX renderer,
+It then calls **SIInit at PC `0x801F52F4`, LR `0x801B0F90`**. SIInit is the
+next untranslated dependency. `EXIInit` has returned; `OSInit` has **not**.
+The game main loop, GX renderer,
 DVD startup, threads, audio, input and saves have not run.
 
 ## Targeted regression
 
 With testing enabled, build `hmawl_original_startup_tests` and run CTest's
 `hmawl_original_startup_tests`. It uses the production library and real verified
-DOL, checking the exact stopping instruction and MMIO value, initialization
+DOL, checking the exact next SIInit call, two original EXI transaction
+requests, cleared channel lock, both empty-slot probe results, exact console
+message, missing peripheral backend/console failures, initialization
 evidence, missing clock and unbound dispatcher dependencies, on-disk DOL
 truncation/mutation rejection, loaded-code integrity, block/call-depth bounds,
 the original nonconverging `OSGetTime` sampling loop, callback restoration and

@@ -1,6 +1,8 @@
 #include "generated_ppc_tests.h"
 #include "native_dispatch.h"
 #include "native_time_base.h"
+#include "native_exi_bus.h"
+#include "native_console.h"
 
 #include <algorithm>
 #include <cfenv>
@@ -1104,6 +1106,7 @@ void TestExiInitializationRegisters() {
             } catch (const std::runtime_error&) {
                 rejected = true;
             }
+
             Require(rejected && before == state.exiStatus && state.memory == ram,
                     "Unsupported EXI initialization write did not fail without mutation.");
         };
@@ -1152,6 +1155,180 @@ void TestExiInitializationRegisters() {
     }
     Require(rejected && state.exiStatus[0] == 0x70u && state.memory == ram,
             "EXI initialization reset did not require explicit opt-in.");
+}
+
+void TestExiImmediateTransactions() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    const auto ram = state.memory;
+    state.exiImmediateEnabled = true;
+    state.exiStatus = {0x2000u, 0u, 0u};
+    state.exiTransferControl = {0u, 0u, 0u};
+    for (unsigned channel = 0; channel < 3; ++channel) {
+        const uint32_t base = 0xcc006800u + channel * 0x14u;
+        for (unsigned device = 0; device < 3; ++device) {
+            const uint32_t select = (0x80u << device) | 0x50u;
+            ppc_write_u32(state, base, select);
+            Require(ppc_read_u32(state, base) == (select | (channel == 0 ? 0x2000u : 0)),
+                    "EXI selected device, clock or sticky ROMDIS differs.");
+            for (unsigned length = 1; length <= 4; ++length) {
+                for (unsigned direction = 0; direction < 3; ++direction) {
+                    unsigned calls = 0;
+                    state.transferExiImmediate = [&](const ExiImmediateRequest& request) {
+                        Require(++calls == 1 && request.channel == channel &&
+                                    request.device == device && request.length == length &&
+                                    request.direction == direction && request.data == 0x12345678u,
+                                "EXI immediate request differs from its selected backend.");
+                        return 0xa1b2c3d4u;
+                    };
+                    ppc_write_u32(state, base + 0x10u, 0x12345678u);
+                    const uint32_t control = ((length - 1) << 4) | (direction << 2) | 1u;
+                    ppc_write_u32(state, base + 0xcu, control);
+                    Require(calls == 1 && ppc_read_u32(state, base + 0x10u) ==
+                                (direction == 1 ? 0x12345678u : 0xa1b2c3d4u) &&
+                                ppc_read_u32(state, base + 0xcu) == (control & ~1u) &&
+                                (ppc_read_u32(state, base) & 8u) != 0 && state.memory == ram,
+                            "EXI transfer did not commit data, completion and TCINT.");
+                    ppc_write_u32(state, base, select | 8u);
+                    Require((ppc_read_u32(state, base) & 8u) == 0,
+                            "EXI transfer completion was not acknowledged with W1C.");
+                }
+            }
+            const auto status = state.exiStatus;
+            const auto controls = state.exiTransferControl;
+            const auto data = state.exiImmediateData;
+            const auto reject = [&](uint32_t control) {
+                bool rejected = false;
+                try {
+                    ppc_write_u32(state, base + 0xcu, control);
+                } catch (const std::runtime_error&) {
+                    rejected = true;
+                }
+                Require(rejected && state.exiStatus == status &&
+                            state.exiTransferControl == controls &&
+                            state.exiImmediateData == data && state.memory == ram,
+                        "Rejected EXI transaction mutated state or fabricated completion.");
+            };
+            state.transferExiImmediate = {};
+            reject(0x15u);
+            state.transferExiImmediate = [](const ExiImmediateRequest&) -> uint32_t {
+                throw std::runtime_error("test peripheral failure");
+            };
+            reject(0x15u);
+            unsigned calls = 0;
+            state.transferExiImmediate = [&](const ExiImmediateRequest&) {
+                ++calls;
+                return 0;
+            };
+            for (uint32_t invalid : {0u, 2u, 3u, 0xdu, 0x41u, UINT32_MAX}) reject(invalid);
+            Require(calls == 0, "Invalid EXI transaction reached its backend.");
+        }
+        ppc_write_u32(state, base, 0);
+        Require(state.exiStatus[channel] == (channel == 0 ? 0x2000u : 0u),
+                "EXI deselection did not clear chip selects and preserve sticky ROMDIS.");
+    }
+}
+
+void TestMultiplyHighUnsigned() {
+    for (uint32_t left : {0u, 1u, 0x7fffffffu, 0x80000000u, UINT32_MAX}) {
+        for (uint32_t right : {0u, 1u, 2u, 0x80000000u, UINT32_MAX}) {
+            for (bool record : {false, true}) {
+                PpcState state;
+                state.gpr[4] = left;
+                state.gpr[5] = right;
+                state.cr = 0x12345678u;
+                state.xer = 0xe0000000u;
+                if (record) ppc_0000B510(state);
+                else ppc_0000B500(state);
+                const uint32_t expected = static_cast<uint32_t>(
+                    (static_cast<uint64_t>(left) * right) >> 32);
+                const uint32_t field = expected == 0 ? 3u :
+                    (expected & 0x80000000u) != 0 ? 9u : 5u;
+                Require(state.gpr[3] == expected && state.gpr[4] == left &&
+                            state.gpr[5] == right && state.xer == 0xe0000000u &&
+                            state.cr == (record ? (field << 28) | 0x02345678u : 0x12345678u),
+                        "Unsigned high multiply result, record flags or input preservation differs.");
+            }
+        }
+    }
+}
+
+void TestNativeConsoleAndEmptyExi() {
+    PpcState state;
+    state.memory.resize(0x3000);
+    const auto put = [&](uint32_t address, const std::string& text) {
+        for (size_t i = 0; i <= text.size(); ++i) {
+            ppc_write_u8(state, address + static_cast<uint32_t>(i),
+                         i == text.size() ? 0 : static_cast<uint8_t>(text[i]));
+        }
+    };
+    put(0x100, "[%s]%%:%s");
+    put(0x200, "first");
+    put(0x300, "second");
+    state.gpr[3] = 0x100;
+    state.gpr[4] = 0x400;
+    state.lr = 0x888;
+    ppc_write_u8(state, 0x400, 7);
+    ppc_write_u32(state, 0x404, 0x600);
+    ppc_write_u32(state, 0x408, 0x500);
+    ppc_write_u32(state, 0x51c, 0x200);
+    ppc_write_u32(state, 0x600, 0x300);
+    unsigned calls = 0;
+    state.writeConsole = [&](const std::string& text) {
+        Require(++calls == 1 && text == "[first]%:second",
+                "Native console did not format guest GPR/overflow strings.");
+    };
+    const auto memory = state.memory;
+    NativeGuestVprintf(state);
+    Require(calls == 1 && state.gpr[3] == 15 && state.pc == state.lr &&
+                state.memory == memory,
+            "Native console return count, return address or guest memory differs.");
+    const auto reject = [&] {
+        const uint32_t result = state.gpr[3];
+        const uint32_t pc = state.pc;
+        bool failed = false;
+        try {
+            NativeGuestVprintf(state);
+        } catch (const std::runtime_error&) {
+            failed = true;
+        }
+        Require(failed && state.gpr[3] == result && state.pc == pc && calls == 1,
+                "Failed console output reported success or emitted partial text.");
+    };
+    put(0x100, "prefix%s%d");
+    state.gpr[3] = 0x100;
+    reject();
+    put(0x100, "trailing%");
+    reject();
+    state.writeConsole = {};
+    reject();
+    state.writeConsole = [](const std::string&) { throw std::runtime_error("console failed"); };
+    put(0x100, "literal");
+    reject();
+    std::fill(state.memory.begin() + 0x1000, state.memory.end(), 'x');
+    state.gpr[3] = 0x1000;
+    reject();
+    for (unsigned length = 1; length <= 4; ++length) {
+        for (unsigned direction = 0; direction < 3; ++direction) {
+            for (auto port : {std::make_pair(0u, 0u), std::make_pair(0u, 2u),
+                              std::make_pair(1u, 0u)}) {
+                Require(TransferEmptyExternalExi({port.first, port.second, length, direction,
+                                                 UINT32_MAX}) == 0,
+                        "Explicit empty EXI port returned a device identity.");
+            }
+        }
+    }
+    for (auto port : {std::make_pair(0u, 1u), std::make_pair(2u, 0u),
+                      std::make_pair(3u, 0u), std::make_pair(0u, 3u)}) {
+        bool failed = false;
+        try {
+            (void)TransferEmptyExternalExi({port.first, port.second, 4, 0, 0});
+        } catch (const std::runtime_error&) {
+            failed = true;
+        }
+        Require(failed, "Unimplemented internal EXI device returned fake success.");
+    }
 }
 
 void TestExiStatus() {
@@ -2363,6 +2540,9 @@ int main() {
         TestExiStatus();
         TestExiTransferControl();
         TestExiInitializationRegisters();
+        TestExiImmediateTransactions();
+        TestMultiplyHighUnsigned();
+        TestNativeConsoleAndEmptyExi();
         TestAndComplement();
         TestCacheBlockInstructions();
         TestL2ControlRegisters();

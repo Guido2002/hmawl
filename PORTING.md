@@ -24,8 +24,9 @@ runtime. Its code is only a reference for the architecture; this project does
 not copy its implementation.
 
 An optional native console runner now executes the verified original DOL entry
-continuously, without test-only guest callbacks. It reaches `EXISelect` at
-`0x801F6F24` and explicitly rejects selecting channel 0/device 2; full OSInit,
+continuously, without test-only guest callbacks. Original EXIInit now returns
+after actual immediate transactions against explicitly empty external slots
+and native console reporting. It reaches SIInit at `0x801F52F4`; full OSInit,
 game initialization, the main loop and a rendered game frame remain unachieved.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
@@ -371,6 +372,22 @@ queue. Full runtime scheduling and device services are still needed.
   nonconverging original time-base loop, missing bindings/time source and
   truncated/mutated on-disk DOL plus mutated RAM-code rejection. This is a
   runnable original startup milestone, not full OSInit or a game boot.
+- [x] Complete original EXIInit in the production runner under an explicit
+  empty-external-port profile. Implement one-hot device selection, clocks,
+  sticky ROMDIS, W1C interrupt status, immediate data and transaction controls.
+  Commit completion/TCINT only after a successful backend call; missing or
+  throwing backends never fabricate completion. Keep RTC/SRAM/ROM and AD16
+  requests as explicit errors. Translate original EXIImm/EXISync/deselect and
+  empty-card probing, plus unsigned high multiplication used by these routines.
+  Run original OSReport/version registration through a checked native `%s`/`%%`
+  console service using the guest ABI. Verify exact two-transfer ID sequence,
+  channel unlock, empty-slot probe state, exact emitted version string,
+  missing backend/sink failures, transaction dimensions and rejected operations.
+  Original EXIInit returns and the runner calls SIInit (`0x801F52F4`,
+  LR `0x801B0F90`). This is not full OSInit, input or game rendering.
+  Empty-device transfer semantics were checked against the public
+  [Dolphin EXI interface behavior](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/Core/HW/EXI/EXI_Device.cpp);
+  no emulator code is copied or executed.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

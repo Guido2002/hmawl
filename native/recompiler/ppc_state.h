@@ -8,11 +8,20 @@
 #include <functional>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 constexpr uint32_t kGameCubeRamSize = 24u * 1024u * 1024u;
 
 enum class PpcMemoryMap { Flat, GameCubeRam };
+
+struct ExiImmediateRequest {
+    unsigned channel;
+    unsigned device;
+    unsigned length;
+    unsigned direction; // 0 read, 1 write, 2 read/write.
+    uint32_t data;
+};
 
 struct PpcFpr {
     uint64_t ps0 = 0;
@@ -50,9 +59,14 @@ struct PpcState {
     std::optional<uint16_t> miInterruptMask;
     std::optional<uint16_t> dspControl;
     std::optional<uint32_t> aiControl;
+    std::optional<uint32_t> diConfiguration;
     std::array<std::optional<uint32_t>, 3> exiStatus;
     std::array<std::optional<uint32_t>, 3> exiTransferControl;
     bool exiInitializationEnabled = false;
+    bool exiImmediateEnabled = false;
+    std::array<uint32_t, 3> exiImmediateData = {};
+    std::function<uint32_t(const ExiImmediateRequest&)> transferExiImmediate;
+    std::function<void(const std::string&)> writeConsole;
     bool externalInterruptsEnabled = true;
 };
 
@@ -139,6 +153,14 @@ inline void ppc_flush_cache_block(const PpcState& state, uint32_t address) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc006024u &&
+        state.diConfiguration.has_value()) {
+        return *state.diConfiguration;
+    }
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.exiImmediateEnabled &&
+        (address == 0xcc006810u || address == 0xcc006824u || address == 0xcc006838u)) {
+        return state.exiImmediateData[(address - 0xcc006810u) / 0x14u];
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam &&
         (address == 0xcc00680cu || address == 0xcc006820u || address == 0xcc006834u)) {
         const auto& control = state.exiTransferControl[(address - 0xcc00680cu) / 0x14u];
@@ -221,12 +243,61 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.exiImmediateEnabled &&
+        (address == 0xcc006810u || address == 0xcc006824u || address == 0xcc006838u)) {
+        state.exiImmediateData[(address - 0xcc006810u) / 0x14u] = value;
+        return;
+    }
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.exiImmediateEnabled &&
+        (address == 0xcc00680cu || address == 0xcc006820u || address == 0xcc006834u)) {
+        const unsigned channel = (address - 0xcc00680cu) / 0x14u;
+        auto& control = state.exiTransferControl[channel];
+        auto& status = state.exiStatus[channel];
+        const uint32_t selected = status.has_value() ? *status & 0x380u : 0;
+        if (!control.has_value() || (*control & ~0x3eu) != 0 ||
+            !status.has_value() || selected == 0 || (selected & (selected - 1u)) != 0 ||
+            (value & ~0x3du) != 0 || (value & 1u) == 0 || (value & 0xcu) == 0xcu) {
+            throw std::runtime_error("Unsupported EXI immediate request (requires idle control, one selected device, valid immediate direction and start).");
+        }
+        if (!state.transferExiImmediate) {
+            throw std::runtime_error("EXI immediate transfer requires a native peripheral backend; no response or completion was fabricated.");
+        }
+        const unsigned device = selected == 0x80u ? 0 : selected == 0x100u ? 1 : 2;
+        const uint32_t result = state.transferExiImmediate({
+            channel, device, ((value >> 4) & 3u) + 1u, (value >> 2) & 3u,
+            state.exiImmediateData[channel]});
+        if (((value >> 2) & 3u) != 1u) {
+            state.exiImmediateData[channel] = result;
+        }
+        *control = value & ~1u;
+        *status |= 8u;
+        return;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam &&
         (address == 0xcc006800u || address == 0xcc006814u || address == 0xcc006828u)) {
         const unsigned channel = (address - 0xcc006800u) / 0x14u;
         auto& status = state.exiStatus[channel];
         if (status.has_value()) {
             const uint32_t previous = *status;
+            if (state.exiImmediateEnabled) {
+                const uint32_t writable = channel == 0 ? 0x2fffu :
+                    channel == 1 ? 0xfffu : 0x3ffu;
+                const uint32_t allowed = writable | (channel < 2 ? 0x1000u : 0);
+                const uint32_t selected = value & 0x380u;
+                const auto& control = state.exiTransferControl[channel];
+                if ((previous & ~allowed) != 0 || (value & ~allowed) != 0 ||
+                    (selected != 0 && (selected & (selected - 1u)) != 0) ||
+                    (value & 0x70u) > 0x50u || !control.has_value() ||
+                    (*control & ~0x3eu) != 0) {
+                    throw std::runtime_error("Unsupported EXI bus selection/status write.");
+                }
+                const uint32_t pending = channel < 2 ? 0x80au : 0xau;
+                const uint32_t retained = channel == 0 ? 0x3000u :
+                    channel == 1 ? 0x1000u : 0;
+                *status = (previous & retained) | (previous & pending & ~value) |
+                    (value & writable & ~pending);
+                return;
+            }
             const uint32_t supported = channel == 2 ? 0x7fu :
                 channel == 0 && state.exiInitializationEnabled ? 0x3c7fu : 0x1c7fu;
             if (state.exiInitializationEnabled &&

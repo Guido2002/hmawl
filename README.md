@@ -50,10 +50,13 @@ cmake --build build\native --config Release --target hmawl_original_startup hmaw
 .\build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup .\build\game-us-r0\main.dol
 ```
 
-The verified runner currently stops at `PC=0x801F6F24`: original `EXISelect`
-tries to write `0x200` to `0xCC006800` to select channel 0/device 2. This is an
-**explicit unsupported-device stop (exit code 3)**, not successful OSInit, game
-initialization or rendering. No device ID is supplied to skip that dependency.
+The verified runner now completes original EXIInit, including actual immediate
+ID-command/read transactions against explicitly empty external slots and
+native console output of its SDK version. It reaches the next untranslated
+`SIInit` call at `PC=0x801F52F4`, `LR=0x801B0F90`.
+This is an **explicit dependency stop (exit code 3)**, not successful OSInit,
+game initialization or rendering. RTC/SRAM/ROM, AD16 and connected EXI devices
+are not implemented; attempts to use them fail explicitly.
 The runner reports exact guest PC/registers, verifies original code at dispatch,
 and limits dispatched blocks and nested calls. Generated branch transfers yield
 to dispatch so original polling loops cannot bypass the execution budget.

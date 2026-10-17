@@ -361,6 +361,8 @@ int main(int argc, char** argv) {
             Emit(output, 0xb4a0u, {0x38630001u, 0x80640000u}, {false, true});
             Emit(output, 0xb4c0u, {0x42000009u, 0x38800001u, 0x38800002u}, {true, true});
             Emit(output, 0xb4e0u, {0x4d820420u, 0x38800001u}, {true, true});
+            Emit(output, 0xb500u, {XForm(3, 4, 5, 11, false)});
+            Emit(output, 0xb510u, {XForm(3, 4, 5, 11, true)});
             for (unsigned opcode : {24u, 28u, 444u, 536u}) {
                 Emit(output, 0x1000u + opcode * 4u,
                      {XForm(3, 4, 5, opcode, true)});

@@ -1,11 +1,13 @@
 #include "original_startup.h"
 #include "native_time_base.h"
+#include "native_exi_bus.h"
 #include "original_startup_manifest.h"
 #include "sha1.h"
 #include "generated_original_startup.h"
 
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <iterator>
 #include <sstream>
 #include <stdexcept>
@@ -35,9 +37,16 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.miInterruptMask = 0;
     state.dspControl = 0;
     state.aiControl = 0;
+    state.diConfiguration = 1;
     state.exiStatus = {0u, 0u, 0u};
     state.exiTransferControl = {0u, 0u, 0u};
     state.exiInitializationEnabled = true;
+    state.exiImmediateEnabled = true;
+    state.transferExiImmediate = TransferEmptyExternalExi;
+    state.writeConsole = [](const std::string& text) {
+        std::cout << text;
+        if (!std::cout) throw std::runtime_error("Native console output failed.");
+    };
     state.readTimeBase = MakeNativeTimeBase();
     return state;
 }

@@ -817,6 +817,10 @@ std::string RecompileFunction(uint32_t address,
                 expression = "static_cast<uint32_t>(static_cast<uint64_t>(" +
                              left + ") * " + right + ")";
                 break;
+            case 11:
+                expression = "static_cast<uint32_t>((static_cast<uint64_t>(" +
+                             left + ") * " + right + ") >> 32)";
+                break;
             case 459:
                 expression = "ppc_divide_unsigned32(" + left + ", " + right + ")";
                 break;
