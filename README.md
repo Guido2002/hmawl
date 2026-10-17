@@ -47,7 +47,7 @@ blocks only, not a PowerPC interpreter or replacement OSInit.
 ```powershell
 cmake -S . -B build\native "-DHMAWL_ORIGINAL_US_DOL:FILEPATH=$PWD\build\game-us-r0\main.dol"
 cmake --build build\native --config Release --target hmawl_original_startup hmawl_original_startup_tests
-.\build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup .\build\game-us-r0\main.dol
+.\build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup .\build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz"
 ```
 
 The verified runner now completes original EXIInit and SIInit, including actual immediate
@@ -77,10 +77,16 @@ external interrupt dispatcher, SI completion/type callbacks, scheduler-disable/
 enable pair and `OSLoadContext` now drain all four disconnected-controller probes.
 Original context restoration preserves the interrupted registers and unwinds the
 handler's nested native calls; arbitrary thread switches remain unsupported.
-The runner stops at the original `DVDInit` entry, `PC=0x801BADF0`, `LR=0x801B115C`.
-General DSP tasks, audio playback and full OSInit remain unfinished.
-This is an **explicit dependency stop (exit code 3)**, not successful OSInit,
-game initialization or rendering. RTC/ROM, SRAM writes, AD16 and connected EXI devices
+With `--rvz`, the loader verifies all four USA executable hashes and installs the
+actual disc ID, BI2 and FST above the arena. Original DVDInit, command queue,
+drive inquiry, timeout alarm and DI interrupt/callback chain now execute.
+The explicit native virtual drive identifies itself as revision 1 with no console
+firmware/date; its checked inquiry/read DMA does not claim physical-drive identity.
+**Original OSInit now returns in the runner to `PC=LR=0x80003268`.**
+Without `--rvz`, missing DI hardware remains an explicit dependency failure.
+Expired decrementer delivery, general DSP tasks and audio playback remain unfinished.
+The runner still stops with **exit code 3** at the untranslated post-OSInit code;
+this is not game initialization or rendering. RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.
 The CLI creates an English/NTSC/stereo `native-console.sram` beside the input DOL
 only if absent, without BIOS data. `--sram <path>` selects an existing 64-byte

@@ -924,6 +924,12 @@ std::string RecompileFunction(uint32_t address,
             }
             case 467: {
                 const uint32_t spr = ra | (rb << 5);
+                if (spr == 22) {
+                    if (record) throw std::runtime_error("Invalid mtspr DEC instruction at " + Hex(pc) + ".");
+                    output << "    ppc_write_decrementer(state, state.gpr[" << rt << "]);\n";
+                    emitted = true;
+                    break;
+                }
                 if ((spr >= 528 && spr <= 543) || spr == 26 || spr == 27 || spr == 272) {
                     if (record) throw std::runtime_error("Invalid BAT/SRR transfer at " + Hex(pc) + ".");
                     if (spr == 272) {

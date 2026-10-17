@@ -37,9 +37,10 @@ BIOS-free native bootstrap, clears DSP RAM and sends its actual compiled stores.
 Original audio initialization consumes its message, resets and returns. The
 runner completes original memory protection, kernel reports and arena clearing,
 then delivers real SI completions through the original external exception vector,
-dispatcher, callbacks and context restoration. It stops at original `DVDInit`
-(`0x801BADF0`, LR `0x801B115C`); full OSInit,
-game initialization, the main loop and a rendered game frame remain unachieved.
+dispatcher, callbacks and context restoration. With the verified RVZ bound, DVDInit,
+drive inquiry and the original DI completion chain also run: **original OSInit
+returns to `0x80003268` in the Windows runner**. Game initialization, the main loop
+and a rendered game frame remain unachieved.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 
 ## Phases and completion criteria
@@ -495,6 +496,19 @@ queue. Full runtime scheduling and device services are still needed.
   missing delivery, context switches and nested exceptions. Preserve exception
   CPU state in native DVD callbacks. The runner now reaches original DVDInit,
   `PC=0x801BADF0`, LR `0x801B115C`; full OSInit remains incomplete.
+- [x] Complete original OSInit in the production Windows runner with `--rvz`.
+  Verify original DOL/REL hashes, install actual RVZ disc ID/BI2/FST with protected
+  high-RAM placement, then execute original DVDInit, SDK queue setup and command
+  jump table, drive inquiry, alarm programming, DI interrupt and SDK/game callback.
+  Use explicit native virtual-drive revision 1 with no console firmware/date.
+  DI masks/W1C, checked command words, bounded DMA and IRQ cause reflect actual
+  transfer results; missing/throwing/invalid backends cannot fabricate completion.
+  Read commands use actual RVZ bytes. DEC writes retain real time-base deadlines;
+  expired timer delivery is not implemented and fails explicitly, never silently
+  dropping an alarm. Runner and real-RVZ tests reach `PC=LR=0x80003268`, SP
+  `0x8035CF98`, with all five external exceptions restored, original inquiry
+  command status zero and version callback result `0x8001`. All FST bytes survive.
+  This proves original OSInit return, not game initialization or a rendered frame.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

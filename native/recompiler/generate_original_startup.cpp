@@ -73,6 +73,14 @@ int main(int argc, char** argv) {
             instructions.emplace(0x001b4f54u + static_cast<uint32_t>(i * 4), ramConfiguration[i]);
         }
         leaders.insert(0x001b4f54u);
+        const auto jumpTableState = image.CreateGameCubeState();
+        for (uint32_t offset = 0; offset < 16u * 4u; offset += 4) {
+            const auto target = ppc_read_u32(jumpTableState, 0x802e0ed8u + offset);
+            if (target < 0x801bc080u || target >= 0x801bc3a0u || (target & 3u) != 0) {
+                throw std::runtime_error("Original DVD command table target is outside its compiled function.");
+            }
+            leaders.insert(target);
+        }
         for (const auto& instruction : instructions) {
             if (IsBranch(instruction.second)) {
                 leaders.insert(instruction.first + 4);

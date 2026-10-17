@@ -3,6 +3,7 @@
 
 #include "dol_image.h"
 #include "native_dispatch.h"
+#include "rvz_image.h"
 
 #include <filesystem>
 #include <string>
@@ -22,6 +23,7 @@ struct OriginalStartupResult {
 
 DolImage LoadOriginalUsDol(const std::filesystem::path& path);
 PpcState CreateOriginalStartupState(const DolImage& image);
+void InstallOriginalStartupDisc(PpcState& state, RvzImage& disc);
 void RegisterOriginalStartup(NativeDispatcher& dispatcher, const PpcState& state);
 OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState& state,
                                         size_t blockBudget = 1000000,

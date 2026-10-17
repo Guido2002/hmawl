@@ -15,7 +15,7 @@ First extract your own supported RVZ with the existing `hmawl_recompiler
 ```powershell
 cmake -S . -B build\native -DHMAWL_ORIGINAL_US_DOL:FILEPATH="$PWD\build\game-us-r0\main.dol"
 cmake --build build\native --config Release --target hmawl_original_startup
-build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup build\game-us-r0\main.dol
+build\native\native\recompiler\Release\hmawl_original_startup.exe --original-startup build\game-us-r0\main.dol --rvz "Harvest Moon - A Wonderful Life (USA).rvz"
 ```
 
 Optional positive decimal limits are `--max-blocks 1000000` and
@@ -24,6 +24,8 @@ Optional positive decimal limits are `--max-blocks 1000000` and
 or integrity error, `4` exhausted execution limit, `5` unexpected entry return.
 Both normal progress and exact stopping diagnostics are printed; PC, LR, SP and
 R3–R5 are preserved in the reusable result.
+`--rvz <path>` binds your verified USA revision 0 disc. Without it, DI hardware
+and disc transfers are absent and startup fails explicitly inside DVDInit.
 
 ## What actually runs
 
@@ -32,7 +34,11 @@ The build-time generator and runtime independently verify DOL SHA-1
 sections into 24 MiB of coherent guest RAM, with physical/cached/uncached aliases.
 Unspecified RAM starts zero; this is a documented native loader profile, not
 emulation of IPL/apploader execution or a dump of physical-console power-on RAM.
-No connected disc/EXI identity is invented.
+No connected EXI identity is invented. With `--rvz`, all four executable hashes
+are verified before the actual disc ID, BI2 and FST are installed. BI2 starts at
+`0x81700000`; FST begins at `0x81702000`, above the original entry's adjusted
+BI2 argument-list arena limit, so ClearArena cannot erase it. This is an explicit
+native loader layout, not an apploader emulation.
 
 The loader handoff has IR/DR set (`MSR=0x30`), external interrupts disabled and
 idle zero PI/MI/DSP/AI/EXI register state explicitly enabled. EXI idle transfer
@@ -41,8 +47,16 @@ transactions are enabled. External memory-card slots and Serial Port 1 are
 explicitly empty: the backend consumes writes and returns zero for absent
 external devices, rather than claiming a connected peripheral identity.
 Internal RTC/ROM, SRAM writes and AD16 transactions fail explicitly. No game saves exist.
-DI configuration is an explicitly mapped read-only value of 1, not a DVD
-command implementation. Cache operations use the
+DI configuration is an explicitly mapped read-only value of 1. The RVZ profile
+also enables DI command/DMA registers, status/mask/W1C and cover control.
+Disc-to-RAM DMA validates alignment, lengths and bounds before calling its
+backend. Only a complete backend result commits bytes, transfer status and IRQ.
+Reads and disc-ID commands return real RVZ bytes. Inquiry reports the explicit
+native virtual drive: revision 1, zero console-firmware/device/date fields.
+It does not extract or fabricate physical-console firmware. Unsupported commands
+and missing/failed backends fail explicitly without successful completion.
+Original SDK low-level queue/interrupt handling is not replaced.
+Cache operations use the
 existing checked coherent-RAM implementation. Time-base reads use the real
 monotonic native clock at the GameCube's 40.5 MHz rate. Original `OSReport`
 and `OSRegisterVersion` run as compiled game code. The C-library `vprintf`
@@ -128,7 +142,7 @@ original handler; original OSLoadContext's final rfi restores the interrupted
 context and abandons the handler's nested native call chain. Both exception
 stages retain shared dispatch budgets. Nested exceptions and thread switches fail
 explicitly. This is not an arbitrary MMU: other BAT mappings, protection regions,
-non-SI interrupt delivery and context-switching rfi remain unsupported. Native MI setup
+non-SI/DI interrupt delivery and context-switching rfi remain unsupported. Native MI setup
 supports only all-readable/writable permissions, interrupt acknowledgement and
 the address-error interrupt mask; missing devices and other settings fail.
 The recompiler's
@@ -150,9 +164,9 @@ version to the console and returns from **EXIInit**.
 
 Original **SIInit also returns** after version reporting, sampling configuration,
 interrupt handler registration/unmasking, the first controller type transaction
-and queuing the remaining three probes. The first transaction has completed with
-the configured disconnected-port error, but its original guest interrupt handler
-has not run. This is not completed controller enumeration or usable input.
+and queuing the remaining three probes. The first transaction completes with the configured disconnected-port error;
+the four original type callbacks run once interrupts are enabled below.
+This is not usable connected-controller input.
 
 Original **__OSInitSram also returns**, with the exact native profile in its SRAM
 control block, successful synchronization and released EXI/SRAM locks.
@@ -177,17 +191,24 @@ Original **OSEnableInterrupts now succeeds**. The four real disconnected-control
 transactions drain through the original external exception vector/dispatcher,
 SI handlers, type callbacks and OSLoadContext, with scheduler-disable/enable
 balance and complete interrupted CPU-context preservation. EE is enabled again
-after every exception return. It stops at the original **DVDInit entry,
-PC `0x801BADF0`, LR `0x801B115C`**. DVDInit has not run and
-`OSInit` has **not** returned.
+after every exception return. With the verified RVZ, original **DVDInit returns**.
+The original inquiry command queues, performs a checked 32-byte DMA, arms its
+actual timeout alarm and completes through the original DI interrupt and
+InquiryCallback. DEC retains a deadline derived from the native time base;
+an expired timer fails explicitly because timer-exception delivery is not yet
+implemented. Original completion cancels the DVD alarm; no timeout is ignored.
+**OSInit returns to its original caller at PC=LR `0x80003268`, SP `0x8035CF98`.**
+The runner's next dependency stop is untranslated post-OSInit entry code, with
+original inquiry callback result `0x8001`, five external exceptions returned and
+the entire real FST intact.
 The game main loop, GX renderer,
-DVD startup, scheduled game threads, audio, input and saves have not run.
+scheduled game threads, audio, input and saves have not run.
 
 ## Targeted regression
 
 With testing enabled, build `hmawl_original_startup_tests` and run CTest's
 `hmawl_original_startup_tests`. It uses the production library and real verified
-DOL, checking the exact DVDInit boundary, two original external EXI transaction
+DOL, checking the missing-DI boundary without a disc, two original external EXI transaction
 requests, cleared channel lock, both empty-slot probe results, exact console
 messages, all four original queued SI commands and no-response callbacks,
 sampling/handler state, actual exception delivery/return counts, all interrupted

@@ -109,6 +109,10 @@ if(BUILD_TESTING)
             get_filename_component(HMAWL_US_RVZ "${HMAWL_US_RVZ}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
             add_test(NAME hmawl_us_resource_tests
                 COMMAND hmawl_us_rel_native_tests "${HMAWL_US_REL_DIRECTORY}" --rvz "${HMAWL_US_RVZ}")
+            if(TARGET hmawl_original_startup_tests)
+                add_test(NAME hmawl_original_disc_startup_tests
+                    COMMAND hmawl_original_startup_tests "${HMAWL_ORIGINAL_US_DOL}" --rvz "${HMAWL_US_RVZ}")
+            endif()
         endif()
     endif()
 

@@ -73,7 +73,8 @@ private:
 
 int main(int argc, char** argv) {
     try {
-        Require(argc == 2, "Expected verified USA DOL.");
+        Require(argc == 2 || (argc == 4 && std::string(argv[2]) == "--rvz"),
+                "Expected verified USA DOL and optional --rvz USA-disc.rvz.");
         RequireFailure([&] { LoadOriginalUsDol(argv[0]); },
                        "Production DOL loader accepted a nonmatching executable.");
         const auto image = LoadOriginalUsDol(argv[1]);
@@ -172,8 +173,8 @@ int main(int argc, char** argv) {
         std::cout << "SI transfers=" << siTransfers << " interrupts=" << state.externalInterrupt->delivered
                   << " restored=" << state.externalInterrupt->returned << " SRR0=0x" << std::hex
                   << state.srr0 << " SRR1=0x" << state.srr1 << std::dec << '\n';
-        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801badf0u &&
-                    result.lr == 0x801b115cu && transfers == 2 && siTransfers == 4 &&
+        Require(result.stop == OriginalStartupStop::Dependency && result.pc == 0x801b3e00u &&
+                    result.lr == 0x801b3eecu && transfers == 2 && siTransfers == 4 &&
                     sramCommands == 1 && sramDmas == 1 &&
                     console.find(expectedVersion) == 0 &&
                     console.find("Memory 24 MB\n") != std::string::npos &&
@@ -183,7 +184,7 @@ int main(int argc, char** argv) {
                     ppc_read_u32(state, 0x80340c6cu) == 0 &&
                     ppc_read_u32(state, 0x800030c0u) == 0 &&
                     ppc_read_u32(state, 0x800030c4u) == 0 &&
-                    result.reason.find("No native translation registered") != std::string::npos &&
+                    result.reason.find("Unsupported PI interrupt mask") != std::string::npos &&
                     ppc_read_u32(state, 0x80349ad0u) == 0,
                 "Production startup stopped at an unexpected boundary.");
         Require(state.externalInterrupt && state.externalInterrupt->delivered == 4 &&
@@ -300,7 +301,7 @@ int main(int argc, char** argv) {
                     ppc_read_u32(state, thread + 0x304u) == 0x8035cfa0u &&
                     ppc_read_u32(state, thread + 0x308u) == 0x8034cfa0u &&
                     ppc_read_u32(state, 0x8034cfa0u) == 0xdeadbabeu &&
-                    ppc_read_msr(state) == 0x8032u,
+                    ppc_read_msr(state) == 0x32u,
                 "Original default thread, active queue, context ownership, stack guard or RI/FP state differs.");
         for (unsigned index = 0; index < 64; ++index) {
             Require(ppc_read_u32(state, 0x80317b58u + index * 4u) == 0,
@@ -419,7 +420,7 @@ int main(int argc, char** argv) {
                     consoleFailure.reason.find("requires a native console sink") != std::string::npos,
                 "Original version logging silently ignored a missing native console.");
         Require(!state.callGuest && state.hid0 == 0xc200u && state.hid2 == 0xa0000000u &&
-                    state.l2cr == 0x80000000u && state.externalInterruptsEnabled &&
+                    state.l2cr == 0x80000000u && !state.externalInterruptsEnabled &&
                     ppc_read_u32(state, 0x80349904u) == 1u &&
                     ppc_read_u32(state, 0x80003010u) == 0x801b4260u &&
                     ppc_read_u32(state, 0x8000301cu) == 0x801b3274u,
@@ -463,6 +464,75 @@ int main(int argc, char** argv) {
         Require(exhausted && samples == 48 && looping.pc == 0x801b7bf0u &&
                     !looping.callGuest,
                 "Original nonconverging OSGetTime loop bypassed the block budget.");
+        if (argc == 4) {
+            RvzImage disc(argv[3]);
+            auto discState = CreateOriginalStartupState(image);
+            const auto originalMemory = discState.memory;
+            InstallOriginalStartupDisc(discState, disc);
+            const auto fstAddress = ppc_read_u32(discState, 0x80000038u);
+            const auto fstSize = ppc_read_u32(discState, 0x8000003cu);
+            const auto fstOffset = ppc_memory_offset(discState, fstAddress, fstSize);
+            const std::vector<uint8_t> fst(discState.memory.begin() + fstOffset,
+                                         discState.memory.begin() + fstOffset + fstSize);
+            Require(fstAddress == 0x81702000u && fstSize != 0 &&
+                        ppc_read_u32(discState, 0x800000f4u) == 0x81700000u &&
+                        ppc_read_u32(discState, 0x80000020u) == 0x0d15ea5eu &&
+                        std::equal(originalMemory.begin() + 0x3100, originalMemory.begin() + 0x35efa0,
+                                   discState.memory.begin() + 0x3100),
+                    "Native RVZ loader metadata overwrote original code, data or BSS.");
+            RequireFailure([&] { InstallOriginalStartupDisc(discState, disc); },
+                           "Native disc installation accepted an already bound state.");
+            Require(discState.transferDisc({0xa8000040u, 0, 32}, 32) == disc.Read(0, 32) &&
+                        discState.transferDisc({0xa8000000u, 0x108, 32}, 32) == disc.Read(0x420, 32),
+                    "Native DI read-ID or normal read did not return actual RVZ bytes.");
+            RequireFailure([&] { discState.transferDisc({0xa8000000u, UINT32_MAX, 32}, 32); },
+                           "Native RVZ backend accepted an out-of-range read.");
+            RequireFailure([&] { discState.transferDisc({0xa8000000u, 0, 64}, 32); },
+                           "Native RVZ backend accepted mismatched command/DMA lengths.");
+            RequireFailure([&] { discState.transferDisc({0xff000000u, 0, 32}, 32); },
+                           "Native RVZ backend silently accepted an unsupported command.");
+            uint64_t ticks = 1000000;
+            discState.readTimeBase = [&] { return ticks += 1000; };
+            std::string discConsole;
+            discState.writeConsole = [&](const std::string& text) { discConsole += text; };
+            const auto discResult = RunOriginalStartup(dispatcher, discState);
+            std::cout << DescribeOriginalStartupStop(discResult) << '\n';
+            Require(discResult.pc == 0x80003268u && discResult.lr == 0x80003268u &&
+                        discResult.stack == 0x8035cf98u && discState.discInterface->completedTransfers == 1 &&
+                        discState.discInterface->status == 0x2au &&
+                        discState.discInterface->dmaLength == 0 &&
+                        discState.discInterface->control == 2 &&
+                        discState.externalInterrupt->delivered == 5 &&
+                        discState.externalInterrupt->returned == 5 &&
+                        !discState.externalInterrupt->active && discState.externalInterruptsEnabled &&
+                        discState.piInterruptMask == 0xfcu &&
+                        ppc_read_u16(discState, 0x800030e6u) == 0x8001u &&
+                        ppc_read_u32(discState, 0x80317a6cu) == 0 &&
+                        ppc_read_u32(discState, 0x80349698u) == 0 &&
+                        ppc_read_u32(discState, 0x803185b8u) == 0 &&
+                        ppc_read_u32(discState, 0x803495fcu) != 0 &&
+                        discConsole.find("SDK - DVD") != std::string::npos &&
+                        DescribeOriginalStartupStop(discResult).find("OSInit returned") != std::string::npos &&
+                        std::equal(fst.begin(), fst.end(), discState.memory.begin() + fstOffset),
+                    "Original OSInit did not return after real DVD DMA, original callbacks and protected FST.");
+            for (uint32_t address = 0x80317a40u; address < 0x80317a60u; ++address) {
+                Require(ppc_read_u8(discState, address) == (address == 0x80317a43u ? 1 : 0),
+                        "Native virtual-drive identity differs or claims console firmware.");
+            }
+            Require(discState.decrementer->armed && discState.decrementer->writes == 1 &&
+                        ticks < discState.decrementer->deadline,
+                    "Original DVD alarm did not program an actual future decrementer deadline.");
+            auto absentBackend = CreateOriginalStartupState(image);
+            InstallOriginalStartupDisc(absentBackend, disc);
+            absentBackend.transferDisc = {};
+            const auto missingDiscTransfer = RunOriginalStartup(dispatcher, absentBackend);
+            Require(missingDiscTransfer.pc == 0x801b9fd0u &&
+                        missingDiscTransfer.reason.find("requires a native disc transfer backend") != std::string::npos &&
+                        absentBackend.discInterface->completedTransfers == 0 &&
+                        absentBackend.discInterface->dmaLength == 32 &&
+                        ppc_read_u16(absentBackend, 0x800030e6u) == 0,
+                    "Missing native disc backend fabricated inquiry DMA or OSInit completion.");
+        }
         fixtures.Cleanup();
         std::cout << "Production original-startup binding, real entry/OSInit boundary, "
                      "dispatch/loop limits, disk/RAM integrity and missing-dependency checks passed.\n";

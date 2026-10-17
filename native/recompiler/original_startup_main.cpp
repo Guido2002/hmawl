@@ -3,6 +3,7 @@
 
 #include <charconv>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -20,16 +21,18 @@ size_t ParseLimit(const std::filesystem::path& text) {
 
 template <typename Character>
 int RunCli(int argc, Character** argv) {
-    if (argc < 3 || argc > 9 || (argc & 1) == 0 ||
+    if (argc < 3 || argc > 11 || (argc & 1) == 0 ||
         std::filesystem::path(argv[1]) != "--original-startup") {
         std::cerr << "Usage: hmawl_original_startup --original-startup <USA-main.dol>"
-                     " [--max-blocks <count>] [--max-depth <count>] [--sram <64-byte-profile>]\n";
+                     " [--max-blocks <count>] [--max-depth <count>] [--sram <64-byte-profile>]"
+                     " [--rvz <USA-disc.rvz>]\n";
         return 2;
     }
     try {
         size_t blocks = 1000000;
         size_t depth = 128;
         bool sawBlocks = false, sawDepth = false, sawSram = false;
+        std::filesystem::path rvzPath;
         auto sramPath = std::filesystem::path(argv[2]).parent_path() / "native-console.sram";
         for (int i = 3; i < argc; i += 2) {
             const auto option = std::filesystem::path(argv[i]).string();
@@ -42,12 +45,20 @@ int RunCli(int argc, Character** argv) {
             } else if (option == "--sram" && !sawSram) {
                 sramPath = argv[i + 1];
                 sawSram = true;
+            } else if (option == "--rvz" && rvzPath.empty()) {
+                rvzPath = argv[i + 1];
+                if (rvzPath.empty()) throw std::runtime_error("Native RVZ disc path must not be empty.");
             } else {
                 throw std::runtime_error("Unknown or repeated startup option: " + option);
             }
         }
         const auto image = LoadOriginalUsDol(argv[2]);
         auto state = CreateOriginalStartupState(image);
+        std::unique_ptr<RvzImage> disc;
+        if (!rvzPath.empty()) {
+            disc = std::make_unique<RvzImage>(rvzPath);
+            InstallOriginalStartupDisc(state, *disc);
+        }
         BindNativeSram(state, LoadOrCreateNativeSram(sramPath));
         NativeDispatcher dispatcher;
         RegisterOriginalStartup(dispatcher, state);
@@ -60,6 +71,11 @@ int RunCli(int argc, Character** argv) {
                      "16 MiB ARAM, compiled DSP init/native bootstrap (general DSP tasks/audio unimplemented); "
                      "162 MHz bus/486 MHz CPU metadata, steady-clock 40.5 MHz time base.\n";
         std::cout << "Native SRAM profile: " << sramPath.u8string() << '\n';
+        if (disc) {
+            std::cout << "Verified native disc boot metadata: " << rvzPath.u8string() << '\n'
+                      << "Drive: native RVZ virtual drive, revision 1, no console firmware/date; "
+                         "checked read/inquiry DMA, original DVD interrupts; expired timer exceptions unsupported.\n";
+        }
         const auto result = RunOriginalStartup(dispatcher, state, blocks, depth);
         std::cerr << DescribeOriginalStartupStop(result) << '\n';
         return result.stop == OriginalStartupStop::Budget ? 4 :

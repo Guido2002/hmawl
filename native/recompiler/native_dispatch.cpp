@@ -134,7 +134,7 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
     state.pc = address;
     do {
         ppc_check_pending_interrupts(state, state.externalInterruptsEnabled);
-        while (state.externalInterruptsEnabled && ppc_si_interrupt_pending(state)) {
+        while (state.externalInterruptsEnabled && ppc_external_interrupt_pending(state)) {
             ppc_deliver_external_interrupt(state);
         }
         if (remaining == 0) {

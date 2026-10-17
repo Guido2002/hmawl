@@ -1,6 +1,7 @@
 #ifndef HMAWL_PPC_STATE_H
 #define HMAWL_PPC_STATE_H
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -101,6 +102,22 @@ struct PpcExternalInterrupt {
     uint32_t returned = 0;
 };
 
+struct PpcDiscInterface {
+    uint32_t status = 0;
+    uint32_t cover = 0;
+    std::array<uint32_t, 3> command = {};
+    uint32_t dmaAddress = 0;
+    uint32_t dmaLength = 0;
+    uint32_t control = 0;
+    uint32_t completedTransfers = 0;
+};
+
+struct PpcDecrementer {
+    uint64_t deadline = 0;
+    bool armed = false;
+    uint32_t writes = 0;
+};
+
 struct PpcInterruptContextReturn {};
 
 struct PpcState {
@@ -124,6 +141,7 @@ struct PpcState {
     bool systemCallActive = false;
     uint32_t sprg0 = 0;
     std::optional<PpcExternalInterrupt> externalInterrupt;
+    std::optional<PpcDecrementer> decrementer;
     std::optional<PpcRamBatState> ramBats;
     std::optional<PpcMemoryProtection> memoryProtection;
     std::vector<uint8_t> memory;
@@ -142,6 +160,8 @@ struct PpcState {
     std::function<void(PpcState&)> executeDspInitialization;
     std::optional<uint32_t> aiControl;
     std::optional<uint32_t> diConfiguration;
+    std::optional<PpcDiscInterface> discInterface;
+    std::function<std::vector<uint8_t>(const std::array<uint32_t, 3>&, uint32_t)> transferDisc;
     std::optional<uint16_t> viDtvStatus;
     std::optional<PpcSerialInterface> serialInterface;
     std::function<SiTransferResult(const SiTransferRequest&)> transferSi;
@@ -191,6 +211,11 @@ inline uint32_t ppc_pi_interrupt_cause(const PpcState& state) {
         if ((control & 0x180u) == 0x180u || (control & 0x60u) == 0x60u ||
             (control & 0x18u) == 0x18u) cause |= 0x80u;
     }
+    if (state.discInterface) {
+        const auto& di = *state.discInterface;
+        if ((di.status & ((di.status & 0x2au) << 1)) != 0 ||
+            (di.cover & 6u) == 6u) cause |= 4u;
+    }
     return cause;
 }
 
@@ -198,11 +223,21 @@ inline bool ppc_si_interrupt_pending(const PpcState& state) {
     return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & 8u) != 0;
 }
 
+inline bool ppc_external_interrupt_pending(const PpcState& state) {
+    return state.piInterruptMask && (*state.piInterruptMask & ppc_pi_interrupt_cause(state) & 0xcu) != 0;
+}
+
 inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
-    if (enabled && ppc_si_interrupt_pending(state) &&
+    if (enabled && state.decrementer && state.decrementer->armed) {
+        if (!state.readTimeBase) throw std::runtime_error("Native decrementer requires a time-base backend.");
+        if (state.readTimeBase() >= state.decrementer->deadline) {
+            throw std::runtime_error("Expired PowerPC decrementer requires timer exception delivery.");
+        }
+    }
+    if (enabled && ppc_external_interrupt_pending(state) &&
         (!state.externalInterrupt || !state.callException ||
          state.externalInterrupt->active)) {
-        throw std::runtime_error("Native SI completion interrupt requires guest interrupt delivery.");
+        throw std::runtime_error("Native SI/DI completion interrupt requires guest interrupt delivery.");
     }
     if (enabled && state.piInterruptMask.has_value() && (*state.piInterruptMask & 0x80u) != 0 &&
         state.dspHardware.has_value() && state.dspControl.has_value()) {
@@ -212,6 +247,17 @@ inline void ppc_check_pending_interrupts(const PpcState& state, bool enabled) {
             throw std::runtime_error("Native DSP interrupt requires guest interrupt delivery.");
         }
     }
+}
+
+inline void ppc_write_decrementer(PpcState& state, uint32_t value) {
+    if (!state.decrementer || !state.readTimeBase || value > 0x7fffffffu) {
+        throw std::runtime_error("Unsupported native decrementer write or missing timer profile.");
+    }
+    const auto now = state.readTimeBase();
+    if (now > UINT64_MAX - value) throw std::runtime_error("Native decrementer deadline overflow.");
+    state.decrementer->deadline = now + value;
+    state.decrementer->armed = true;
+    ++state.decrementer->writes;
 }
 
 inline void ppc_write_msr(PpcState& state, uint32_t value) {
@@ -301,6 +347,16 @@ inline void ppc_write_ram_bat(PpcState& state, unsigned spr, uint32_t value) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.discInterface) {
+        if (address == 0xcc006000u) return state.discInterface->status;
+        if (address == 0xcc006004u) return state.discInterface->cover;
+        if (address >= 0xcc006008u && address <= 0xcc006010u && (address & 3u) == 0) {
+            return state.discInterface->command[(address - 0xcc006008u) / 4u];
+        }
+        if (address == 0xcc006014u) return state.discInterface->dmaAddress;
+        if (address == 0xcc006018u) return state.discInterface->dmaLength;
+        if (address == 0xcc00601cu) return state.discInterface->control;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003000u &&
         state.externalInterrupt) return ppc_pi_interrupt_cause(state);
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003024u &&
@@ -453,6 +509,55 @@ inline uint16_t ppc_read_u16(PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.discInterface) {
+        auto& di = *state.discInterface;
+        if (address >= 0xcc006008u && address <= 0xcc00601cu && (address & 3u) == 0) {
+            if ((di.control & 1u) != 0) throw std::runtime_error("Cannot change active DI transfer registers.");
+            if (address <= 0xcc006010u) {
+                di.command[(address - 0xcc006008u) / 4u] = value;
+            } else if (address == 0xcc006014u) {
+                if ((value & 31u) != 0) throw std::runtime_error("DI DMA destination must be 32-byte aligned.");
+                ppc_memory_offset(state, value, 1);
+                di.dmaAddress = value;
+            } else if (address == 0xcc006018u) {
+                if ((value & 31u) != 0 || value > kGameCubeRamSize) {
+                    throw std::runtime_error("Invalid native DI DMA length.");
+                }
+                di.dmaLength = value;
+            } else {
+                if (value != 3u || di.dmaLength == 0) {
+                    throw std::runtime_error("Native DI supports only nonempty disc-to-RAM DMA commands.");
+                }
+                if (!state.transferDisc) throw std::runtime_error("DI command requires a native disc transfer backend.");
+                const auto offset = ppc_memory_offset(state, di.dmaAddress, di.dmaLength);
+                const auto bytes = state.transferDisc(di.command, di.dmaLength);
+                if (bytes.size() != di.dmaLength) throw std::runtime_error("Native DI backend returned an invalid DMA length.");
+                std::copy(bytes.begin(), bytes.end(), state.memory.begin() + offset);
+                di.dmaAddress += di.dmaLength;
+                di.dmaLength = 0;
+                di.control = value & ~1u;
+                di.status |= 0x10u;
+                ++di.completedTransfers;
+            }
+            return;
+        }
+        if (address == 0xcc006000u) {
+            if ((value & ~0x7eu) != 0) {
+                throw std::runtime_error("Unsupported DI status write (break commands are not implemented).");
+            }
+            auto& status = state.discInterface->status;
+            status = (status & 0x54u & ~(value & 0x54u)) | (value & 0x2au);
+            return;
+        }
+        if (address == 0xcc006004u) {
+            if ((value & ~6u) != 0) {
+                throw std::runtime_error("Unsupported DI cover control write.");
+            }
+            auto& cover = state.discInterface->cover;
+            cover = (cover & 5u & ~(value & 4u)) | (value & 2u);
+            return;
+        }
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && state.dspHardware.has_value()) {
         auto& dsp = *state.dspHardware;
         if (address == 0xcc005020u || address == 0xcc005024u) {
@@ -686,8 +791,9 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
     }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc003004u &&
         state.piInterruptMask.has_value()) {
-        if (value != 0xf0u && !(state.serialInterface.has_value() && value == 0xf8u)) {
-            throw std::runtime_error("Unsupported PI interrupt mask write (only startup mask 0xf0, or 0xf8 with SI mapped, supported).");
+        if (value != 0xf0u && !(state.serialInterface.has_value() && value == 0xf8u) &&
+            !(state.discInterface && (value == 0xf4u || (state.serialInterface && value == 0xfcu)))) {
+            throw std::runtime_error("Unsupported PI interrupt mask write (SI/DI enables require mapped hardware profiles).");
         }
         *state.piInterruptMask = value;
         return;
@@ -1032,7 +1138,7 @@ inline void ppc_return_from_system_call(PpcState& state) {
 }
 
 inline void ppc_deliver_external_interrupt(PpcState& state) {
-    if (!state.externalInterruptsEnabled || !ppc_si_interrupt_pending(state)) return;
+    if (!state.externalInterruptsEnabled || !ppc_external_interrupt_pending(state)) return;
     ppc_check_pending_interrupts(state, true);
     if (!state.externalInterrupt || !state.callException || state.externalInterrupt->active ||
         state.systemCallActive || (ppc_read_msr(state) & ~0xa032u) != 0) {

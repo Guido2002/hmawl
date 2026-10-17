@@ -5,6 +5,7 @@
 #include "native_sram.h"
 #include "original_startup_manifest.h"
 #include "sha1.h"
+#include "disc_import.h"
 #include "generated_original_startup.h"
 
 #include <fstream>
@@ -25,6 +26,56 @@ DolImage LoadOriginalUsDol(const std::filesystem::path& path) {
         throw std::runtime_error("Original startup requires the verified USA revision 0 DOL (SHA-1 mismatch).");
     }
     return DolImage::Parse(bytes);
+}
+
+void InstallOriginalStartupDisc(PpcState& state, RvzImage& disc) {
+    if (state.pc != 0x80003154u || state.memoryMap != PpcMemoryMap::GameCubeRam ||
+        state.callGuest || state.callException || state.discInterface) {
+        throw std::runtime_error("Native disc boot metadata requires a fresh unbound USA startup state.");
+    }
+    const auto& metadata = disc.metadata();
+    if (metadata.discId != "GYWEE9" || metadata.discNumber != 0 || metadata.discVersion != 0) {
+        throw std::runtime_error("Native startup requires GYWEE9 disc 0, revision 0.");
+    }
+    const auto files = ReadGameCubeExecutables(disc);
+    VerifyUsExecutables(files);
+    const auto& fst = files.at(1).bytes;
+    const auto id = disc.Read(0, 0x20);
+    const auto bi2 = disc.Read(0x440, 0x2000);
+    // __start can move ArenaHi to its BI2 argument list; keep the FST above all BI2 bytes.
+    constexpr uint32_t bi2Address = 0x81700000u, fstAddress = bi2Address + 0x2000u;
+    if (fst.size() > 0x81800000u - fstAddress) {
+        throw std::runtime_error("Original disc FST exceeds the native loader's reserved high RAM.");
+    }
+    const auto fstOffset = ppc_memory_offset(state, fstAddress, fst.size());
+    const auto bi2Offset = ppc_memory_offset(state, bi2Address, bi2.size());
+    const auto idOffset = ppc_memory_offset(state, 0x80000000u, id.size());
+    std::copy(fst.begin(), fst.end(), state.memory.begin() + fstOffset);
+    std::copy(bi2.begin(), bi2.end(), state.memory.begin() + bi2Offset);
+    std::copy(id.begin(), id.end(), state.memory.begin() + idOffset);
+    ppc_write_u32(state, 0x80000020u, 0x0d15ea5eu);
+    ppc_write_u32(state, 0x80000030u, 0x8035efa0u);
+    ppc_write_u32(state, 0x80000034u, bi2Address);
+    ppc_write_u32(state, 0x80000038u, fstAddress);
+    ppc_write_u32(state, 0x8000003cu, static_cast<uint32_t>(fst.size()));
+    ppc_write_u32(state, 0x800000f4u, bi2Address);
+    state.discInterface.emplace();
+    state.decrementer.emplace();
+    state.transferDisc = [&disc](const std::array<uint32_t, 3>& command, uint32_t length) {
+        if (command[0] == 0x12000000u && command[1] == 0 && command[2] == 32 && length == 32) {
+            // Explicit native virtual-drive identity: revision 1, no console firmware/date.
+            std::vector<uint8_t> inquiry(32);
+            inquiry[3] = 1;
+            return inquiry;
+        }
+        if (command[0] == 0xa8000040u && command[1] == 0 && command[2] == 32 && length == 32) {
+            return disc.Read(0, 32);
+        }
+        if (command[0] == 0xa8000000u && command[2] == length) {
+            return disc.Read(static_cast<uint64_t>(command[1]) * 4u, length);
+        }
+        throw std::runtime_error("Unsupported native RVZ drive DMA command.");
+    };
 }
 
 PpcState CreateOriginalStartupState(const DolImage& image) {
@@ -103,6 +154,8 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
          << " R4=0x" << std::setw(8) << result.argument4
          << " R5=0x" << std::setw(8) << result.argument5 << '\n'
          << result.reason << '\n'
-         << "OSInit is incomplete. This is NOT a game boot; no game main loop or renderer ran.";
+         << (result.pc == 0x80003268u ?
+             "Original OSInit returned to __start. " : "OSInit is incomplete. ")
+         << "This is NOT a game boot; no game main loop or renderer ran.";
     return text.str();
 }

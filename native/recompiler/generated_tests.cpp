@@ -1513,6 +1513,118 @@ void TestSiTransactionsAndPendingInterrupt() {
     }
 }
 
+void TestDiscDmaAndDeadline() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(4096, 0xa5);
+    state.discInterface.emplace();
+    state.externalInterrupt.emplace();
+    state.piInterruptMask = 0;
+    auto& di = *state.discInterface;
+    for (uint32_t initial = 0; initial < 128; initial += 2) {
+        for (uint32_t value = 0; value < 128; value += 2) {
+            di.status = initial;
+            ppc_write_u32(state, 0xcc006000u, value);
+            Require(ppc_read_u32(state, 0xcc006000u) ==
+                        ((initial & 0x54u & ~(value & 0x54u)) | (value & 0x2au)),
+                    "DI status masks/W1C acknowledgement differ.");
+        }
+    }
+    for (uint32_t initial = 0; initial < 8; ++initial) {
+        for (uint32_t value : {0u, 2u, 4u, 6u}) {
+            di.cover = initial;
+            ppc_write_u32(state, 0xcc006004u, value);
+            Require(ppc_read_u32(state, 0xcc006004u) ==
+                        ((initial & 5u & ~(value & 4u)) | (value & 2u)),
+                    "DI cover status/mask/W1C acknowledgement differ.");
+        }
+    }
+    di.cover = 0;
+    di.status = 0x2au;
+    ppc_write_u32(state, 0xcc006008u, 0x12000000u);
+    ppc_write_u32(state, 0xcc00600cu, 0);
+    ppc_write_u32(state, 0xcc006010u, 32);
+    ppc_write_u32(state, 0xcc006014u, 0x80000040u);
+    ppc_write_u32(state, 0xcc006018u, 32);
+    const auto memory = state.memory;
+    Reject([&] { ppc_write_u32(state, 0xcc00601cu, 3); }, "requires a native disc");
+    Require(di.control == 0 && di.dmaLength == 32 && di.completedTransfers == 0 &&
+                di.status == 0x2au && state.memory == memory,
+            "Missing DI backend fabricated completion or DMA data.");
+    for (unsigned size : {0u, 31u, 33u}) {
+        state.transferDisc = [size](const std::array<uint32_t, 3>&, uint32_t) {
+            return std::vector<uint8_t>(size);
+        };
+        Reject([&] { ppc_write_u32(state, 0xcc00601cu, 3); }, "invalid DMA length");
+        Require(di.dmaLength == 32 && di.completedTransfers == 0 && state.memory == memory,
+                "Invalid DI response partially changed DMA state or RAM.");
+    }
+    state.transferDisc = [](const std::array<uint32_t, 3>&, uint32_t) -> std::vector<uint8_t> {
+        throw std::runtime_error("disc read failed");
+    };
+    Reject([&] { ppc_write_u32(state, 0xcc00601cu, 3); }, "disc read failed");
+    Require(state.memory == memory && di.completedTransfers == 0 && di.status == 0x2au,
+            "Throwing DI backend committed successful status or bytes.");
+    unsigned calls = 0;
+    state.transferDisc = [&](const std::array<uint32_t, 3>& command, uint32_t length) {
+        Require(command == std::array<uint32_t, 3>{0x12000000u, 0, 32} && length == 32,
+                "DI command words or DMA request length differ.");
+        ++calls;
+        return std::vector<uint8_t>(32, 0x3c);
+    };
+    for (auto invalid : {std::pair<uint32_t, uint32_t>{0xcc006014u, 0x80000041u},
+                         {0xcc006014u, 0x81800000u}, {0xcc006018u, 31u},
+                         {0xcc006018u, kGameCubeRamSize + 32u}, {0xcc00601cu, 1u},
+                         {0xcc00601cu, 7u}, {0xcc006000u, 1u}, {0xcc006004u, 8u}}) {
+        Reject([&] { ppc_write_u32(state, invalid.first, invalid.second); }, "");
+        Require(state.memory == memory && di.dmaLength == 32 && di.dmaAddress == 0x80000040u &&
+                    di.completedTransfers == 0 && calls == 0,
+                "Invalid DI register write mutated DMA or called its backend.");
+    }
+    ppc_write_u32(state, 0xcc006014u, 0x80000fe0u);
+    ppc_write_u32(state, 0xcc006018u, 64);
+    Reject([&] { ppc_write_u32(state, 0xcc00601cu, 3); }, "");
+    Require(calls == 0 && state.memory == memory, "Out-of-bounds DI DMA reached the backend.");
+    ppc_write_u32(state, 0xcc006014u, 0x80000040u);
+    ppc_write_u32(state, 0xcc006018u, 32);
+    ppc_write_u32(state, 0xcc00601cu, 3);
+    Require(calls == 1 && di.completedTransfers == 1 && di.dmaLength == 0 &&
+                di.dmaAddress == 0x80000060u && di.control == 2 && di.status == 0x3au &&
+                ppc_read_u32(state, 0xcc003000u) == 4 && !ppc_external_interrupt_pending(state),
+            "DI DMA completion, source cause or PI masking differs.");
+    for (size_t index = 0; index < state.memory.size(); ++index) {
+        Require(state.memory[index] == (index >= 64 && index < 96 ? 0x3c : 0xa5),
+                "DI DMA bytes or destination guards differ.");
+    }
+    state.serialInterface.emplace();
+    ppc_write_u32(state, 0xcc003004u, 0xfcu);
+    Require(ppc_external_interrupt_pending(state), "Unmasked DI completion was not retained.");
+    state.externalInterruptsEnabled = true;
+    Reject([&] { ppc_check_pending_interrupts(state, true); }, "guest interrupt delivery");
+    ppc_write_u32(state, 0xcc006000u, 0x3au);
+    Require(!ppc_external_interrupt_pending(state) && di.status == 0x2au,
+            "DI W1C acknowledgement did not release its pending source.");
+    uint64_t ticks = 100;
+    state.readTimeBase = [&] { return ticks; };
+    Reject([&] { ppc_write_decrementer(state, 10); }, "missing timer profile");
+    state.decrementer.emplace();
+    ppc_write_decrementer(state, 10);
+    Require(state.decrementer->deadline == 110 && state.decrementer->writes == 1,
+            "DEC did not use the actual time-base clock.");
+    ticks = 109;
+    ppc_check_pending_interrupts(state, true);
+    ticks = 110;
+    ppc_check_pending_interrupts(state, false);
+    Reject([&] { ppc_check_pending_interrupts(state, true); }, "timer exception delivery");
+    ppc_write_decrementer(state, 0);
+    Reject([&] { ppc_check_pending_interrupts(state, true); }, "timer exception delivery");
+    Reject([&] { ppc_write_decrementer(state, 0x80000000u); }, "Unsupported native decrementer");
+    ticks = UINT64_MAX;
+    Reject([&] { ppc_write_decrementer(state, 1); }, "deadline overflow");
+    Require(state.decrementer->deadline == 110 && state.decrementer->writes == 2,
+            "Rejected DEC write changed its existing deadline.");
+}
+
 void TestNativeSramAndDma() {
     for (unsigned channel = 0; channel < 3; ++channel) {
         for (unsigned device = 0; device < 3; ++device) {
@@ -2587,7 +2699,7 @@ void TestPiInterruptMask() {
         try {
             ppc_0000B210(state);
         } catch (const std::runtime_error& error) {
-            rejected = std::string(error.what()).find("only startup mask") != std::string::npos;
+            rejected = std::string(error.what()).find("Unsupported PI interrupt mask") != std::string::npos;
         }
         Require(rejected && *state.piInterruptMask == 0xf0u && state.memory == ram,
                 "Unsupported PI mask value mutated device state or RAM.");
@@ -3352,6 +3464,7 @@ int main() {
         TestMultiplyHighUnsigned();
         TestSiStartupHardwareAndArithmetic();
         TestSiTransactionsAndPendingInterrupt();
+        TestDiscDmaAndDeadline();
         TestNativeSramAndDma();
         TestCompiledSystemCall();
         TestCompiledInterruptRegisters();
