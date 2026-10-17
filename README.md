@@ -434,9 +434,18 @@ the FPU exception handler, clears the FPU-owner pointer at `0x800000d8` and runs
 original `DBPrintf` (argument saves only, no host output). Standalone tests cover
 cached/uncached exception-table aliases, poisoned/zero owner state, repeats, both
 interrupt states, exact RAM/stack writes and CPU/FPR preservation. Continuation
-stops at `0x801b0f84` before `__OSCacheInit`; OSInit has not returned. The earlier
+now also executes the warm `__OSCacheInit` call and stops at `0x801b0f88` before
+`EXIInit`; OSInit has not returned. The earlier
 prefix remains separate for default-unmapped and re-entry tests. No context
 switching, scheduling or FPU exception delivery is implied.
+
+The OSInit cache call preserves the enabled L1/L2 caches established by hardware
+startup, including HID0 SPD and floating-point state, and re-registers the original
+DMA error handler. Tests check the exact dependency sequence, previous-handler
+return, repeated calls, both interrupt states, callee-saved registers and exact
+RAM/stack writes. The existing full hardware-startup tests continue to cover cold
+cache enable/invalidation paths. This uses coherent native RAM and controlled
+guest cache state; it does not implement physical cache timing or DMA errors.
 
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings

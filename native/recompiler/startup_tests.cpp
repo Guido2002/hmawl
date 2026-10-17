@@ -382,6 +382,90 @@ void TestCompleteHardwareInitialization(const DolImage& image) {
                  "cache/interrupt combinations. Loader IR/DR precondition; not a game boot.\n";
 }
 
+void RunWarmCacheInitialization(PpcState& state) {
+    Require((state.hid0 & 0xc000u) == 0xc000u && (state.l2cr & 0x80000000u) != 0,
+            "Warm cache fixture requires the original hardware startup's enabled caches.");
+    const auto before = state;
+    auto expected = state;
+    const uint32_t stack = state.gpr[1];
+    ppc_write_u32(expected, stack + 4, state.lr);
+    ppc_write_u32(expected, stack - 0x10u, stack);
+    ppc_write_u32(expected, stack - 4, state.gpr[31]);
+    ppc_write_u32(expected, stack - 8, state.gpr[30]);
+    ppc_write_u32(expected, stack - 0xcu, 0x801b2aacu);
+    ppc_write_u32(expected, stack - 0x40u, stack - 0x10u);
+    ppc_write_u32(expected, stack - 0x14u, 0x802e02a8u);
+    ppc_write_u32(expected, stack - 0x18u, state.gpr[30]);
+    ppc_write_u32(expected, stack - 0x1cu, state.gpr[29]);
+    ppc_write_u32(expected, stack - 0x20u, state.gpr[28]);
+    ppc_write_u32(expected, 0x80317a94u, 0x801b287cu);
+    ppc_write_u32(expected, stack - 0x80u, stack - 0x10u);
+    std::vector<uint32_t> calls;
+    state.callGuest = [&](uint32_t address, PpcState& guest) {
+        Require(calls.size() < 8, "Warm cache init exceeded its dependency budget.");
+        calls.push_back(address);
+        if (address == 0x801d33e4u) {
+            Require(guest.gpr[3] == 0x802e04a4u && (guest.cr & 0x02000000u) == 0,
+                    "Warm cache init reported an unexpected message or floating arguments.");
+            for (unsigned reg = 3; reg <= 10; ++reg) {
+                ppc_write_u32(expected, stack - 0x78u + (reg - 3) * 4u, guest.gpr[reg]);
+            }
+        } else if (address == 0x801b34ecu) {
+            Require(guest.gpr[3] == 1 && guest.gpr[4] == 0x801b287cu,
+                    "Warm cache init did not register the original DMA error handler.");
+        }
+        RunHardwareDependency(address, guest);
+        if (address == 0x801b34ecu) {
+            Require(guest.gpr[3] == ppc_read_u32(before, 0x80317a94u),
+                    "Warm cache error registration lost the previous handler.");
+        }
+    };
+    ppc_801B29DC(state);
+    Require(calls == std::vector<uint32_t>{0x801b0a28u, 0x801b0a28u, 0x801b0a38u,
+                0x801b34ecu, 0x801b3a44u, 0x801b3a6cu, 0x801d33e4u} &&
+                state.memory == expected.memory && state.pc == before.lr && state.lr == before.lr &&
+                state.gpr[1] == stack && state.externalInterruptsEnabled == before.externalInterruptsEnabled &&
+                state.hid0 == before.hid0 && state.hid2 == before.hid2 && state.l2cr == before.l2cr &&
+                state.msr == before.msr && state.fpr == before.fpr && state.fpscr == before.fpscr &&
+                state.gqr == before.gqr && state.xer == before.xer &&
+                state.performanceMonitor == before.performanceMonitor &&
+                state.piInterruptMask == before.piInterruptMask &&
+                state.miInterruptMask == before.miInterruptMask &&
+                state.dspControl == before.dspControl && state.aiControl == before.aiControl &&
+                state.exiStatus == before.exiStatus,
+            "Warm cache initialization changed unexpected state, exact RAM/stack or return ABI.");
+    for (unsigned reg = 13; reg < 32; ++reg) {
+        Require(state.gpr[reg] == before.gpr[reg], "Warm cache init damaged a callee-saved register.");
+    }
+    state.callGuest = {};
+}
+
+void TestOriginalWarmCacheInitialization(const DolImage& image) {
+    for (bool interrupts : {false, true}) {
+        for (uint32_t hid0 : {0xc000u, 0xc200u}) {
+            auto state = image.CreateGameCubeState();
+            ppc_800032B0(state);
+            state.hid0 = hid0;
+            state.l2cr = 0x80000000u;
+            state.msr = 0x2030u;
+            state.externalInterruptsEnabled = interrupts;
+            state.fpscr = 0xf1234567u;
+            state.fpr.fill({UINT64_C(0x7ff0000000000001), UINT64_C(0xfff8123456781234)});
+            state.gqr.fill(0x12345678u);
+            state.xer = 0xe0000000u;
+            state.cr = UINT32_MAX;
+            for (unsigned reg = 14; reg < 32; ++reg) state.gpr[reg] = 0x12340000u + reg;
+            state.lr = 0x801b0f88u;
+            ppc_write_u32(state, 0x80317a94u, 0xdeadbeefu);
+            RunWarmCacheInitialization(state);
+            RunWarmCacheInitialization(state);
+        }
+    }
+    std::cout << "Original warm __OSCacheInit preserves enabled caches, SPD and FP state, "
+                 "re-registers DMA error handling and returns; exact RAM/stack, previous "
+                 "handler and repeated/interrupt paths passed.\n";
+}
+
 void TestOriginalCacheControls(const DolImage& image) {
     auto state = image.CreateGameCubeState();
     ppc_800032B0(state);
@@ -1636,7 +1720,7 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     state.exiStatus = {0x1c7fu, 0x1c7fu, 0x7fu};
     std::vector<uint32_t> continuationCalls;
     state.callGuest = [&](uint32_t address, PpcState& guest) {
-        Require(continuationCalls.size() < 20, "OSInit continuation exceeded its dependency budget.");
+        Require(continuationCalls.size() < 35, "OSInit continuation exceeded its dependency budget.");
         continuationCalls.push_back(address);
         switch (address) {
         case 0x801b3ac0u: ppc_801B3AC0(guest); break;
@@ -1656,28 +1740,44 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
             Require(guest.memory == expected.memory, "Entry-derived context init RAM/stack differs.");
             break;
         }
+        case 0x801b29dcu:
+            Require(guest.hid0 == 0xc200u && guest.l2cr == 0x80000000u,
+                    "OSInit cache call lost the original enabled cache state.");
+            ppc_801B29DC(guest);
+            break;
         default: RunHardwareDependency(address, guest); break;
         }
         Require(guest.pc == guest.lr, "OSInit continuation dependency did not return.");
     };
     ppc_801B0F6C(state);
-    Require(continuationCalls.size() == 18 &&
+    Require(continuationCalls.size() == 26 &&
                 continuationCalls.front() == 0x801b3ac0u &&
                 continuationCalls[14] == 0x801b3a90u &&
                 continuationCalls[15] == 0x801b32f8u &&
                 continuationCalls[16] == 0x801b1460u &&
                 continuationCalls[17] == 0x801d33e4u &&
-                state.pc == 0x801b0f84u && state.gpr[1] == firstTime.gpr[1] &&
+                continuationCalls[18] == 0x801b29dcu &&
+                continuationCalls[19] == 0x801b0a28u &&
+                continuationCalls[20] == 0x801b0a28u &&
+                continuationCalls[21] == 0x801b0a38u &&
+                continuationCalls[22] == 0x801b34ecu &&
+                continuationCalls[23] == 0x801b3a44u &&
+                continuationCalls[24] == 0x801b3a6cu &&
+                continuationCalls[25] == 0x801d33e4u &&
+                state.pc == 0x801b0f88u && state.gpr[1] == firstTime.gpr[1] &&
+                state.hid0 == 0xc200u && state.l2cr == 0x80000000u &&
+                state.fpscr == firstTime.fpscr && state.fpr == firstTime.fpr &&
+                ppc_read_u32(state, 0x80317a94u) == 0x801b287cu &&
                 !state.externalInterruptsEnabled &&
                 ppc_read_u32(state, 0x80003098u) == 0x801b5974u &&
                 ppc_read_u32(state, 0x80003010u) == 0x801b4260u &&
                 ppc_read_u32(state, 0x8000301cu) == 0x801b3274u &&
                 ppc_read_u32(state, 0x800000d8u) == 0,
-            "Original OSInit continuation did not reach cache initialization with expected handlers.");
+            "Original OSInit continuation did not reach EXI initialization with expected handlers.");
     state.callGuest = {};
     std::cout << "Entry-derived OSInit continues through complete interrupt init, reset-switch "
-                 "handler registration and original context init, stopping at 0x801b0f84 "
-                 "before __OSCacheInit. OSInit has not returned.\n";
+                 "handler registration, context init and warm cache init, stopping at 0x801b0f88 "
+                 "before EXIInit. OSInit has not returned.\n";
 }
 
 void TestOriginalArenaAccessors(const DolImage& image) {
@@ -1980,6 +2080,7 @@ int main(int argc, char** argv) {
         TestCompleteHardwareInitialization(image);
         TestEntryThroughHardwareAndMemory(image);
         TestOriginalCacheControls(image);
+        TestOriginalWarmCacheInitialization(image);
         TestOriginalFprSaveRestore(image);
         TestOriginalFpscrAccessors(image);
         TestOriginalNonIeeeMode(image);

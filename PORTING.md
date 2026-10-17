@@ -321,9 +321,16 @@ queue. Full runtime scheduling and device services are still needed.
   `0x801b3274`, clear owner pointer `0x800000d8` and execute original `DBPrintf`
   without replacing it with host logging. Test aliases, zero/poisoned owner state,
   repeated calls, both interrupt states, exact RAM/stack writes, raw FPR bits,
-  CR/XER and register preservation. Continuation reaches `0x801b0f84`, before
-  `__OSCacheInit`; earlier prefix/default-unmapped/re-entry tests remain intact.
+  CR/XER and register preservation. Continue through warm `__OSCacheInit` to
+  `0x801b0f88`, before `EXIInit`; earlier prefix/default-unmapped/re-entry tests
+  remain intact.
   No context switching, scheduler or FPU exception delivery; OSInit is incomplete.
+- [x] Execute the original OSInit cache call with already-enabled L1/L2 caches.
+  Preserve cache state, HID0 SPD and raw floating-point state while re-registering
+  the original DMA error handler. Verify exact warm-path dependency order,
+  previous-handler return, both interrupt states, repeats, callee-saved registers
+  and exact RAM/stack writes. Existing hardware tests retain cold-path coverage.
+  No physical cache timing or DMA-error delivery; next startup dependency is EXIInit.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
