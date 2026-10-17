@@ -103,11 +103,12 @@ Both original 640x448 YUV framebuffer allocations complete. **The original Scree
 constructor now returns in the runner**, after an actual EFB-to-XFB RAM copy and
 RGB/depth clear. Its first copy contains 286720 undefined power-on pixels, explicitly
 tracked as undefined rather than claimed as a rendered frame.
-Original controller setup, array construction and collision resets continue into
-kernel/camera initialization; tests verify all 39 returned heap allocations.
+Original controller setup, array construction and collision resets continue through
+the camera's original vector normalization and look-at calculations; tests verify
+three actual normalization returns and all 41 returned heap allocations.
 The runner stops with **exit code 3** at
-`PC=0x801B8AE0`, `LR=0x8020AD8C`: vector subtraction needs the untranslated `ps_sub`
-paired-single instruction. Draws, unsupported copy modes and texture DMA still fail
+`PC=0x801C19A0`, `LR=0x80129ED0`: the audio setup reads the unmapped AI volume
+register at `0xCC006C04`. Draws, unsupported copy modes and texture DMA still fail
 explicitly. Pixel scanout, a game window/intro and the game main loop have not run.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.

@@ -352,6 +352,37 @@ std::string RecompileFunction(uint32_t address,
         }
         case 4: {
             const uint32_t extendedOpcode = Bits(instruction, 1, 10);
+            const uint32_t arithmetic = Bits(instruction, 1, 5);
+            if (arithmetic == 10 || arithmetic == 11) {
+                output << "    PpcPairedSum(state, " << rt << ", " << ra << ", " << rb << ", "
+                       << Bits(instruction, 6, 5) << ", "
+                       << (arithmetic == 11 ? "true" : "false") << ");\n";
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
+            }
+            if (arithmetic >= 28 && arithmetic <= 31) {
+                output << "    PpcFloatFused(state, " << rt << ", " << ra << ", "
+                       << Bits(instruction, 6, 5) << ", " << rb << ", "
+                       << ((arithmetic & 1u) == 0 ? "true" : "false") << ", true, true, "
+                       << (arithmetic >= 30 ? "true" : "false") << ");\n";
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
+            }
+            if (arithmetic == 18 || arithmetic == 20 || arithmetic == 21 ||
+                arithmetic == 25 || arithmetic == 12 || arithmetic == 13) {
+                const auto rc = Bits(instruction, 6, 5);
+                const bool multiply = arithmetic == 25 || arithmetic == 12 || arithmetic == 13;
+                if ((multiply && rb != 0) || (!multiply && rc != 0)) {
+                    throw std::runtime_error("Invalid paired arithmetic encoding at " + Hex(pc) + ".");
+                }
+                output << "    PpcPairedArithmetic(state, " << rt << ", " << ra << ", "
+                       << (multiply ? rc : rb) << ", PpcFloatOperation::"
+                       << (arithmetic == 18 ? "Divide" : arithmetic == 20 ? "Subtract" :
+                           arithmetic == 21 ? "Add" : "Multiply")
+                       << ", " << (arithmetic == 12 ? 0 : arithmetic == 13 ? 1 : -1) << ");\n";
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
+            }
             const uint32_t quantizedOpcode = Bits(instruction, 1, 6);
             if (quantizedOpcode == 6 || quantizedOpcode == 38 ||
                 quantizedOpcode == 7 || quantizedOpcode == 39) {
@@ -414,6 +445,15 @@ std::string RecompileFunction(uint32_t address,
         case 63: {
             const uint32_t extendedOpcode = Bits(instruction, 1, 10);
             const uint32_t arithmetic = Bits(instruction, 1, 5);
+            if (arithmetic >= 28 && arithmetic <= 31) {
+                output << "    PpcFloatFused(state, " << rt << ", " << ra << ", "
+                       << Bits(instruction, 6, 5) << ", " << rb << ", "
+                       << ((arithmetic & 1u) == 0 ? "true" : "false") << ", "
+                       << (opcode == 59 ? "true" : "false") << ", false, "
+                       << (arithmetic >= 30 ? "true" : "false") << ");\n";
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
+            }
             if (arithmetic == 18 || arithmetic == 20 || arithmetic == 21 || arithmetic == 25) {
                 const auto rc = Bits(instruction, 6, 5);
                 if ((arithmetic == 25 && rb != 0) || (arithmetic != 25 && rc != 0)) {
@@ -429,6 +469,15 @@ std::string RecompileFunction(uint32_t address,
             }
             if (opcode == 59) {
                 throw UnsupportedPpcInstruction("Unsupported single-precision arithmetic at " + Hex(pc) + ".");
+            }
+            if (extendedOpcode == 26 || extendedOpcode == 12) {
+                if (ra != 0) {
+                    throw std::runtime_error("Invalid frsqrte/frsp encoding at " + Hex(pc) + ".");
+                }
+                output << "    " << (extendedOpcode == 26 ? "PpcFloatReciprocalSqrtEstimate" : "PpcFloatRoundSingle")
+                       << "(state, " << rt << ", " << rb << ");\n";
+                EmitFpscrRecord(output, (instruction & 1u) != 0);
+                break;
             }
             if (extendedOpcode == 0 || extendedOpcode == 32) {
                 if ((instruction & 0x00600001u) != 0) {
@@ -623,12 +672,13 @@ std::string RecompileFunction(uint32_t address,
                 output << "    ppc_sync();\n";
                 break;
             }
-            if (extendedOpcode == 193) {
+            if (extendedOpcode == 193 || extendedOpcode == 449) {
                 if (link != 0) {
-                    throw std::runtime_error("Invalid crxor instruction at " + Hex(pc) + ".");
+                    throw std::runtime_error("Invalid CR logical instruction at " + Hex(pc) + ".");
                 }
                 output << "    const uint32_t cr_bit = ((state.cr >> " << (31u - ra)
-                       << ") ^ (state.cr >> " << (31u - rb) << ")) & 1u;\n"
+                       << (extendedOpcode == 193 ? ") ^ (state.cr >> " : ") | (state.cr >> ")
+                       << (31u - rb) << ")) & 1u;\n"
                        << "    state.cr = (state.cr & ~" << Hex(1u << (31u - rt))
                        << ") | (cr_bit << " << (31u - rt) << ");\n";
                 break;

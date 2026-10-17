@@ -121,7 +121,7 @@ void TestInternalBranchAndUnsupportedInstruction() {
             "Internal PowerPC branch target was not resolved.");
 
     try {
-        RecompileFunction(0x80003100u, {0xffffffffu});
+        RecompileFunction(0x80003100u, {0x00000000u});
         throw std::runtime_error("Unsupported instructions were accepted.");
     } catch (const std::runtime_error& error) {
         Require(std::string(error.what()).find("80003100") != std::string::npos,
@@ -380,7 +380,13 @@ void TestInvalidFloatingPointInstructions() {
         0x4c00092cu,
         (31u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (522u << 1),
         (31u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (650u << 1),
-        0x1022182au  // Paired arithmetic is not a register move.
+        0x1022182au | (1u << 6), // Paired add reserves its third source field.
+        (4u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (25u << 1),
+        (4u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (12u << 1),
+        (4u << 26) | (3u << 21) | (4u << 16) | (5u << 11) | (13u << 1),
+        (63u << 26) | (1u << 16) | (12u << 1),
+        (63u << 26) | (1u << 16) | (26u << 1),
+        0x4c401383u // CR logical instructions reserve the record/link bit.
     };
     for (uint32_t instruction : instructions) {
         bool rejected = false;

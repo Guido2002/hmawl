@@ -230,12 +230,18 @@ at physical `0x0157B160`, stride 1280, then clears the EFB rectangle to RGB 64/6
 and depth `0xFFFFFF`. All 286720 copied pixels are still undefined power-on contents:
 the copy occurs before the clear. This is not a rendered or presented game frame.
 The original game continues through PAD setup, array constructors, collision-reset
-vtables and kernel/camera class initialization. The next dependency is
-`PC=0x801B8AE0`, LR `0x8020AD8C`, SP `0x8035CEA8`: original vector subtraction
-requires the untranslated paired-single `ps_sub` instruction.
+vtables and kernel/camera calculations. Original vector subtraction produces
+`(0,-20,-200)`; its original squared-length calculation produces exactly 40400.
+Three original `PSVECNormalize` calls return, storing the actual unit vectors
+`00000000 BDCBC89C BF7EBAC3`, `00000000 3DCBC89A 3F7EBAC0`, and
+`3F800000 80000000 80000000`. Original look-at calculations continue, and
+41 real heap allocations return without overlaps or escaped arena bounds.
+The next dependency is `PC=0x801C19A0`, LR `0x80129ED0`, SP `0x8035CF38`:
+audio initialization reads the currently unmapped AI volume register `0xCC006C04`.
+No fake volume value or replacement audio initialization is supplied.
 The inquiry result remains `0x8001` and the entire real FST is intact.
-The deterministic 1000-tick/block regression returns 162 external exceptions,
-advances 152 VI fields and restores one scheduler context; steady-clock runner field/interrupt
+The deterministic 1000-tick/block regression returns 165 external exceptions,
+advances 155 VI fields and restores one scheduler context; steady-clock runner field/interrupt
 counts depend on elapsed host time, not a forced completion.
 Real-disc tests verify every constructor in original table order and preservation
 of its stack, SDA and nonvolatile integer/floating registers. Traced and untraced
@@ -244,7 +250,7 @@ constructor words fail integrity validation without claiming later milestones.
 The game main loop, GX renderer,
 general scheduled game-thread execution, audio, input and saves have not run.
 
-The next connected milestone is paired-single vector/camera arithmetic and return
+The next connected milestone is the audio-initialization dependency chain and return
 from original game initialization. Geometry/texture rendering and XFB pixel scanout
 are still required for a real displayed frame; Screen return alone does not establish one.
 Generated translation registration uses non-inlined batches
@@ -274,7 +280,7 @@ There is no replacement scene or generated frame.
 
 The real Windows runner publishes **77 FIFO bursts** and decodes **404 register/NOP
 commands**, with no pending command bytes, 15 still-gathered bytes and zero unread
-CP FIFO distance at the vector-arithmetic boundary. A successful command prefix
+CP FIFO distance at the audio-initialization boundary. A successful command prefix
 is committed before the next command: retrying a rejected copy/DMA does not replay
 an earlier token or copy/clear, nor stage the same RAM burst twice.
 Original attribute/texcoord/texture-format tables supply bounded
@@ -301,9 +307,40 @@ exact integer-bias subtraction, NaNs/infinities/signed zeros, sticky causes,
 underflow/overflow, FPRF, integer bounds, register aliases and CR1 records.
 100,000 deterministic finite input cases compare single and double results
 against independent host IEEE arithmetic compiled with strict FP semantics.
-Original startup NI mode works for normal inputs/results; denormal NI behavior,
-enabled FP exceptions and Gekko's 25-bit rounding for non-single `fmuls` multipliers
-fail explicitly before mutation. Fused arithmetic is not implemented.
+Paired add/subtract/multiply/divide, `ps_muls0/1`, and `ps_sum0/1` use snapshot
+operands so destination aliases cannot change the other lane. Both lanes are
+evaluated before any architectural write: a rejected second lane leaves all FPRs
+and FPSCR untouched. Paired FI/FR and exception causes combine both results; FPRF
+classifies ps0, except `ps_sum1`, which classifies its sum in ps1. Horizontal-sum
+copied lanes are bit-preserving moves and do not raise exceptions, even for sNaNs.
+
+Scalar and paired multiply-add/subtract, including negative forms, use an exact
+integer product/addend accumulator and round only once to their final precision.
+Negative forms negate after rounding without changing NaN signs. The Gekko
+single-precision multiplier is first rounded to a normalized 25-bit significand,
+nearest with midpoint magnitudes rounded upward, independently of FPSCR RN.
+The final result still follows RN. This includes non-single estimate operands;
+replacing the intermediate with binary32 would lose the console's extra bit.
+`frsp` supplies checked round-to-single conversion, preserving the undefined ps1
+lane in this profile. `cror` supports the original camera comparison sequence.
+
+`frsqrte` uses integer normalization, exponent-parity selection and piecewise
+linear interpolation of the 32 measured Gekko estimate-ROM base/decrement pairs.
+The factual ROM data is recorded in Dolphin's
+[FloatUtils.cpp](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/Common/FloatUtils.cpp);
+25-bit multiplier behavior is documented by its hardware-oriented
+[FP utilities](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/Core/PowerPC/Interpreter/Interpreter_FPUtils.h).
+The native evaluators are independently implemented with integer significands:
+no emulator runtime, host square-root substitution or copied emulator implementation
+is linked. Tests check exact estimate anchors, every 11-bit interpolation step
+of all 32 segments against the required relative-error bound of 1/4096, binary64
+endpoint normalization, signed zero/infinity/NaN handling, flags and CR1.
+FR/FI are architecturally undefined for estimates; this profile clears them.
+20,000 strict host fused-reference iterations and 20,000 independent 25-bit
+multiplier/conversion iterations complement rounding, alias and failure tests.
+Original startup NI mode works for normal inputs/results; denormal NI behavior
+and enabled FP exceptions still fail explicitly before mutation. Broadcast fused
+forms and reciprocal estimates other than scalar `frsqrte` remain unsupported.
 
 ### Checked EFB clear and XFB RAM copy
 

@@ -520,8 +520,8 @@ int main(int argc, char** argv) {
                       << " DI transfers=" << discState.discInterface->completedTransfers
                       << " VI fields=" << discState.video->fields << '\n';
             Require(discResult.stop == OriginalStartupStop::Dependency &&
-                        discResult.pc == 0x801b8ae0u && discResult.lr == 0x8020ad8cu &&
-                        discResult.stack == 0x8035cea8u && discResult.osInitReturned &&
+                        discResult.pc == 0x801c19a0u && discResult.lr == 0x80129ed0u &&
+                        discResult.stack == 0x8035cf38u && discResult.osInitReturned &&
                         discResult.constructorsReturned == 93 && discResult.userInitReturned &&
                         discResult.gameMainEntered && discResult.memoryInitialized &&
                         discResult.screenInitEntered && discResult.gxInitEntered &&
@@ -529,13 +529,13 @@ int main(int argc, char** argv) {
                         discResult.viInitReturned && discResult.viConfigured && discResult.viRetraceReturned &&
                         discResult.screenInitReturned &&
                         !discState.callGuest && !discState.callException &&
-                        discResult.reason == "No native translation registered at 0x801B8AE0." &&
+                        discResult.reason == "PowerPC address is not mapped to GameCube RAM" &&
                         discState.discInterface->completedTransfers == 1 &&
                         discState.discInterface->status == 0x2au &&
                         discState.discInterface->dmaLength == 0 &&
                         discState.discInterface->control == 2 &&
-                        discState.externalInterrupt->delivered == 162 &&
-                        discState.externalInterrupt->returned == 162 && discState.threadContextReturns == 1 &&
+                        discState.externalInterrupt->delivered == 165 &&
+                        discState.externalInterrupt->returned == 165 && discState.threadContextReturns == 1 &&
                         !discState.externalInterrupt->active && discState.externalInterruptsEnabled &&
                         discState.piInterruptMask == 0xffcu &&
                         ppc_read_u16(discState, 0x800030e6u) == 0x8001u &&
@@ -622,6 +622,8 @@ int main(int argc, char** argv) {
             bool gxReturned = false;
             bool viReturned = false, viConfigured = false, retraceReturned = false, screenReturned = false;
             unsigned viHandlers = 0;
+            unsigned vectorReturns = 0, normalizationEntries = 0, normalizationReturns = 0;
+            std::optional<std::pair<uint32_t, uint32_t>> normalizationReturn;
             std::optional<PpcState> peSource;
             uint64_t peSourceTicks = 0;
             std::vector<std::pair<uint32_t, uint32_t>> allocations;
@@ -630,6 +632,40 @@ int main(int argc, char** argv) {
             std::array<uint32_t, 32> savedRegisters{};
             std::array<uint64_t, 18> savedFprs{};
             const auto observe = [&](uint32_t pc) {
+                if (pc == 0x8020ad8cu) {
+                    ++vectorReturns;
+                    Require(ppc_read_u32(traced, traced.gpr[1] + 0x2c) == 0 &&
+                                ppc_read_u32(traced, traced.gpr[1] + 0x30) == 0xc1a00000u &&
+                                ppc_read_u32(traced, traced.gpr[1] + 0x34) == 0xc3480000u,
+                            "Original camera vector subtraction did not produce (0,-20,-200).");
+                }
+                if (pc == 0x801b8b1cu) {
+                    ++normalizationEntries;
+                    Require(!normalizationReturn, "Original vector normalization unexpectedly nested.");
+                    normalizationReturn = std::make_pair(traced.lr, traced.gpr[4]);
+                }
+                if (normalizationReturn && pc == normalizationReturn->first) {
+                    ++normalizationReturns;
+                    const uint32_t normalized[][3] = {
+                        {0, 0xbdcbc89c, 0xbf7ebac3}, {0, 0x3dcbc89a, 0x3f7ebac0},
+                        {0x3f800000, 0x80000000, 0x80000000}
+                    };
+                    Require(normalizationReturns <= std::size(normalized),
+                            "Original camera unexpectedly normalized another vector.");
+                    if (normalizationReturns == 1) {
+                        Require(traced.fpr[4] == PpcFpr{0x40e3ba0000000000, 0x3ff0000000000000},
+                                "Original camera vector did not produce exact squared length 40400.");
+                    }
+                    std::cout << "Original normalized vector:";
+                    for (unsigned component = 0; component < 3; ++component) {
+                        const auto value = ppc_read_u32(traced, normalizationReturn->second + component * 4);
+                        Require(value == normalized[normalizationReturns - 1][component],
+                                "Original camera normalization did not store its exact unit-vector components.");
+                        std::cout << " " << std::hex << value;
+                    }
+                    std::cout << std::dec << '\n';
+                    normalizationReturn.reset();
+                }
                 if (allocationRequest && pc == allocationRequest->first) {
                     const auto address = traced.gpr[3], size = allocationRequest->second;
                     Require(initializedHeap && size != 0 && (address & 31u) == 0 &&
@@ -740,8 +776,8 @@ int main(int argc, char** argv) {
             try {
                 dispatcher.Execute(traced, image.entryPoint(), 1000000, 128, observe);
             } catch (const std::exception& error) {
-                reachedBoundary = traced.pc == 0x801b8ae0u &&
-                    std::string(error.what()) == "No native translation registered at 0x801B8AE0.";
+                reachedBoundary = traced.pc == 0x801c19a0u &&
+                    std::string(error.what()) == "PowerPC address is not mapped to GameCube RAM";
                 if (!reachedBoundary) throw;
             }
             std::cout << "Observed original initialization allocations=" << allocations.size()
@@ -749,7 +785,7 @@ int main(int argc, char** argv) {
                       << ", allocator count=" << ppc_read_u32(traced, 0x80349494u) << '\n';
             Require(initializedHeap && allocations.size() == 11,
                     "Original initialization did not return all eleven observed heap/framebuffer allocations.");
-            Require(!allocationRequest && allAllocations.size() == 39 &&
+            Require(!allocationRequest && allAllocations.size() == 41 &&
                         std::equal(allocations.begin(), allocations.end(), allAllocations.begin()) &&
                         ppc_read_u32(traced, 0x80349494u) == allAllocations.size(),
                     "Original allocation counter/returned requests differ from observed allocations.");
@@ -762,6 +798,8 @@ int main(int argc, char** argv) {
                         ppc_read_u32(traced, allocations[7].first + 8) == allocations[10].first,
                     "Original manager singletons or Screen FIFO pointer differ from allocated objects.");
             Require(reachedBoundary && gxReturned && viReturned && viConfigured && retraceReturned && screenReturned &&
+                        vectorReturns == 1 && normalizationEntries == 3 && normalizationReturns == 3 &&
+                        !normalizationReturn &&
                         entered == 93 && returned == 93 &&
                         traced.memory == discState.memory && tracedConsole == discConsole &&
                         tracedTicks == ticks && traced.pc == discState.pc && traced.lr == discState.lr &&
@@ -788,7 +826,7 @@ int main(int argc, char** argv) {
                     "Observer changed EFB storage, clear/copy effects or undefined-pixel provenance.");
             const auto& vi = *discState.video;
             const auto& observedVi = *traced.video;
-            Require(vi.resets == 1 && vi.fields == 152 && viHandlers == 152 && vi.clockStarted &&
+            Require(vi.resets == 1 && vi.fields == 155 && viHandlers == 155 && vi.clockStarted &&
                         vi.registers[1] == 1 && vi.registers[3] == 429 &&
                         NativeViInterruptCause(vi) == 0 &&
                         observedVi.registers == vi.registers && observedVi.lastTicks == vi.lastTicks &&

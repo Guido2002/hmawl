@@ -1,6 +1,8 @@
 #include "ppc_float.h"
 #include "ppc_state.h"
 
+#include <algorithm>
+#include <array>
 #include <stdexcept>
 #include <utility>
 
@@ -46,13 +48,19 @@ uint64_t ShiftJam(uint64_t value, unsigned shift) {
 }
 
 // The 53x53-bit product fits in two portable 64-bit limbs, including on MSVC.
-uint64_t Product(uint64_t a, uint64_t b, int& exponent) {
+std::pair<uint64_t, uint64_t> WideProduct(uint64_t a, uint64_t b) {
     const uint64_t a0 = static_cast<uint32_t>(a), a1 = a >> 32;
     const uint64_t b0 = static_cast<uint32_t>(b), b1 = b >> 32;
     const auto p0 = a0 * b0, p1 = a0 * b1, p2 = a1 * b0;
     const auto middle = (p0 >> 32) + static_cast<uint32_t>(p1) + static_cast<uint32_t>(p2);
     const auto low = (middle << 32) | static_cast<uint32_t>(p0);
     const auto high = a1 * b1 + (p1 >> 32) + (p2 >> 32) + (middle >> 32);
+    return {low, high};
+}
+
+uint64_t Product(uint64_t a, uint64_t b, int& exponent) {
+    const auto product = WideProduct(a, b);
+    const auto low = product.first, high = product.second;
     const unsigned shift = (high & (UINT64_C(1) << 41)) != 0 ? 50 : 49;
     if (shift == 50) ++exponent;
     return (high << (64 - shift)) | (low >> shift) |
@@ -125,29 +133,34 @@ uint32_t Classify(const Result& result) {
     return negative ? 8 : 4;
 }
 
-} // namespace
-
-void PpcFloatArithmetic(PpcState& state, unsigned destination, unsigned left,
-                        unsigned right, PpcFloatOperation operation, bool single) {
-    if (destination >= 32 || left >= 32 || right >= 32) {
-        throw std::runtime_error("Invalid PowerPC floating-point register.");
+uint64_t RoundMultiplier25(uint64_t bits) {
+    auto value = Unpack(bits);
+    if (value.special || value.significand == 0) return bits;
+    auto significand = ((value.significand >> 28) + ((value.significand >> 27) & 1)) << 28;
+    if (significand == Hidden * 2) {
+        significand >>= 1;
+        ++value.exponent;
     }
-    if ((state.fpscr & 0xf8u) != 0) {
+    return Round(value.negative, value.exponent, significand << 3, false, 0).bits;
+}
+
+Result Arithmetic(uint64_t aBits, uint64_t bBits, PpcFloatOperation operation,
+                  bool single, uint32_t fpscr) {
+    if ((fpscr & 0xf8u) != 0) {
         throw std::runtime_error("PowerPC arithmetic with enabled FP exceptions is not implemented.");
     }
-    const auto aBits = state.fpr[left].ps0, bBits = state.fpr[right].ps0;
     auto a = Unpack(aBits), b = Unpack(bBits);
-    const bool nonIeee = (state.fpscr & 4) != 0;
+    const bool nonIeee = (fpscr & 4) != 0;
     const int minimum = single ? -126 : -1022;
     if (nonIeee && ((!a.special && a.significand && a.exponent < minimum) ||
                     (!b.special && b.significand && b.exponent < minimum))) {
         throw std::runtime_error("PowerPC non-IEEE denormal operand arithmetic is not implemented.");
     }
-    if (single && operation == PpcFloatOperation::Multiply && !b.special &&
-        ppc_widen_single_bits(ppc_narrow_single_bits(bBits)) != bBits) {
-        throw std::runtime_error("PowerPC fmuls non-single multiplier rounding is not implemented.");
+    if (single && operation == PpcFloatOperation::Multiply) {
+        bBits = RoundMultiplier25(bBits);
+        b = Unpack(bBits);
     }
-    const unsigned rounding = state.fpscr & 3u;
+    const unsigned rounding = fpscr & 3u;
     Result result{0};
     if (a.nan || b.nan) {
         result.bits = (a.nan ? aBits : bBits) | Quiet;
@@ -231,15 +244,239 @@ void PpcFloatArithmetic(PpcState& state, unsigned destination, unsigned left,
     if (nonIeee && (result.subnormal || (result.flags & 0x08000000u))) {
         throw std::runtime_error("PowerPC non-IEEE denormal result arithmetic is not implemented.");
     }
-    // Preserve sticky causes, derive VX/FEX, and set FX only for newly raised causes.
+    return result;
+}
+
+// Exact product plus addend spans at most 3276 bits for finite binary64 operands.
+using Exact = std::array<uint64_t, 52>;
+
+void Place(Exact& value, uint64_t word, unsigned shift) {
+    const auto limb = shift / 64, bit = shift % 64;
+    value[limb] |= word << bit;
+    if (bit != 0) value[limb + 1] |= word >> (64 - bit);
+}
+
+Result Fused(uint64_t aBits, uint64_t cBits, uint64_t bBits, bool subtract,
+             bool single, uint32_t fpscr) {
+    if (fpscr & 0xf8u) {
+        throw std::runtime_error("PowerPC fused arithmetic with enabled FP exceptions is not implemented.");
+    }
+    auto a = Unpack(aBits), b = Unpack(bBits), c = Unpack(cBits);
+    if ((fpscr & 4) && ((!a.special && a.significand && a.exponent < (single ? -126 : -1022)) ||
+                       (!b.special && b.significand && b.exponent < (single ? -126 : -1022)) ||
+                       (!c.special && c.significand && c.exponent < (single ? -126 : -1022)))) {
+        throw std::runtime_error("PowerPC non-IEEE denormal fused operands are not implemented.");
+    }
+    if (single) {
+        cBits = RoundMultiplier25(cBits);
+        c = Unpack(cBits);
+    }
+    Result result{0};
+    if (a.nan || b.nan || c.nan) {
+        result.bits = (a.nan ? aBits : b.nan ? bBits : cBits) | Quiet;
+        if (single) result.bits = ppc_widen_single_bits(ppc_narrow_single_bits(result.bits));
+        if (a.signaling || b.signaling || c.signaling) result.flags = 0x01000000u;
+        return result;
+    }
+    const bool productSign = a.negative != c.negative;
+    const bool addendSign = b.negative != subtract;
+    if ((a.special && c.significand == 0) || (c.special && a.significand == 0)) {
+        return {UINT64_C(0x7ff8000000000000), 0x00100000u};
+    }
+    if ((a.special || c.special) && b.special && productSign != addendSign) {
+        return {UINT64_C(0x7ff8000000000000), 0x00800000u};
+    }
+    if (a.special || b.special || c.special) {
+        return {((a.special || c.special ? productSign : addendSign) ? Sign : 0) |
+                UINT64_C(0x7ff0000000000000)};
+    }
+    const auto product = WideProduct(a.significand, c.significand);
+    int productExponent = a.exponent + c.exponent - 104;
+    int addendExponent = b.exponent - 52;
+    if (a.significand == 0 || c.significand == 0) productExponent = addendExponent;
+    if (b.significand == 0) addendExponent = productExponent;
+    const int base = std::min(productExponent, addendExponent);
+    Exact x{}, y{};
+    Place(x, product.first, unsigned(productExponent - base));
+    Place(x, product.second, unsigned(productExponent - base) + 64);
+    Place(y, b.significand, unsigned(addendExponent - base));
+    bool negative = productSign;
+    if (productSign != addendSign &&
+        std::lexicographical_compare(x.rbegin(), x.rend(), y.rbegin(), y.rend())) {
+        std::swap(x, y);
+        negative = addendSign;
+    }
+    uint64_t carry = 0;
+    for (size_t limb = 0; limb < x.size(); ++limb) {
+        const auto original = x[limb];
+        if (productSign == addendSign) {
+            const auto sum = original + y[limb];
+            x[limb] = sum + carry;
+            carry = (sum < original) || (x[limb] < sum);
+        } else {
+            const auto difference = original - y[limb];
+            x[limb] = difference - carry;
+            carry = (original < y[limb]) || (difference < carry);
+        }
+    }
+    int highest = int(x.size() * 64) - 1;
+    while (highest >= 0 && ((x[highest / 64] >> (highest % 64)) & 1u) == 0) --highest;
+    if (highest < 0) {
+        return {(productSign == addendSign ? productSign : (fpscr & 3u) == 3) ? Sign : 0};
+    }
+    uint64_t extended = 0;
+    const int shift = highest - 55;
+    for (int bit = 0; bit <= highest; ++bit) {
+        if (((x[bit / 64] >> (bit % 64)) & 1u) == 0) continue;
+        if (bit < shift) extended |= 1;
+        else extended |= UINT64_C(1) << (bit - shift);
+    }
+    result = Round(negative, base + highest, extended, single, fpscr & 3u);
+    if ((fpscr & 4) && (result.subnormal || (result.flags & 0x08000000u))) {
+        throw std::runtime_error("PowerPC non-IEEE denormal fused result is not implemented.");
+    }
+    return result;
+}
+
+void CommitStatus(PpcState& state, const Result& result, uint32_t flags) {
     uint32_t fpscr = state.fpscr & ~0x0007f000u;
     fpscr |= Classify(result) << 12;
     if (result.inexact) fpscr |= 0x00020000u;
     if (result.incremented) fpscr |= 0x00040000u;
-    if ((result.flags & ~state.fpscr) != 0) fpscr |= 0x80000000u;
-    ppc_write_fpscr(state, fpscr | result.flags, UINT32_MAX);
+    if ((flags & ~state.fpscr) != 0) fpscr |= 0x80000000u;
+    ppc_write_fpscr(state, fpscr | flags, UINT32_MAX);
+}
+
+void CommitPairedStatus(PpcState& state, Result first, const Result& second) {
+    first.inexact = first.inexact || second.inexact;
+    first.incremented = first.incremented || second.incremented;
+    CommitStatus(state, first, first.flags | second.flags);
+}
+
+} // namespace
+
+void PpcFloatArithmetic(PpcState& state, unsigned destination, unsigned left,
+                        unsigned right, PpcFloatOperation operation, bool single) {
+    if (destination >= 32 || left >= 32 || right >= 32) {
+        throw std::runtime_error("Invalid PowerPC floating-point register.");
+    }
+    const auto result = Arithmetic(state.fpr[left].ps0, state.fpr[right].ps0,
+                                   operation, single, state.fpscr);
+    CommitStatus(state, result, result.flags);
     state.fpr[destination].ps0 = result.bits;
     if (single) state.fpr[destination].ps1 = result.bits;
+}
+
+void PpcPairedArithmetic(PpcState& state, unsigned destination, unsigned left,
+                         unsigned right, PpcFloatOperation operation, int broadcast) {
+    if (destination >= 32 || left >= 32 || right >= 32 || broadcast < -1 || broadcast > 1) {
+        throw std::runtime_error("Invalid PowerPC paired arithmetic register/lane.");
+    }
+    const auto a = state.fpr[left], b = state.fpr[right];
+    const auto first = Arithmetic(a.ps0, broadcast == 1 ? b.ps1 : b.ps0,
+                                  operation, true, state.fpscr);
+    const auto second = Arithmetic(a.ps1, broadcast == 0 ? b.ps0 : b.ps1,
+                                   operation, true, state.fpscr);
+    CommitPairedStatus(state, first, second);
+    state.fpr[destination] = {first.bits, second.bits};
+}
+
+void PpcFloatFused(PpcState& state, unsigned destination, unsigned left, unsigned multiplier,
+                   unsigned addend, bool subtract, bool single, bool paired, bool negate) {
+    if (destination >= 32 || left >= 32 || multiplier >= 32 || addend >= 32 || (paired && !single)) {
+        throw std::runtime_error("Invalid PowerPC fused arithmetic register/precision.");
+    }
+    const auto a = state.fpr[left], b = state.fpr[addend], c = state.fpr[multiplier];
+    auto first = Fused(a.ps0, c.ps0, b.ps0, subtract, single, state.fpscr);
+    auto second = paired ? Fused(a.ps1, c.ps1, b.ps1, subtract, true, state.fpscr) : first;
+    if (negate) {
+        if (!Unpack(first.bits).nan) first.bits ^= Sign;
+        if (!Unpack(second.bits).nan) second.bits ^= Sign;
+    }
+    CommitPairedStatus(state, first, second);
+    state.fpr[destination].ps0 = first.bits;
+    if (single) state.fpr[destination].ps1 = second.bits;
+}
+
+void PpcFloatReciprocalSqrtEstimate(PpcState& state, unsigned destination, unsigned source) {
+    if (destination >= 32 || source >= 32) {
+        throw std::runtime_error("Invalid PowerPC reciprocal square-root register.");
+    }
+    if (state.fpscr & 0xf8u) {
+        throw std::runtime_error("PowerPC reciprocal square-root enabled exceptions are not implemented.");
+    }
+    const auto bits = state.fpr[source].ps0;
+    const auto value = Unpack(bits);
+    Result result{0};
+    if (value.nan) {
+        result.bits = bits | Quiet;
+        if (value.signaling) result.flags = 0x01000000u;
+    } else if (value.significand == 0 && !value.special) {
+        result.bits = (bits & Sign) | UINT64_C(0x7ff0000000000000);
+        result.flags = 0x04000000u;
+    } else if (value.negative) {
+        result.bits = UINT64_C(0x7ff8000000000000);
+        result.flags = 0x00000200u;
+    } else if (!value.special) {
+        if ((state.fpscr & 4) && value.exponent < -1022) {
+            throw std::runtime_error("PowerPC non-IEEE denormal reciprocal square-root input is not implemented.");
+        }
+        // Measured Gekko estimate ROM base/decrement data; see ORIGINAL_STARTUP.md.
+        constexpr uint32_t bases[] = {
+            0x1a7e800, 0x17cb800, 0x1552800, 0x130c000, 0x10f2000, 0x0eff000, 0x0d2e000, 0x0b7c000,
+            0x09e5000, 0x0867000, 0x06ff000, 0x05ab800, 0x046a000, 0x0339800, 0x0218800, 0x0105800,
+            0x3ffa000, 0x3c29000, 0x38aa000, 0x3572000, 0x3279000, 0x2fb7000, 0x2d26000, 0x2ac0000,
+            0x2881000, 0x2665000, 0x2468000, 0x2287000, 0x20c1000, 0x1f12000, 0x1d79000, 0x1bf4000
+        };
+        constexpr uint32_t decrements[] = {
+            0x568, 0x4f3, 0x48d, 0x435, 0x3e7, 0x3a2, 0x365, 0x32e,
+            0x2fc, 0x2d0, 0x2a8, 0x283, 0x261, 0x243, 0x226, 0x20b,
+            0x7a4, 0x700, 0x670, 0x5f2, 0x584, 0x524, 0x4cc, 0x47e,
+            0x43a, 0x3fa, 0x3c2, 0x38e, 0x35e, 0x332, 0x30a, 0x2e6
+        };
+        const unsigned fractionIndex = unsigned((value.significand & Fraction) >> 37);
+        const unsigned row = fractionIndex / 2048 + ((value.exponent % 2 == 0) ? 16 : 0);
+        const uint32_t fraction = bases[row] - decrements[row] * (fractionIndex % 2048);
+        const int halfExponent = value.exponent >= 0 ? value.exponent / 2 : (value.exponent - 1) / 2;
+        const int resultExponent = -halfExponent - 1;
+        result.bits = (uint64_t(resultExponent + 1023) << 52) | (uint64_t(fraction) << 26);
+    }
+    CommitStatus(state, result, result.flags);
+    state.fpr[destination].ps0 = result.bits;
+}
+
+void PpcFloatRoundSingle(PpcState& state, unsigned destination, unsigned source) {
+    if (destination >= 32 || source >= 32) {
+        throw std::runtime_error("Invalid PowerPC round-to-single register.");
+    }
+    if (state.fpscr & 0xf8u) {
+        throw std::runtime_error("PowerPC round-to-single enabled exceptions are not implemented.");
+    }
+    const auto bits = state.fpr[source].ps0;
+    const auto value = Unpack(bits);
+    if ((state.fpscr & 4) && !value.special && value.significand && value.exponent < -126) {
+        throw std::runtime_error("PowerPC non-IEEE denormal round-to-single input is not implemented.");
+    }
+    Result result = value.special ? Result{value.nan ? ppc_widen_single_bits(ppc_narrow_single_bits(bits | Quiet)) : bits,
+                                           value.signaling ? 0x01000000u : 0u} :
+        Round(value.negative, value.exponent, value.significand << 3, true, state.fpscr & 3);
+    if ((state.fpscr & 4) && result.subnormal) {
+        throw std::runtime_error("PowerPC non-IEEE denormal round-to-single result is not implemented.");
+    }
+    CommitStatus(state, result, result.flags);
+    state.fpr[destination].ps0 = result.bits;
+}
+
+void PpcPairedSum(PpcState& state, unsigned destination, unsigned left, unsigned right,
+                  unsigned copied, bool sumInSecond) {
+    if (destination >= 32 || left >= 32 || right >= 32 || copied >= 32) {
+        throw std::runtime_error("Invalid PowerPC paired sum register.");
+    }
+    const auto copy = sumInSecond ? state.fpr[copied].ps0 : state.fpr[copied].ps1;
+    const auto sum = Arithmetic(state.fpr[left].ps0, state.fpr[right].ps1,
+                                PpcFloatOperation::Add, true, state.fpscr);
+    CommitStatus(state, sum, sum.flags);
+    state.fpr[destination] = sumInSecond ? PpcFpr{copy, sum.bits} : PpcFpr{sum.bits, copy};
 }
 
 void PpcFloatCompare(PpcState& state, unsigned field, unsigned left, unsigned right, bool ordered) {

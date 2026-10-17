@@ -366,6 +366,74 @@ int main(int argc, char** argv) {
                        << ",\n" << std::dec;
             }
             output << "};\n";
+            const unsigned pairedOps[] = {18, 20, 21, 25, 12, 13};
+            for (unsigned index = 0; index < 36; ++index) {
+                const auto xo = pairedOps[index / 6];
+                const unsigned destination = 3 + index % 3;
+                const bool multiply = xo == 25 || xo == 12 || xo == 13;
+                Emit(output, 0xf600u + index * 16,
+                     {(4u << 26) | (destination << 21) | (4u << 16) |
+                      (multiply ? (5u << 6) : (5u << 11)) | (xo << 1) |
+                      ((index % 6) / 3)});
+            }
+            output << "static void (*const PairedArithmeticTestFunctions[])(PpcState&) = {\n";
+            for (unsigned index = 0; index < 36; ++index) {
+                output << "ppc_0000" << std::hex << std::uppercase << (0xf600u + index * 16)
+                       << ",\n" << std::dec;
+            }
+            output << "};\n";
+            const unsigned horizontalOps[] = {28, 29, 10, 11};
+            for (unsigned index = 0; index < 32; ++index) {
+                Emit(output, 0xf900u + index * 16,
+                     {(4u << 26) | ((3 + index % 4) << 21) | (4u << 16) |
+                      (5u << 11) | (6u << 6) | (horizontalOps[index / 8] << 1) |
+                      ((index % 8) / 4)});
+            }
+            output << "static void (*const PairedFusedSumTestFunctions[])(PpcState&) = {\n";
+            for (unsigned index = 0; index < 32; ++index) {
+                output << "ppc_0000" << std::hex << std::uppercase << (0xf900u + index * 16)
+                       << ",\n" << std::dec;
+            }
+            output << "};\n";
+            Emit(output, 0xfb00u, {0x4c401382u});
+            Emit(output, 0xfb10u, {(19u << 26) | (7u << 21) | (7u << 16) | (8u << 11) | (449u << 1)});
+            Emit(output, 0xfb20u, {(19u << 26) | (8u << 21) | (7u << 16) | (8u << 11) | (449u << 1)});
+            for (unsigned index = 0; index < 32; ++index) {
+                Emit(output, 0xfc00u + index * 16,
+                     {((index < 16 ? 59u : 63u) << 26) | ((3 + index % 4) << 21) |
+                      (4u << 16) | (5u << 11) | (6u << 6) | ((28u + (index / 8) % 2) << 1) |
+                      ((index % 8) / 4)});
+            }
+            output << "static void (*const ScalarFusedTestFunctions[])(PpcState&) = {\n";
+            for (unsigned index = 0; index < 32; ++index) {
+                output << "ppc_0000" << std::hex << std::uppercase << (0xfc00u + index * 16)
+                       << ",\n" << std::dec;
+            }
+            output << "};\n";
+            for (unsigned index = 0; index < 24; ++index) {
+                const unsigned primary[] = {4, 59, 63};
+                Emit(output, 0xfe00u + index * 16,
+                     {(primary[index / 8] << 26) | ((3 + index % 4) << 21) |
+                      (4u << 16) | (5u << 11) | (6u << 6) | ((30u + (index / 4) % 2) << 1) |
+                      (index % 2)});
+            }
+            output << "static void (*const NegativeFusedTestFunctions[])(PpcState&) = {\n";
+            for (unsigned index = 0; index < 24; ++index) {
+                output << "ppc_0000" << std::hex << std::uppercase << (0xfe00u + index * 16)
+                       << ",\n" << std::dec;
+            }
+            output << "};\n";
+            for (unsigned index = 0; index < 8; ++index) {
+                Emit(output, 0xff80u + index * 16,
+                     {(63u << 26) | ((index % 2 ? 4u : 3u) << 21) | (4u << 11) |
+                      ((index < 4 ? 26u : 12u) << 1) | ((index % 4) / 2)});
+            }
+            output << "static void (*const EstimateRoundTestFunctions[])(PpcState&) = {\n";
+            for (unsigned index = 0; index < 8; ++index) {
+                output << "ppc_0000" << std::hex << std::uppercase << (0xff80u + index * 16)
+                       << ",\n" << std::dec;
+            }
+            output << "};\n";
             for (unsigned field = 0; field < 8; ++field) {
                 Emit(output, 0xf200u + field * 16,
                      {(63u << 26) | (field << 23) | (4u << 16) | (5u << 11)});

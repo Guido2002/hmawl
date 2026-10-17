@@ -50,8 +50,12 @@ the original VI interrupt handler and a checked scheduler context restore.
 Eleven original allocations through Screen include both 640x448 framebuffers.
 The original Screen constructor now returns after an actual XFB RAM copy and EFB
 clear; the first copy's power-on pixels are explicitly undefined, not a game frame.
-Controller setup, array construction and collision reset continue into kernel/camera
-initialization. The runner stops at `0x801B8AE0` on untranslated paired-single `ps_sub`.
+Controller setup, array construction and collision reset continue through original
+camera vector/normalization and look-at calculations. Scalar/paired fused arithmetic,
+horizontal sums, Gekko reciprocal-root estimates and 25-bit multiplier rounding now
+execute; tests observe three original normalization returns and 41 heap allocations.
+The next runner boundary is an unmapped AI volume-register read at `0xCC006C04`,
+`PC=0x801C19A0`, `LR=0x80129ED0`, during audio initialization.
 Pixel scanout, the main loop and a rendered game frame remain unfinished.
 See [runner configuration and limitations](native/recompiler/ORIGINAL_STARTUP.md).
 

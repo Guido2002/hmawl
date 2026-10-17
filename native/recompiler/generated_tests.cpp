@@ -25,6 +25,101 @@ void Require(bool condition, const char* message) {
 }
 
 void TestFloatingPointArithmetic() {
+    for (unsigned index = 0; index < 24; ++index) {
+        PpcState state;
+        state.fpr[4] = {0x4018000000000000, 0x4018000000000000};
+        state.fpr[5] = {0x4000000000000000, 0x4000000000000000};
+        state.fpr[6] = {0x4008000000000000, 0x4008000000000000};
+        state.fpr[3].ps1 = 0x123456789abcdef0;
+        state.fpscr = 4;
+        state.cr = 0x12345678;
+        const auto before = state.fpr;
+        NegativeFusedTestFunctions[index](state);
+        const unsigned destination = 3 + index % 4;
+        const uint64_t expected = (index / 4) % 2 ? UINT64_C(0xc034000000000000) :
+                                                                   UINT64_C(0xc030000000000000);
+        Require(state.fpr[destination] == PpcFpr{expected, index < 16 ? expected : before[destination].ps1} &&
+                    state.fpscr == 0x8004 &&
+                    state.cr == (index % 2 ? 0x10345678u : 0x12345678u),
+                "Compiled negative fused form/precision/source aliases or CR1 differs.");
+    }
+    for (unsigned index = 0; index < 8; ++index) {
+        PpcState state;
+        state.fpr[4] = {0x3ff0000000000000, 0x123456789abcdef0};
+        state.fpr[3].ps1 = 0x123456789abcdef0;
+        state.fpscr = 4;
+        state.cr = 0x12345678;
+        EstimateRoundTestFunctions[index](state);
+        Require(state.fpr[index % 2 ? 4 : 3] ==
+                    PpcFpr{index < 4 ? UINT64_C(0x3feffe8000000000) : UINT64_C(0x3ff0000000000000),
+                           0x123456789abcdef0} &&
+                    state.fpscr == 0x4004 &&
+                    state.cr == (index % 4 >= 2 ? 0x10345678u : 0x12345678u),
+                "Compiled frsqrte/frsp destination aliases, preserved ps1 or record bit differs.");
+    }
+    for (unsigned index = 0; index < 32; ++index) {
+        PpcState state;
+        state.fpr[4] = {ppc_widen_single_bits(0x40c00000), 0x0123456789abcdef};
+        state.fpr[5] = {ppc_widen_single_bits(0x40000000), 0xfedcba9876543210};
+        state.fpr[6] = {ppc_widen_single_bits(0x40400000), 0x123456789abcdef0};
+        state.fpscr = 4;
+        state.cr = 0x12345678;
+        const auto destination = 3 + index % 4;
+        const auto original = state.fpr;
+        const auto expected = ppc_widen_single_bits((index / 8) % 2 ? 0x41a00000 : 0x41800000);
+        ScalarFusedTestFunctions[index](state);
+        Require(state.fpr[destination] == PpcFpr{expected, index < 16 ? expected : original[destination].ps1} &&
+                    state.fpscr == 0x4004 &&
+                    state.cr == ((index % 8) >= 4 ? 0x10345678u : 0x12345678u),
+                "Compiled scalar fused precision/operand decoding, aliases or CR1 differs.");
+    }
+    for (unsigned index = 0; index < 32; ++index) {
+        PpcState state;
+        state.fpr[4] = {ppc_widen_single_bits(0x40c00000), ppc_widen_single_bits(0x41400000)};
+        state.fpr[5] = {ppc_widen_single_bits(0x40000000), ppc_widen_single_bits(0x40800000)};
+        state.fpr[6] = {ppc_widen_single_bits(0x40400000), ppc_widen_single_bits(0x40a00000)};
+        state.fpscr = 4;
+        state.cr = 0x12345678;
+        const auto original = state.fpr;
+        const uint32_t expected[][2] = {{0x41800000, 0x42600000}, {0x41a00000, 0x42800000},
+                                        {0x41200000, 0x40a00000}, {0x40400000, 0x41200000}};
+        PairedFusedSumTestFunctions[index](state);
+        const auto destination = 3 + index % 4;
+        Require(state.fpr[destination] == PpcFpr{ppc_widen_single_bits(expected[index / 8][0]),
+                                                 ppc_widen_single_bits(expected[index / 8][1])} &&
+                    state.fpscr == 0x4004 &&
+                    state.cr == ((index % 8) >= 4 ? 0x10345678u : 0x12345678u),
+                "Compiled fused/sum source decoding, alias preservation or CR1 record differs.");
+        for (unsigned reg = 0; reg < 32; ++reg) {
+            Require(reg == destination || state.fpr[reg] == original[reg],
+                    "Compiled fused/sum changed a non-destination FPR.");
+        }
+    }
+    for (unsigned index = 0; index < 36; ++index) {
+        PpcState paired;
+        paired.fpr[4] = {0x4018000000000000, 0x4028000000000000}; // 6, 12
+        paired.fpr[5] = {0x4000000000000000, 0x4010000000000000}; // 2, 4
+        paired.fpscr = 4;
+        paired.cr = 0x12345678;
+        const PpcFpr expected[] = {
+            {0x4008000000000000, 0x4008000000000000},
+            {0x4010000000000000, 0x4020000000000000},
+            {0x4020000000000000, 0x4030000000000000},
+            {0x4028000000000000, 0x4048000000000000},
+            {0x4028000000000000, 0x4038000000000000},
+            {0x4038000000000000, 0x4048000000000000}
+        };
+        const auto before = paired.fpr;
+        PairedArithmeticTestFunctions[index](paired);
+        const unsigned destination = 3 + index % 3;
+        Require(paired.fpr[destination] == expected[index / 6] && paired.fpscr == 0x4004 &&
+                    paired.cr == ((index % 6) >= 3 ? 0x10345678u : 0x12345678u),
+                "Compiled paired arithmetic source/lane decoding, aliases, NI or CR1 differs.");
+        for (unsigned reg = 0; reg < 32; ++reg) {
+            Require(reg == destination || paired.fpr[reg] == before[reg],
+                    "Compiled paired arithmetic changed a non-destination FPR.");
+        }
+    }
     for (unsigned index = 0; index < 32; ++index) {
         PpcState state;
         state.fpr[4] = {0x4008000000000000, 0x0123456789abcdef};
@@ -3422,6 +3517,18 @@ void TestTimeBaseAndConditionXor() {
     }
     Require(reads == 10, "mftb did not perform exactly one native clock read per instruction.");
     for (uint32_t cr : {0u, 0xffffffffu, 0x01000000u, 0x00800000u, 0x87654321u}) {
+        state.cr = cr;
+        ppc_0000FB00(state);
+        Require(state.cr == ((cr & ~0x20000000u) | (((cr >> 31) | (cr >> 29)) & 1u) << 29),
+                "Original camera cror did not merge comparison LT/EQ into the correct CR bit.");
+        state.cr = cr;
+        ppc_0000FB10(state);
+        Require(state.cr == ((cr & ~(1u << 24)) | ((((cr >> 24) | (cr >> 23)) & 1u) << 24)),
+                "Aliased cror destination/left changed the wrong bit or lost its original source.");
+        state.cr = cr;
+        ppc_0000FB20(state);
+        Require(state.cr == ((cr & ~(1u << 23)) | ((((cr >> 24) | (cr >> 23)) & 1u) << 23)),
+                "Aliased cror destination/right changed the wrong bit or lost its original source.");
         state.cr = cr;
         ppc_000030F0(state);
         const auto expected = (cr & ~(1u << 25)) |

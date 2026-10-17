@@ -1,7 +1,9 @@
 #include "ppc_state.h"
 
+#include <cmath>
 #include <cstring>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 #include <utility>
 
@@ -130,15 +132,11 @@ void TestSpecialAndRejectedModes() {
     }
     state.fpscr = 0;
     state.fpr[2].ps0 = 0x3ff0000000000001;
-    const auto original = state.fpr;
     bool rejected = false;
-    try {
-        PpcFloatArithmetic(state, 3, 1, 2, Op::Multiply, true);
-    } catch (const std::runtime_error& error) {
-        rejected = std::string(error.what()).find("multiplier rounding") != std::string::npos;
-    }
-    Require(rejected && state.fpscr == 0 && state.fpr == original,
-            "Non-single multiplier silently skipped Gekko-specific operand rounding.");
+    state.fpr[1].ps0 = 0x3ff0000000000000;
+    PpcFloatArithmetic(state, 3, 1, 2, Op::Multiply, true);
+    Require(state.fpr[3].ps0 == 0x3ff0000000000000 && state.fpscr == 0x4000,
+            "Non-single multiplier was not rounded to Gekko's 25-bit significand before multiplying.");
     for (const bool denormalInput : {false, true}) {
         state.fpscr = 4;
         state.fpr[1].ps0 = ppc_widen_single_bits(denormalInput ? 1 : 0x00800000);
@@ -211,6 +209,309 @@ uint64_t Random(uint64_t& seed) {
     return seed;
 }
 
+void TestPairedArithmetic() {
+    using Op = PpcFloatOperation;
+    const uint32_t values[] = {0, 0x80000000, 1, 0x00800000, 0x3f800000, 0xbf800000,
+                              0x33800000, 0x7f7fffff, 0x7f800000, 0xff800000,
+                              0x7fc12345, 0x7f812345};
+    for (const auto operation : {Op::Add, Op::Subtract, Op::Multiply, Op::Divide}) {
+        for (unsigned mode = 0; mode < 4; ++mode) {
+            for (unsigned i = 0; i < std::size(values); ++i) {
+                for (unsigned j = 0; j < std::size(values); ++j) {
+                    PpcState paired, first, second;
+                    paired.fpscr = first.fpscr = second.fpscr = mode;
+                    paired.fpr[4] = {ppc_widen_single_bits(values[i]),
+                                     ppc_widen_single_bits(values[j])};
+                    paired.fpr[5] = {ppc_widen_single_bits(values[j]),
+                                     ppc_widen_single_bits(values[(i + 3) % std::size(values)])};
+                    first.fpr[4].ps0 = paired.fpr[4].ps0;
+                    first.fpr[5].ps0 = paired.fpr[5].ps0;
+                    second.fpr[4].ps0 = paired.fpr[4].ps1;
+                    second.fpr[5].ps0 = paired.fpr[5].ps1;
+                    PpcFloatArithmetic(first, 3, 4, 5, operation, true);
+                    PpcFloatArithmetic(second, 3, 4, 5, operation, true);
+                    PpcPairedArithmetic(paired, 4, 4, 5, operation);
+                    constexpr uint32_t causes = 0x1ff80700u;
+                    Require(paired.fpr[4] == PpcFpr{first.fpr[3].ps0, second.fpr[3].ps0} &&
+                                (paired.fpscr & causes) == ((first.fpscr | second.fpscr) & causes) &&
+                                (paired.fpscr & 0x1f000u) == (first.fpscr & 0x1f000u) &&
+                                (paired.fpscr & 0x60000u) == ((first.fpscr | second.fpscr) & 0x60000u),
+                            "Paired arithmetic differs from independent scalar lanes, sticky causes or lane-zero classification.");
+                }
+            }
+        }
+    }
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        PpcState state;
+        state.fpr[1] = {0x3ff0000000000000, 0x3ff0000000000000};
+        state.fpr[2] = {0x4000000000000000, 0x3ff0000000000000};
+        state.fpscr = failure == 0 ? 0x80 : failure == 1 ? 4 : 0;
+        if (failure == 1) state.fpr[1].ps1 = ppc_widen_single_bits(1);
+        if (failure == 2) {
+            state.fpscr = 4;
+            state.fpr[1].ps1 = ppc_widen_single_bits(0x00800000);
+            state.fpr[2].ps1 = 0x3fe0000000000000;
+        }
+        const auto before = state.fpr;
+        const auto status = state.fpscr;
+        bool rejected = false;
+        try {
+            PpcPairedArithmetic(state, 1, 1, 2, Op::Multiply, failure == 3 ? 2 : -1);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        Require(rejected && state.fpr == before && state.fpscr == status,
+                "Paired second-lane/unsupported-mode rejection partially changed FPRs or FPSCR.");
+    }
+}
+
+void TestFusedAndSums() {
+    PpcState state;
+    // (1 + 2^-23) * (1 - 2^-23) - 1 = -2^-46, not zero.
+    state.fpr[1] = {ppc_widen_single_bits(0x3f800001), 0x4000000000000000};
+    state.fpr[2] = {ppc_widen_single_bits(0x3f7ffffe), 0x4008000000000000};
+    state.fpr[3] = {0x3ff0000000000000, 0x4010000000000000};
+    PpcFloatFused(state, 1, 1, 2, 3, true, true, true);
+    Require(state.fpr[1] == PpcFpr{ppc_widen_single_bits(0xa8800000), 0x4000000000000000} &&
+                state.fpscr == 0x8000,
+            "Paired multiply-subtract rounded the product before cancellation or corrupted aliases.");
+    state.fpr[2] = {0x3ff0000000000000, 0x4000000000000000};
+    state.fpr[3] = {0x4008000000000000, 0x4010000000000000};
+    state.fpr[4] = {0x4014000000000000, 0x4018000000000000};
+    for (bool second : {false, true}) {
+        auto sum = state;
+        sum.fpr[4] = {0xc014000000000000, 0x7ff0000000001234};
+        PpcPairedSum(sum, 4, 2, 3, 4, second);
+        Require(sum.fpr[4] == (second ? PpcFpr{0xc014000000000000, 0x4014000000000000} :
+                                             PpcFpr{0x4014000000000000, 0x7ff0000000001234}) &&
+                    sum.fpscr == 0x4000,
+                "Paired sum failed to copy raw lane bits or classified the copied lane instead of the sum.");
+    }
+    state.fpr[1].ps0 = UINT64_C(0x7fefffffffffffff);
+    state.fpr[2].ps0 = UINT64_C(0x4000000000000000);
+    state.fpr[3].ps0 = UINT64_C(0xffefffffffffffff);
+    state.fpscr = 0;
+    PpcFloatFused(state, 4, 1, 2, 3, false, false, false);
+    Require(state.fpr[4].ps0 == UINT64_C(0x7fefffffffffffff) && state.fpscr == 0x4000,
+            "Fused product overflowed before its cancelling addend.");
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        state.fpr[1] = {0x3ff0000000000000, 0x3ff0000000000000};
+        state.fpr[2] = {0x3ff0000000000000, 0x3ff0000000000000};
+        state.fpr[3] = {0x3e70000000000000, 0x7ff8000020000000};
+        state.fpscr = mode;
+        PpcFloatFused(state, 4, 1, 2, 3, false, true, true, true);
+        const auto rounded = mode == 2 ? ppc_widen_single_bits(0x3f800001) : UINT64_C(0x3ff0000000000000);
+        Require(state.fpr[4] == PpcFpr{rounded ^ UINT64_C(0x8000000000000000), 0x7ff8000020000000} &&
+                    (state.fpscr & 0x1f000u) == 0x8000,
+                "Negative fused arithmetic negated before rounding or changed a propagated NaN sign.");
+    }
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        state.fpr[1] = {0x3ff0000000000000, 0x3ff0000000000000};
+        state.fpr[2] = {0x3ff0000000000000, 0x3ff0000000000000};
+        state.fpr[3] = {0x3e70000000000000, 0x3e70000000000000};
+        state.fpscr = mode;
+        PpcFloatFused(state, 4, 1, 2, 3, false, true, true);
+        const auto expected = mode == 2 ? ppc_widen_single_bits(0x3f800001) : UINT64_C(0x3ff0000000000000);
+        Require(state.fpr[4] == PpcFpr{expected, expected} &&
+                    (state.fpscr & 0x82020003u) == (0x82020000u | mode) &&
+                    bool(state.fpscr & 0x40000u) == (mode == 2),
+                "Fused halfway rounding mode/inexact/increment status differs.");
+        state.fpr[3] = state.fpr[1];
+        state.fpscr = mode;
+        PpcFloatFused(state, 4, 1, 2, 3, true, true, true);
+        const uint64_t zero = mode == 3 ? UINT64_C(0x8000000000000000) : 0;
+        Require(state.fpr[4] == PpcFpr{zero, zero},
+                "Exact fused cancellation lost directed-rounding zero sign.");
+    }
+    for (unsigned special = 0; special < 4; ++special) {
+        state.fpscr = 0;
+        state.fpr[1] = {0x3ff0000000000000, 0x7ff0000000000000};
+        state.fpr[2] = {0x4000000000000000, special == 0 ? 0 : UINT64_C(0x3ff0000000000000)};
+        state.fpr[3] = {0x4008000000000000, 0xfff0000000000000};
+        if (special == 2) state.fpr[1].ps1 = 0x7ff0000000001234;
+        if (special == 3) state.fpr[1].ps1 = 0x7ff8000020000000;
+        PpcFloatFused(state, 4, 1, 2, 3, false, true, true);
+        const uint32_t flag = special == 0 ? 0x00100000u : special == 1 ? 0x00800000u :
+                              special == 2 ? 0x01000000u : 0;
+        Require(state.fpr[4].ps0 == 0x4014000000000000 &&
+                    (state.fpr[4].ps1 & UINT64_C(0x7ff8000000000000)) == UINT64_C(0x7ff8000000000000) &&
+                    (state.fpscr & 0x7f000u) == 0x4000 &&
+                    (state.fpscr & 0x1ff80700u) == flag &&
+                    bool(state.fpscr & 0x80000000u) == (flag != 0),
+                "Fused special-value result/second-lane causes differ.");
+    }
+    uint64_t seed = 0x123456789abcdef0;
+    for (unsigned i = 0; i < 20000; ++i) {
+        const uint32_t a = uint32_t(Random(seed)), b = uint32_t(Random(seed)), c = uint32_t(Random(seed));
+        if ((a & 0x7f800000) == 0x7f800000 || (b & 0x7f800000) == 0x7f800000 ||
+            (c & 0x7f800000) == 0x7f800000) continue;
+        state.fpr[1] = {ppc_widen_single_bits(a), ppc_widen_single_bits(c)};
+        state.fpr[2] = {ppc_widen_single_bits(b), ppc_widen_single_bits(a)};
+        state.fpr[3] = {ppc_widen_single_bits(c), ppc_widen_single_bits(b)};
+        for (const bool subtract : {false, true}) {
+            state.fpscr = 0;
+            PpcFloatFused(state, 4, 1, 2, 3, subtract, true, true);
+            const float x = Bits<float>(a), y = Bits<float>(b), z = Bits<float>(c);
+            Require(state.fpr[4] == PpcFpr{
+                        ppc_widen_single_bits(Bits<uint32_t>(std::fma(x, y, subtract ? -z : z))),
+                        ppc_widen_single_bits(Bits<uint32_t>(std::fma(z, x, subtract ? -y : y)))},
+                    "Exact fused paired arithmetic differs from independent finite single FMA reference.");
+        }
+        const auto da = Random(seed), db = Random(seed), dc = Random(seed);
+        if (((da >> 52) & 2047) == 2047 || ((db >> 52) & 2047) == 2047 ||
+            ((dc >> 52) & 2047) == 2047) continue;
+        state.fpr[1].ps0 = da;
+        state.fpr[2].ps0 = db;
+        state.fpr[3].ps0 = dc;
+        state.fpr[4].ps1 = 0x123456789abcdef0;
+        state.fpscr = 0;
+        PpcFloatFused(state, 4, 1, 2, 3, false, false, false);
+        Require(state.fpr[4].ps0 ==
+                    Bits<uint64_t>(std::fma(Bits<double>(da), Bits<double>(db), Bits<double>(dc))) &&
+                    state.fpr[4].ps1 == 0x123456789abcdef0,
+                "Portable exact fused accumulator differs from finite binary64 FMA or changed the scalar paired lane.");
+    }
+    for (unsigned failure = 0; failure < 3; ++failure) {
+        state.fpscr = failure == 0 ? 0x80 : 4;
+        state.fpr[1] = {0x3ff0000000000000, ppc_widen_single_bits(failure == 1 ? 1 : 0x00800000)};
+        state.fpr[2] = {0x4000000000000000, 0x3fe0000000000000};
+        state.fpr[3] = {0, 0};
+        const auto before = state.fpr;
+        const auto status = state.fpscr;
+        bool rejected = false;
+        try { PpcFloatFused(state, 1, 1, 2, 3, false, true, true); }
+        catch (const std::runtime_error&) { rejected = true; }
+        Require(rejected && state.fpr == before && state.fpscr == status,
+                "Unsupported fused second-lane input/result/exception mode did not fail atomically.");
+    }
+}
+
+void TestReciprocalSqrtEstimate() {
+    PpcState state;
+    const std::pair<uint64_t, uint64_t> known[] = {
+        {0x3ff0000000000000, 0x3feffe8000000000},
+        {0x4000000000000000, 0x3fe69fa000000000},
+        {0x4010000000000000, 0x3fdffe8000000000},
+        {0x3fe0000000000000, 0x3ff69fa000000000},
+        {0, 0x7ff0000000000000}, {0x8000000000000000, 0xfff0000000000000},
+        {0x7ff0000000000000, 0}, {0xfff0000000000000, 0x7ff8000000000000},
+        {0xbff0000000000000, 0x7ff8000000000000},
+        {0xfff8000023456789, 0xfff8000023456789}, {0x7ff0000000001234, 0x7ff8000000001234}
+    };
+    for (unsigned i = 0; i < std::size(known); ++i) {
+        for (unsigned mode = 0; mode < 4; ++mode) {
+            state.fpscr = mode | 0x60000;
+            state.fpr[1] = {known[i].first, 0x123456789abcdef0};
+            PpcFloatReciprocalSqrtEstimate(state, 1, 1);
+            const uint32_t flag = i == 4 || i == 5 ? 0x04000000u :
+                                  i == 7 || i == 8 ? 0x200u : i == 10 ? 0x01000000u : 0;
+            Require(state.fpr[1] == PpcFpr{known[i].second, 0x123456789abcdef0} &&
+                        (state.fpscr & 0x1ff80703u) == (flag | mode) &&
+                        (state.fpscr & 0x60000u) == 0,
+                    "Gekko reciprocal square-root estimate anchor/special/alias or status differs.");
+        }
+    }
+    for (unsigned index = 0; index < 65536; ++index) {
+        for (uint64_t tail : {UINT64_C(0), (UINT64_C(1) << 37) - 1}) {
+            const uint64_t input = (UINT64_C(1023) << 52) + (uint64_t(index) << 37) + tail;
+            state.fpr[1].ps0 = input;
+            state.fpscr = 0;
+            PpcFloatReciprocalSqrtEstimate(state, 2, 1);
+            const double estimate = Bits<double>(state.fpr[2].ps0);
+            const double exact = 1.0 / std::sqrt(Bits<double>(input));
+            Require(std::abs(estimate / exact - 1) < 1.0 / 4096,
+                    "Gekko estimate ROM/interpolation exceeded its required relative-error bound.");
+        }
+    }
+    for (const uint64_t input : {UINT64_C(1), UINT64_C(0x000fffffffffffff),
+                                 UINT64_C(0x0010000000000000), UINT64_C(0x7fefffffffffffff)}) {
+        state.fpr[1].ps0 = input;
+        state.fpscr = 0;
+        PpcFloatReciprocalSqrtEstimate(state, 2, 1);
+        Require(std::abs(Bits<double>(state.fpr[2].ps0) * std::sqrt(Bits<double>(input)) - 1) < 1.0 / 4096,
+                "Reciprocal square-root exponent normalization failed at a binary64 endpoint.");
+    }
+    for (const uint32_t mode : {4u, 8u, 16u, 32u, 64u, 128u}) {
+        state.fpscr = mode;
+        state.fpr[1].ps0 = 1;
+        const auto original = state.fpr;
+        bool rejected = false;
+        try { PpcFloatReciprocalSqrtEstimate(state, 1, 1); }
+        catch (const std::runtime_error&) { rejected = true; }
+        Require(rejected && state.fpr == original && state.fpscr == mode,
+                "Unsupported reciprocal-square-root NI/exception mode did not fail atomically.");
+    }
+}
+
+void TestRoundSingleAndMultiplier() {
+    PpcState state;
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        for (uint64_t sign : {UINT64_C(0), UINT64_C(0x8000000000000000)}) {
+            state.fpscr = mode;
+            state.fpr[1] = {UINT64_C(0x3ff0000010000000) | sign, 0x123456789abcdef0};
+            PpcFloatRoundSingle(state, 1, 1);
+            const bool increment = sign ? mode == 3 : mode == 2;
+            Require(state.fpr[1] == PpcFpr{(UINT64_C(0x3ff0000000000000) |
+                                               (increment ? UINT64_C(0x20000000) : 0)) | sign,
+                                           0x123456789abcdef0} &&
+                        (state.fpscr & 0x60000) == (increment ? 0x60000 : 0x20000),
+                    "frsp rounding mode/tie/sign/FI/FR or ps1 differs.");
+            state.fpr[1].ps0 = 0x3ff0000000000000;
+            state.fpr[2].ps0 = UINT64_C(0x3ff0000008000000) | sign;
+            state.fpr[3].ps0 = UINT64_C(0x3ff0000000000000) | sign;
+            state.fpscr = mode;
+            PpcFloatFused(state, 4, 1, 2, 3, true, true, false);
+            Require(state.fpr[4].ps0 == (UINT64_C(0x3e70000000000000) | sign),
+                    "Gekko's 25-bit multiplier midpoint did not round magnitude upward independently of RN/sign.");
+        }
+    }
+    for (const auto bits : {UINT64_C(0x7ff0000000001234), UINT64_C(0xfff8000023456789),
+                            UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000),
+                            UINT64_C(0), UINT64_C(0x8000000000000000)}) {
+        state.fpr[1].ps0 = bits;
+        state.fpscr = 0;
+        PpcFloatRoundSingle(state, 4, 1);
+        const bool nan = (bits & UINT64_C(0x7fffffffffffffff)) > UINT64_C(0x7ff0000000000000);
+        const auto expected = nan ? ppc_widen_single_bits(ppc_narrow_single_bits(bits | UINT64_C(0x8000000000000))) : bits;
+        Require(state.fpr[4].ps0 == expected &&
+                    ((state.fpscr & 0x01000000u) != 0) == (nan && !(bits & UINT64_C(0x8000000000000))),
+                "frsp NaN payload/quieting/invalid flag or infinity/signed zero differs.");
+    }
+    std::mt19937_64 random(0x25b175eed);
+    for (unsigned index = 0; index < 20000; ++index) {
+        const auto a = Bits<float>(0x3f000000u | uint32_t(random() & 0x7fffffu));
+        const auto c = Bits<double>(UINT64_C(0x3ff0000000000000) | (random() & UINT64_C(0x000fffffffffffff)));
+        const double rounded = std::floor(c * 16777216.0 + 0.5) / 16777216.0;
+        const double product = double(a) * rounded;
+        state.fpr[1].ps0 = ppc_widen_single_bits(Bits<uint32_t>(a));
+        state.fpr[2].ps0 = Bits<uint64_t>(c);
+        state.fpr[3].ps0 = 0x3ff0000000000000;
+        state.fpscr = 0;
+        PpcFloatArithmetic(state, 4, 1, 2, PpcFloatOperation::Multiply, true);
+        Require(state.fpr[4].ps0 == ppc_widen_single_bits(Bits<uint32_t>(float(product))),
+                "25-bit multiplier rounding differs from independent exact dyadic multiplication.");
+        state.fpscr = 0;
+        PpcFloatFused(state, 4, 1, 2, 3, true, true, false);
+        Require(state.fpr[4].ps0 == ppc_widen_single_bits(Bits<uint32_t>(float(product - 1.0))),
+                "Fused operation did not use the same 25-bit multiplier rounding.");
+        state.fpr[1].ps0 = Bits<uint64_t>(c);
+        state.fpscr = 0;
+        PpcFloatRoundSingle(state, 4, 1);
+        Require(state.fpr[4].ps0 == ppc_widen_single_bits(Bits<uint32_t>(float(c))),
+                "frsp differs from strict binary64-to-binary32 conversion.");
+    }
+    for (const uint32_t mode : {4u, 8u, 16u, 32u, 64u, 128u}) {
+        state.fpscr = mode;
+        state.fpr[1].ps0 = 1;
+        const auto before = state.fpr;
+        bool rejected = false;
+        try { PpcFloatRoundSingle(state, 1, 1); }
+        catch (const std::runtime_error&) { rejected = true; }
+        Require(rejected && state.fpr == before && state.fpscr == mode,
+                "Unsupported frsp NI/exception mode did not fail atomically.");
+    }
+}
+
 void TestDifferentialFinite() {
     PpcState state;
     uint64_t seed = 0xdead1234beef5678;
@@ -253,11 +554,16 @@ int main() {
         TestExactAndFlags();
         TestSpecialAndRejectedModes();
         TestCompareAndConversion();
+        TestPairedArithmetic();
+        TestFusedAndSums();
+        TestReciprocalSqrtEstimate();
+        TestRoundSingleAndMultiplier();
         TestDifferentialFinite();
     } catch (const std::exception& error) {
         std::cerr << "PowerPC float test failure: " << error.what() << '\n';
         return 1;
     }
-    std::cout << "PowerPC software add/subtract/multiply/divide, comparisons, integer conversion, rounding/flags/special values and "
-                 "100000 deterministic finite single/double differential cases passed.\n";
+    std::cout << "PowerPC scalar/paired add/subtract/multiply/divide, broadcast multiply, fused multiply-add/subtract, "
+                 "horizontal sums, comparisons/conversion, atomic lane failures and rounding/flags/special values passed; "
+                 "100000 finite single/double arithmetic and 20000 fused reference iterations passed.\n";
 }
