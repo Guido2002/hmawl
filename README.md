@@ -128,19 +128,22 @@ original CPU handler replies through the original scheduler-control table, leavi
 the task waiting for another list. Bounded nested external interrupts preserve the
 outer audio-handler context. **The first game-system initialization now returns
 to main in the Windows runner.** With an available output device, a verified run
-now executes eight subsequent original object constructors, including the camera,
+now executes eleven subsequent original object constructors, including the camera,
 and a real 128-byte resource read through original SDK/game DVD completion callbacks.
-With `--max-blocks 10000000`, it stops with **exit code 3** at the next constructor,
-`PC=0x800154A0`, `LR=0x8000ABAC`, which has no native binding yet.
+**The original main loop now enters its first iteration.** Reset dispatch, original
+update-mask calculation, resource-manager preparation and audio-update calls return.
+With `--max-blocks 10000000`, it stops with **exit code 3** at the first
+SystemTask transition, `PC=0x8017755C`, `LR=0x8000AC74`, which has no native binding yet.
 The default one-million-block safety limit can expire before this milestone.
-A deterministic disc test completes 19 lists and 575 DSP data DMAs/172972 bytes.
+A deterministic disc test completes 20 lists and 607 DSP data DMAs/182684 bytes.
 Windows timing changes these counts. Submitted PCM is still original zero samples,
 not intro music; general voice mixing/ADPCM remains unsupported.
 Device/queue errors fail explicitly;
 hosts or library callers without a PCM backend retain the AIStartDMA dependency error.
 No ROM bytes, task-ready mail, mixed samples or task completion are fabricated.
 Draws, unsupported copy modes and texture DMA still fail
-explicitly. Pixel scanout, a game window/intro and the game main loop have not run.
+explicitly. No complete main-loop iteration, pixel scanout, game window/intro or
+rendered game frame has been verified.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.
 The CLI creates an English/NTSC/stereo `native-console.sram` beside the input DOL

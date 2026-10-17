@@ -1060,10 +1060,15 @@ int main(int argc, char** argv) {
                 unsigned pcmHandlers = 0, pcmCallbacks = 0;
                 unsigned commandHandshakes = 0;
                 uint32_t commandAddress = 0;
-                const std::array<uint32_t, 8> objectReturns = {
+                const std::array<uint32_t, 11> objectReturns = {
                     0x8000aa94u, 0x8000aaccu, 0x8000aaecu, 0x8000ab0cu,
-                    0x8000ab2cu, 0x8000ab4cu, 0x8000ab6cu, 0x8000ab8cu};
+                    0x8000ab2cu, 0x8000ab4cu, 0x8000ab6cu, 0x8000ab8cu,
+                    0x8000abacu, 0x8000abccu, 0x8000ac04u};
                 std::vector<uint32_t> returnedObjects;
+                const std::array<uint32_t, 6> loopReturns = {
+                    0x8000ac34u, 0x8000ac44u, 0x8000ac48u, 0x8000ac54u,
+                    0x8000ac58u, 0x8000ac64u};
+                unsigned loopSteps = 0, arrayConstructors = 0;
                 unsigned resourceReads = 0, fileCallbacks = 0, readNotifications = 0;
                 uint64_t resourceBytes = 0;
                 uint32_t pendingReadAddress = 0;
@@ -1110,6 +1115,12 @@ int main(int argc, char** argv) {
                         returnedObjects.push_back(pcmState.gpr[3]);
                     }
                     if (pc == 0x8017acf0u) ++fileCallbacks;
+                    if (pc == 0x80176754u) ++arrayConstructors;
+                    if (std::find(loopReturns.begin(), loopReturns.end(), pc) != loopReturns.end()) {
+                        Require(loopSteps < loopReturns.size() && pc == loopReturns[loopSteps],
+                                "Original first-loop preparation did not execute in main's call order.");
+                        ++loopSteps;
+                    }
                     if (pc == 0x8017b558u) ++readNotifications;
                     if (pc == 0x8017ad4cu) {
                         Require(pcmState.gpr[3] == 0 && ppc_read_u8(pcmState, pcmState.gpr[31] + 0x55) == 1,
@@ -1136,28 +1147,30 @@ int main(int argc, char** argv) {
                           << " reads=" << resourceReads << "/" << resourceBytes
                           << " file callbacks=" << fileCallbacks << "/" << readNotifications << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            pcmResult.pc == 0x800154a0 && pcmResult.lr == 0x8000abac &&
-                            pcmResult.reason == "No native translation registered at 0x800154A0." &&
+                            pcmResult.pc == 0x8017755c && pcmResult.lr == 0x8000ac74 &&
+                            pcmResult.reason == "No native translation registered at 0x8017755C." &&
                             pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
-                            pcmResult.gameInitializationReturned &&
+                            pcmResult.gameInitializationReturned && pcmResult.gameLoopEntered &&
+                            pcmResult.firstLoopPreparationReturned &&
                             pcmState.pcm->active && pcmState.pcm->starts == 1 &&
-                            pcmState.pcm->completedBuffers == 19 && pcmState.pcm->submittedFrames == submittedFrames &&
-                            submittedFrames == 3200 && pcmHandlers == 19 && pcmCallbacks == 19 &&
-                            commandAddress != 0 && commandHandshakes == 19 &&
-                            pcmState.dspHardware->task->cpuMailSent == 67 &&
-                            pcmState.dspHardware->task->cpuMailConsumed == 67 &&
+                            pcmState.pcm->completedBuffers == 20 && pcmState.pcm->submittedFrames == submittedFrames &&
+                            submittedFrames == 3360 && pcmHandlers == 20 && pcmCallbacks == 20 &&
+                            commandAddress != 0 && commandHandshakes == 20 &&
+                            pcmState.dspHardware->task->cpuMailSent == 70 &&
+                            pcmState.dspHardware->task->cpuMailConsumed == 70 &&
                             !(pcmState.dspHardware->toDspMailbox & 0x80000000u) &&
-                            pcmState.dspHardware->task->dataTransfers == 575 &&
-                            pcmState.dspHardware->task->transferredBytes == 172972 &&
+                            pcmState.dspHardware->task->dataTransfers == 607 &&
+                            pcmState.dspHardware->task->transferredBytes == 182684 &&
                             pcmState.dspHardware->instructionPc == 0x4a &&
-                            pcmState.dspHardware->task->interrupts == 20 &&
-                            pcmState.dspHardware->sentMail == 22 && pcmState.dspHardware->consumedMail == 22 &&
+                            pcmState.dspHardware->task->interrupts == 21 &&
+                            pcmState.dspHardware->sentMail == 23 && pcmState.dspHardware->consumedMail == 23 &&
                             pcmState.dspHardware->task->mode == NativeDspTaskMode::Running &&
                             pcmState.dspHardware->completedPrograms == 1 &&
                             !pcmState.systemCallActive && !pcmState.externalInterrupt->active &&
                             pcmState.externalInterrupt->suspended.empty(),
-                        "Original startup objects and resource loading did not reach the next constructor.");
+                        "Original startup did not reach first-loop preparation and the SystemTask boundary.");
                 Require(returnedObjects.size() == objectReturns.size() &&
+                            loopSteps == loopReturns.size() && arrayConstructors == 2 &&
                             pcmResult.startupObjectsReturned == objectReturns.size() &&
                             pcmResult.resourceReadNotifications == readNotifications &&
                             resourceReads == 1 && resourceBytes == 128 &&
@@ -1174,6 +1187,29 @@ int main(int argc, char** argv) {
                             ppc_read_u32(pcmState, camera + 0x54) == 0xc3a00000u &&
                             ppc_read_u32(pcmState, camera + 0x58) == 0x43a00000u,
                         "Original camera construction did not preserve its vtables and 640x448 projection bounds.");
+                const auto object = returnedObjects[8];
+                Require(ppc_read_u32(pcmState, 0x803491d4u) == object &&
+                            ppc_read_u32(pcmState, object) == 0x80298670u &&
+                            ppc_read_u32(pcmState, object + 0x2c) == 19 &&
+                            ppc_read_u32(pcmState, object + 0x30) == 19,
+                        "Original final startup object lost its singleton, vtable or initial state.");
+                for (unsigned offset : {4u, 12u, 20u}) {
+                    Require(ppc_read_u32(pcmState, object + offset) == UINT32_MAX &&
+                                ppc_read_u32(pcmState, object + offset + 4) == 0x80297e90u,
+                            "Original startup object did not initialize all three handles.");
+                }
+                const auto manager = returnedObjects.back();
+                Require(ppc_read_u32(pcmState, 0x803491e0u) == manager &&
+                            ppc_read_u32(pcmState, manager + 0x4c) == 0 &&
+                            ppc_read_u32(pcmState, manager + 0xa8) == 0 &&
+                            ppc_read_u32(pcmState, manager + 0xac) == 0,
+                        "Original final manager did not reset both task lists.");
+                for (unsigned offset : {0x50u, 0x7cu}) {
+                    Require(ppc_read_u32(pcmState, manager + offset + 0x10) == 0x802c9a14u &&
+                                ppc_read_u32(pcmState, manager + offset + 0x24) == 0x802c9a14u &&
+                                ppc_read_u32(pcmState, manager + offset + 0x28) == 0x802c9a20u,
+                            "Original manager array constructor lost its element stride or vtables.");
+                }
                 for (unsigned i = 0; i < 18; ++i) {
                     Require(pcmState.dspHardware->dataRam[0xc00 + i] == ppc_read_u16(pcmState, commandAddress + i * 2),
                             "DSP command-list DMA differs from original CPU RAM.");
@@ -1208,6 +1244,7 @@ int main(int argc, char** argv) {
                             plainPcm.externalInterrupt->returned == pcmState.externalInterrupt->returned &&
                             !plainPcm.externalInterrupt->active && plainPcm.externalInterrupt->suspended.empty() &&
                             plainResult.gameInitializationReturned &&
+                            plainResult.gameLoopEntered && plainResult.firstLoopPreparationReturned &&
                             plainResult.startupObjectsReturned == pcmResult.startupObjectsReturned &&
                             plainResult.resourceReadNotifications == pcmResult.resourceReadNotifications &&
                             plainPcm.discInterface->completedTransfers == pcmState.discInterface->completedTransfers,
@@ -1223,8 +1260,22 @@ int main(int argc, char** argv) {
                             damagedObject.pc == 0x80086044u && damagedObject.gameInitializationReturned &&
                             damagedObject.reason.find("code mismatch") != std::string::npos &&
                             damagedObject.startupObjectsReturned == 0 && damagedObject.resourceReadNotifications == 0 &&
+                            !damagedObject.gameLoopEntered && !damagedObject.firstLoopPreparationReturned &&
                             !damagedCamera.callGuest && !damagedCamera.callException,
                         "Corrupt original camera code fabricated constructor or resource-read completion.");
+                auto damagedLate = CreateOriginalStartupState(image);
+                InstallOriginalStartupDisc(damagedLate, disc);
+                damagedLate.pcm.emplace();
+                uint64_t lateTicks = 1000000, lateFrames = 0;
+                bindPcmTest(damagedLate, lateTicks, lateFrames);
+                ppc_write_u32(damagedLate, 0x800154a0u, 0);
+                const auto rejectedLate = RunOriginalStartup(dispatcher, damagedLate, 10000000);
+                Require(rejectedLate.stop == OriginalStartupStop::Dependency &&
+                            rejectedLate.pc == 0x800154a0u && rejectedLate.startupObjectsReturned == 8 &&
+                            rejectedLate.reason.find("code mismatch") != std::string::npos &&
+                            !rejectedLate.gameLoopEntered && !rejectedLate.firstLoopPreparationReturned &&
+                            !damagedLate.callGuest && !damagedLate.callException,
+                        "Corrupt late constructor fabricated main-loop entry or preparation.");
             }
             auto damagedConstructor = CreateOriginalStartupState(image);
             InstallOriginalStartupDisc(damagedConstructor, disc);

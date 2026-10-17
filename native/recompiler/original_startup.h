@@ -39,6 +39,8 @@ struct OriginalStartupResult {
     bool audioTaskInitReturned = false;
     bool pcmDmaStartReturned = false;
     bool gameInitializationReturned = false;
+    bool gameLoopEntered = false;
+    bool firstLoopPreparationReturned = false;
     uint32_t constructorsReturned = 0;
     uint32_t startupObjectsReturned = 0;
     uint32_t resourceReadNotifications = 0;

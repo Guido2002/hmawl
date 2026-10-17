@@ -170,8 +170,8 @@ Initial silent command lists now execute their output DMA and send their own
 `0xDCD10002` completion mail/IRQ. The original CPU handler responds with
 `0xCDD10003`; the task's scheduler-control dispatch returns to word `0x4A` to wait
 for another list, rather than halting or synthesizing completion. The deterministic
-disc fixture verifies 19 lists, 575 data transfers/172972 bytes, 67/67 CPU mails,
-22/22 DSP mails and 20 task IRQs (including task initialization). Production Windows
+disc fixture verifies 20 lists, 607 data transfers/182684 bytes, 70/70 CPU mails,
+23/23 DSP mails and 21 task IRQs (including task initialization). Production Windows
 counts vary with host time. This does not implement general voice mixing, multiply/
 accumulate or ADPCM; initial output buffers remain silent.
 
@@ -212,8 +212,9 @@ audio parameter/command preparation. The resulting CPU mail is the actual
 `0xBABE0024` header, not an injected test command or synthesized DSP completion.
 The original audio effect callback now runs through raw-low-word `stfiwx` stores.
 The first game-system initialization returns to main at `0x8000AA6C`, followed by
-eight original startup objects and a real DVD resource read. The next unbound
-constructor is `0x800154A0`, called with LR `0x8000ABAC`.
+eleven original startup objects and a real DVD resource read. The original loop
+enters at `0x8000AC34`; preparation returns through `0x8000AC64` before the
+unbound SystemTask transition at `0x8017755C`, called with LR `0x8000AC74`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -382,15 +383,17 @@ submission returns while the DSP executes initialization, additive sample loops,
 output interleave/DMA and its own completion mail/IRQ. The original nested CPU
 handler replies through the task's scheduler-control table.
 A measured runner execution returns from the first game-system initialization
-and, with `--max-blocks 10000000`, executes eight post-system-init constructors
-and a real 128-byte resource read before reaching `PC=0x800154A0`, LR `0x8000ABAC`,
-the next unbound constructor; DSP PC `0x4A` waits for the next list.
+and, with `--max-blocks 10000000`, executes eleven post-system-init constructors
+and a real 128-byte resource read. Its original main loop enters the first iteration;
+reset dispatch, update-mask calculation and resource/audio preparation return.
+It reaches `PC=0x8017755C`, LR `0x8000AC74`, the unbound SystemTask transition;
+DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier. One measured Windows run
 submits 3840 actual RAM frames at 32028 Hz and completes 23 DMA periods.
 These steady-clock counts depend on
 host elapsed time. Host timing can also expose other untranslated startup paths.
 No mixed or audible
-game audio, renderer, scanout or main loop is claimed.
+game audio, renderer, scanout or complete main-loop iteration is claimed.
 The inquiry result remains `0x8001` and the entire real FST is intact.
 The no-PCM deterministic regression uses 1000 ticks per clock sample when AI is stopped,
 and 8 while its sample clock is running, resolving the SDK's sub-sample calibration
@@ -405,16 +408,16 @@ of its stack, SDA and nonvolatile integer/floating registers. Traced and untrace
 startup produce identical RAM, CPU state, AI/DSP/ARAM state, output and sampled time; damaged
 constructor words fail integrity validation without claiming later milestones.
 The separate deterministic PCM fixture uses 8 ticks while either AI sampling or PCM
-DMA is active. 19 actual timed DMA periods execute 19 original handlers/
-callbacks and 19 complete DSP lists. It reaches the same next-constructor boundary
-with 3200 submitted silent frames, 67 CPU mail words sent/consumed, 22 DSP mails
-sent/consumed and 20 task IRQs. The task is still running/waiting, not a completed
+DMA is active. 20 actual timed DMA periods execute 20 original handlers/
+callbacks and 20 complete DSP lists. It reaches the same SystemTask boundary
+with 3360 submitted silent frames, 70 CPU mail words sent/consumed, 23 DSP mails
+sent/consumed and 21 task IRQs. The task is still running/waiting, not a completed
 program; no active or suspended CPU interrupt remains. Observed and unobserved executions
 match RAM/CPU state, DSP DRAM/registers, clock samples, DMA phase/counts and
-interrupt/DSP steps. 575 DSP data DMAs transfer 172972 bytes; all 18 words of the
+interrupt/DSP steps. 607 DSP data DMAs transfer 182684 bytes; all 18 words of the
 last command list match the actual CPU RAM source. The original CPU submission
-handshake completes 19 times, and game-system initialization returns to main.
-Eight subsequent original object constructors return in the actual main-call order.
+handshake completes 20 times, and game-system initialization returns to main.
+Eleven subsequent original object constructors return in the actual main-call order.
 Tests verify the camera's actual vtable pointers and signed projection bounds for
 the 640x448 screen. The resource read uses the original 13-status eligibility table,
 low-level SDK read, SDK forwarding callback, game DvdFile virtual callback and
@@ -423,11 +426,19 @@ in guest RAM before any resource processing; the original completed-read flag is
 also checked. Original completed-read cancellation/close dispatch uses its own
 13-entry table. Both tables have explicit build-time target guards. No native
 replacement resource constructor or callback fabricates completion.
-The game main loop, GX renderer,
-general scheduled game-thread execution, input and saves have not run.
+The final three constructors, two array elements, singleton/vtable state and three
+handle initializations are verified. First-loop entry and six ordered preparation
+blocks are checked through the original reset/update/resource/audio calls.
+Corrupt late constructor code is rejected before reporting any loop entry.
+No complete loop iteration, GX renderer, general scheduled game-thread execution,
+connected input or saves have been verified.
 
-The next connected startup milestone is the original game-object constructor at
-`0x800154A0` and its dependencies toward the main loop. General voice processing/
+The next connected milestone is the original SystemTask transition at
+`0x8017755C` and its dependencies toward completing the first loop iteration.
+Unrestricted traversal from this transition exceeds the existing 100000-instruction
+discovery bound; keep that bound and scope the next compilation to actual paths
+and original indirect targets rather than compiling the entire game graph.
+General voice processing/
 ADPCM remains an audio dependency, not a reason to substitute a replacement mixer.
 The native loader, task startup, initial command output/completion and Windows PCM
 backend are present.
@@ -586,7 +597,7 @@ complete original task IRAM bytes and guards, host/DSP mailbox counts, actual
 task interrupt and CPU callback, running/waiting versus completed program state,
 and corrupt-task rejection before IRAM upload or init callback,
 original PCM start/remaining/reload/handler/buffer callback, real DSP header/pointer
-consumption, exact command-list copy, 575 data DMAs, 19 original list completions,
+consumption, exact command-list copy, 607 data DMAs, 20 original list completions,
 all-silent submitted samples, system-initialization return and next-constructor
 dependency, system-call/nested-interrupt returns and complete observed/unobserved
 PCM-path equivalence using an explicitly test-only output sink,

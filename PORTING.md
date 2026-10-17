@@ -71,13 +71,15 @@ Original initialization, additive sample loops, stereo interleave and output DMA
 execute through the task's own completion mail/IRQ and original CPU control reply.
 Bounded nested external interrupts let DSP completion interrupt the original audio
 handler and restore both contexts. The first game-system initialization now returns
-to main. Eight subsequent original startup objects now return, and an actual
+to main. Eleven subsequent original startup objects now return, and an actual
 128-byte resource read completes through original SDK/game DVD callbacks.
 With `--max-blocks 10000000`, the measured Windows runner boundary is the next
-unbound constructor at `PC=0x800154A0`, LR `0x8000ABAC`; DSP PC `0x4A` waits for another list.
+unbound SystemTask transition at `PC=0x8017755C`, LR `0x8000AC74`; DSP PC `0x4A` waits for another list.
+The original main loop enters its first iteration and its reset/update/resource/
+audio preparation returns, but no complete iteration or rendered frame is verified.
 The default one-million-block limit can expire earlier.
-A deterministic disc fixture completes 19 lists, 575 data DMAs/172972 bytes and
-19 original PCM callbacks. Real Windows timing changes these totals.
+A deterministic disc fixture completes 20 lists, 607 data DMAs/182684 bytes and
+20 original PCM callbacks. Real Windows timing changes these totals.
 General voice mixing/ADPCM remains untranslated. The original PCM buffers contain
 zero samples; Windows buffer acceptance is not proof of audible game audio.
 Callers without a PCM backend still fail explicitly at original AIStartDMA.
@@ -701,6 +703,18 @@ queue. Full runtime scheduling and device services are still needed.
   match full CPU/RAM, DSP/PCM timing and disc-transfer counts.
   The Windows runner with `--max-blocks 10000000` reaches the next unbound
   constructor `0x800154A0`, LR `0x8000ABAC`; no main loop or game frame ran.
+- [x] Finish the remaining main-startup constructors and enter the original loop.
+  Compile the final three original constructors, their two-element array callback,
+  SystemTask request setup and first-loop reset/update/resource/audio preparation.
+  Verify all eleven startup returns in original call order, singleton/vtable state,
+  three initialized handles, both array-element strides/vtables and empty task lists.
+  Verify ordered first-loop return blocks through `0x8000AC64`, observer-free
+  CPU/RAM equivalence and corrupt late-constructor rejection before loop entry.
+  Both the deterministic RVZ test and real Windows PCM runner enter the loop at
+  `0x8000AC34` and stop at unbound SystemTask transition `0x8017755C`, LR `0x8000AC74`.
+  This is first-iteration preparation, not a completed iteration, scene or game frame.
+  Keep discovery bounded: compiling the entire SystemTask transition graph currently
+  exceeds the existing 100000-instruction safety bound and needs a scoped approach.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -913,9 +927,11 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue the original game-object construction at `0x800154A0` and its connected
-   dependencies toward the remaining game initialization and main loop. Eight
-   post-system-init objects and a real resource read now complete. The first
+1. Continue the original SystemTask transition at `0x8017755C` and its connected
+   dependencies toward a completed first main-loop iteration and initial scene.
+   Eleven post-system-init objects and a real resource read now complete, and
+   first-loop preparation returns. Scope discovery to the actual transition and
+   indirect targets instead of lifting the existing compiler safety bound. The first
    game-system initialization now returns to main in the Windows runner; original
    DSP lists reach their own output/completion and resume waiting for new work.
    Output buffers still contain original zero samples, and general voice processing,

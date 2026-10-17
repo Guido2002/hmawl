@@ -160,7 +160,10 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
             if (pc == 0x8000aa6cu) result.gameInitializationReturned = true;
             if (pc == 0x8000aa94u || pc == 0x8000aaccu || pc == 0x8000aaecu ||
                 pc == 0x8000ab0cu || pc == 0x8000ab2cu || pc == 0x8000ab4cu ||
-                pc == 0x8000ab6cu || pc == 0x8000ab8cu) ++result.startupObjectsReturned;
+                pc == 0x8000ab6cu || pc == 0x8000ab8cu || pc == 0x8000abacu ||
+                pc == 0x8000abccu || pc == 0x8000ac04u) ++result.startupObjectsReturned;
+            if (pc == 0x8000ac34u) result.gameLoopEntered = true;
+            if (pc == 0x8000ac64u) result.firstLoopPreparationReturned = true;
             if (pc == 0x8017ad4cu && state.gpr[3] == 0) ++result.resourceReadNotifications;
             if (pc == 0x8000ad5cu) result.memoryInitialized = true;
             if (pc == 0x8017a3e0u) result.screenInitEntered = true;
@@ -225,6 +228,8 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     if (result.gameInitializationReturned) text << "Original initial game-system initialization returned to main. ";
     if (result.startupObjectsReturned) text << result.startupObjectsReturned << " original post-system-init objects returned. ";
     if (result.resourceReadNotifications) text << result.resourceReadNotifications << " original DVD resource-read notifications completed. ";
-    text << "This is NOT a game boot; no game main loop or renderer ran.";
+    if (result.gameLoopEntered) text << "Original main loop entered its first iteration. ";
+    if (result.firstLoopPreparationReturned) text << "Original first-loop preparation returned before SystemTask transition. ";
+    text << "This is NOT a playable game boot; no complete game-loop iteration or rendered frame is verified.";
     return text.str();
 }

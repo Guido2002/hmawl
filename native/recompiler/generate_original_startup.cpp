@@ -101,7 +101,10 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
     // Post-system-init object constructors, without pulling in the entire main-loop graph.
     for (uint32_t target : {0x80086044u, 0x8017cd5cu, 0x801770f8u, 0x801548a4u,
                             0x80140b20u, 0x8012f3e0u, 0x8012ac64u, 0x80197150u, 0x80174d64u,
-                            0x80175530u, 0x80175548u}) {
+                            0x80175530u, 0x80175548u, 0x800154a0u, 0x80148f78u,
+                            0x80149178u, 0x8014919cu, 0x8017617cu, 0x8017767cu,
+                            0x80176754u, 0x801766c0u, 0x8000cca4u, 0x80012568u,
+                            0x8017bd04u, 0x8017d3e8u, 0x8019b560u}) {
         leaders.insert(target);
         pending.push_back(target);
     }
