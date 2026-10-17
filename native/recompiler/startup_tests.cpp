@@ -1117,9 +1117,15 @@ void RunInterruptPiSetupToDevice(PpcState& state) {
     ppc_write_u32(expected, stack - 0x18u, state.gpr[30]);
     ppc_write_u32(expected, stack - 0x1cu, state.gpr[29]);
     ppc_write_u32(expected, 0x800000c4u, 0xffffffe0u);
+    unsigned exiChannels = 0;
+    while (exiChannels < 3 && state.exiStatus[exiChannels].has_value()) ++exiChannels;
+    const bool completed = exiChannels == 3;
+    if (completed) {
+        ppc_write_u32(expected, ppc_read_u32(expected, 0x803495e4u) + 0x10u, 0x801b4260u);
+    }
     unsigned calls = 0;
     state.callGuest = [&](uint32_t address, PpcState& guest) {
-        Require(++calls < 10, "PI startup exceeded its dependency budget.");
+        Require(++calls < 16, "Interrupt startup exceeded its dependency budget.");
         switch (address) {
         case 0x800054e4u: ppc_800054E4(guest); break;
         case 0x80005514u: ppc_80005514(guest); break;
@@ -1129,6 +1135,8 @@ void RunInterruptPiSetupToDevice(PpcState& state) {
             ppc_801B3E0C(guest);
             break;
         case 0x801b3a44u: ppc_801B3A44(guest); break;
+        case 0x801b3a6cu: ppc_801B3A6C(guest); break;
+        case 0x801b1460u: ppc_801B1460(guest); break;
         case 0x801b3b34u: ppc_801B3B34(guest); break;
         default:
             throw std::runtime_error("Unexpected PI startup dependency: " +
@@ -1144,21 +1152,34 @@ void RunInterruptPiSetupToDevice(PpcState& state) {
     const bool miEnabled = state.miInterruptMask.has_value();
     const bool dspEnabled = state.dspControl.has_value();
     const bool aiEnabled = state.aiControl.has_value();
-    Require(rejected && calls == (aiEnabled ? 8u : dspEnabled ? 7u : miEnabled ? 6u : 5u) &&
+    for (unsigned channel = 0; channel < exiChannels; ++channel) {
+        Require(state.exiStatus[channel] ==
+                    (*expected.exiStatus[channel] & ~(channel == 2 ? 0x5u : 0x405u)),
+                "Original EXI masking damaged pending status, presence or clock bits.");
+    }
+    Require(rejected != completed &&
+                calls == (completed ? 13u : aiEnabled ? 8u + exiChannels :
+                          dspEnabled ? 7u : miEnabled ? 6u : 5u) &&
                 state.piInterruptMask == 0xf0u &&
                 ppc_read_u32(state, 0x800000c4u) == 0xffffffe0u &&
                 ppc_read_u32(state, 0x800000c8u) == 0 &&
                 (!dspEnabled || state.dspControl == (*expected.dspControl & ~0x0150u)) &&
                 (!aiEnabled || state.aiControl == (*expected.aiControl & ~0x4u)) &&
-                (aiEnabled ? state.miInterruptMask == 0 &&
+                (completed ? state.miInterruptMask == 0 &&
+                    state.pc == expected.lr && state.lr == expected.lr &&
+                    state.gpr[29] == expected.gpr[29] && state.gpr[30] == expected.gpr[30] &&
+                    state.gpr[31] == expected.gpr[31] :
+                 exiChannels == 2 ? state.gpr[5] == 0xcc006828u && state.gpr[0] == 0x10000u :
+                 exiChannels == 1 ? state.gpr[6] == 0xcc006814u && state.gpr[0] == 0x80000u :
+                 aiEnabled ? state.miInterruptMask == 0 &&
                     state.gpr[5] == 0xcc000000u && state.gpr[0] == 0x00400000u :
                  dspEnabled ? state.miInterruptMask == 0 &&
                     state.gpr[4] == 0xcc000000u && state.gpr[0] == 0x00800000u :
                  miEnabled ? state.miInterruptMask == 0 &&
                     state.gpr[5] == 0xcc00500au && state.gpr[0] == 0x04000000u :
                     state.gpr[4] == 0xcc004000u && state.gpr[0] == 0) &&
-                !state.externalInterruptsEnabled &&
-                state.gpr[1] == stack - 0x30u &&
+                state.externalInterruptsEnabled == (completed && expected.externalInterruptsEnabled) &&
+                state.gpr[1] == (completed ? stack : stack - 0x30u) &&
                 state.memory == expected.memory &&
                 state.fpr == expected.fpr && state.fpscr == expected.fpscr &&
                 state.gqr == expected.gqr && state.msr == expected.msr &&
@@ -1196,6 +1217,19 @@ void TestOriginalInterruptPiSetup(const DolImage& image) {
             state.aiControl = control;
             RunInterruptPiSetupToDevice(state);
         }
+        for (uint32_t status : {0u, 0x405u, 0x1c7fu}) {
+            for (unsigned channels = 1; channels <= 3; ++channels) {
+                state = before;
+                state.miInterruptMask = 0x1fu;
+                state.dspControl = 0x7fcu;
+                state.aiControl = 0x5eu;
+                ppc_write_u32(state, 0x803495e4u, 0x80003000u);
+                for (unsigned channel = 0; channel < channels; ++channel) {
+                    state.exiStatus[channel] = status & (channel == 2 ? 0x7fu : 0x1c7fu);
+                }
+                RunInterruptPiSetupToDevice(state);
+            }
+        }
     }
     std::cout << "Opt-in PI mask register accepts original 0xf0 startup write; original "
                  "__OSMaskInterrupts/SetInterruptMask then reject MI write at 0x801b3be0 "
@@ -1209,6 +1243,9 @@ void TestOriginalInterruptPiSetup(const DolImage& image) {
     std::cout << "With opt-in idle AI control, original masking disables the AI interrupt "
                  "without acknowledging pending status; next unsupported access is EXI "
                  "channel 0 control at 0x801b3c7c (0xcc006800).\n";
+    std::cout << "With all three idle EXI status registers enabled, original interrupt "
+                 "initialization returns, restores interrupts/ABI and installs the external "
+                 "exception handler. No EXI transfers or interrupt delivery implemented.\n";
 }
 
 void TestOriginalInterruptHandlerAccessors(const DolImage& image) {
@@ -1507,6 +1544,16 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     RunInterruptPiSetupToDevice(state);
     std::cout << "With opt-in PI/MI/DSP/AI state, entry-derived setup reaches unsupported "
                  "EXI channel 0 control read at 0x801b3c7c; OSInit remains incomplete.\n";
+    state = firstTime;
+    state.lr = 0x801b0f70u;
+    state.piInterruptMask = 0;
+    state.miInterruptMask = 0x1fu;
+    state.dspControl = 0x7fcu;
+    state.aiControl = 0x5eu;
+    state.exiStatus = {0x1c7fu, 0x1c7fu, 0x7fu};
+    RunInterruptPiSetupToDevice(state);
+    std::cout << "Entry-derived original interrupt initialization returns to 0x801b0f70 "
+                 "with opt-in device state. Remaining OSInit code is not executed.\n";
 }
 
 void TestOriginalArenaAccessors(const DolImage& image) {

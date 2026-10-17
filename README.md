@@ -410,6 +410,22 @@ at `0x801b3c7c` (`0xcc006800`), independently and from entry-derived state with
 exact RAM/stack guards. No audio playback, sample-counter progression or interrupt
 delivery is implemented; the completed OSInit prefix remains unchanged.
 
+Optional EXI status state covers the three 32-bit channel parameter registers
+at `0xcc006800`, `0xcc006814` and `0xcc006828`, independently enabled.
+Only idle startup interrupt-disable writes are supported: pending write-one-to-clear
+flags, channel 0/1 device presence and clock bits are retained. Chip selection,
+ROM-disable state, enabling interrupts, acknowledgements, reserved bits, transfers
+and other register accesses remain explicitly unsupported. Tests exhaust all
+1,024 supported initial combinations for each of channels 0/1 and 128 for channel 2,
+including repeated writes, access rejection and DVD callback persistence.
+With all startup device registers enabled, original `__OSInterruptInit` now
+completes: it clears the software masks/table, disables device interrupt enables,
+installs `ExternalInterruptHandler` and restores interrupts, stack and callee-saved
+registers. Exact RAM/stack writes and partial opt-in boundaries are tested.
+Entry-derived execution returns to `0x801b0f70`; the existing OSInit prefix fixture
+still ends before this call and remaining OSInit code is not executed. This does
+not implement EXI devices, memory-card transfers or hardware interrupt delivery.
+
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings
 and do not suppress dispatch code-word checks. Original `DCFlushRangeNoSync`

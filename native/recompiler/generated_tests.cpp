@@ -892,6 +892,111 @@ void TestAndComplement() {
     }
 }
 
+void TestExiStatus() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    const auto ram = state.memory;
+    const auto rejectAccess = [&](auto operation) {
+        const auto before = state.exiStatus;
+        bool rejected = false;
+        try {
+            operation();
+        } catch (const std::out_of_range&) {
+            rejected = true;
+        }
+        Require(rejected && state.exiStatus == before && state.memory == ram,
+                "Unsupported EXI access changed register state or RAM.");
+    };
+    for (unsigned channel = 0; channel < 3; ++channel) {
+        const uint32_t address = 0xcc006800u + channel * 0x14u;
+        state.gpr[4] = address;
+        rejectAccess([&] { ppc_0000B200(state); });
+        rejectAccess([&] { ppc_0000B210(state); });
+        const uint32_t supported = channel == 2 ? 0x7fu : 0x1c7fu;
+        const uint32_t command = channel == 2 ? 0x70u : 0x1070u;
+        unsigned combinations = 0;
+        for (uint32_t initial = 0; initial <= supported; ++initial) {
+            if ((initial & ~supported) != 0) continue;
+            ++combinations;
+            state.exiStatus[channel] = initial;
+            state.cr = 0x12345678u;
+            state.xer = 0xe0000000u;
+            ppc_0000B200(state);
+            Require(state.gpr[3] == initial && state.pc == 0xb204u,
+                    "Compiled EXI status readback differs.");
+            for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                state.gpr[3] = initial & command;
+                ppc_0000B210(state);
+                ppc_0000B200(state);
+                Require(state.gpr[3] == (initial & (channel == 2 ? 0x7au : 0x187au)) &&
+                            state.cr == 0x12345678u && state.xer == 0xe0000000u,
+                        "EXI masking changed status, presence, clock or CPU flags.");
+            }
+        }
+        Require(combinations == (channel == 2 ? 128u : 1024u) && state.memory == ram,
+                "EXI state coverage or RAM preservation differs.");
+        const auto rejectWrite = [&](uint32_t previous, uint32_t value) {
+            state.exiStatus[channel] = previous;
+            const auto before = state.exiStatus;
+            state.gpr[3] = value;
+            state.pc = 0xb210u;
+            bool rejected = false;
+            try {
+                ppc_0000B210(state);
+            } catch (const std::runtime_error& error) {
+                rejected = std::string(error.what()).find("only idle startup interrupt masking") != std::string::npos;
+            }
+            Require(rejected && state.exiStatus == before && state.memory == ram &&
+                        state.gpr[3] == value && state.pc == 0xb210u,
+                    "Unsupported EXI control write changed state.");
+        };
+        for (unsigned bit = 0; bit < 32; ++bit) {
+            rejectWrite(supported, command ^ (1u << bit));
+            if ((supported & (1u << bit)) == 0) {
+                const uint32_t previous = supported | (1u << bit);
+                rejectWrite(previous, previous & command);
+            }
+        }
+        state.exiStatus[channel] = supported;
+        for (uint32_t offset : {1u, 2u, 3u, 4u, 8u, 12u, 16u}) {
+            state.gpr[4] = address + offset;
+            rejectAccess([&] { ppc_0000B200(state); });
+            rejectAccess([&] { ppc_0000B210(state); });
+        }
+        state.gpr[4] = address - 0xc0000000u;
+        rejectAccess([&] { ppc_0000B200(state); });
+        rejectAccess([&] { ppc_0000B210(state); });
+        for (unsigned width : {1u, 2u, 8u}) {
+            rejectAccess([&] {
+                if (width == 1) (void)ppc_read_u8(state, address);
+                else if (width == 2) (void)ppc_read_u16(state, address);
+                else (void)ppc_read_u64(state, address);
+            });
+            rejectAccess([&] {
+                if (width == 1) ppc_write_u8(state, address, 0);
+                else if (width == 2) ppc_write_u16(state, address, 0);
+                else ppc_write_u64(state, address, 0);
+            });
+        }
+        state.exiStatus[channel].reset();
+        state.gpr[4] = address;
+        rejectAccess([&] { ppc_0000B200(state); });
+    }
+    state.exiStatus = {0x1c7fu, 0x1c7fu, 0x7fu};
+    state.gpr[4] = 0xc0001000u;
+    state.gpr[3] = 0x12345678u;
+    ppc_0000B210(state);
+    ppc_0000B200(state);
+    Require(state.gpr[3] == 0x12345678u && state.exiStatus[0] == 0x1c7fu &&
+                state.exiStatus[1] == 0x1c7fu && state.exiStatus[2] == 0x7fu,
+            "EXI support changed RAM access or unrelated channels.");
+    state.memoryMap = PpcMemoryMap::Flat;
+    ppc_write_u32(state, 4, 0x12345678u);
+    Require(ppc_read_u32(state, 4) == 0x12345678u && state.exiStatus[0] == 0x1c7fu,
+            "EXI option changed flat-memory semantics.");
+}
+
 void TestAiControl() {
     PpcState state;
     state.memoryMap = PpcMemoryMap::GameCubeRam;
@@ -1992,6 +2097,7 @@ int main() {
         TestMiInterruptMask();
         TestDspControl();
         TestAiControl();
+        TestExiStatus();
         TestAndComplement();
         TestCacheBlockInstructions();
         TestL2ControlRegisters();

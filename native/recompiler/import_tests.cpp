@@ -434,6 +434,9 @@ void TestNativeDvdQueue() {
         ppc_write_u16(guest, 0xcc00401cu, 0);
         ppc_write_u16(guest, 0xcc00500au, 0x604u);
         ppc_write_u32(guest, 0xcc006c00u, 0x52u);
+        ppc_write_u32(guest, 0xcc006800u, 0x1070u);
+        ppc_write_u32(guest, 0xcc006814u, 0x1070u);
+        ppc_write_u32(guest, 0xcc006828u, 0x70u);
     };
     state.gpr[1] = 0x8035cfa0u;
     state.lr = 0x80003000u;
@@ -460,6 +463,7 @@ void TestNativeDvdQueue() {
     state.miInterruptMask = 0x1fu;
     state.dspControl = 0x7fcu;
     state.aiControl = 0x5eu;
+    state.exiStatus = {0x1c7fu, 0x1c7fu, 0x7fu};
     const auto monitor = state.performanceMonitor;
     const auto prepare = [&](uint32_t block, uint32_t destination, uint32_t priority) {
         const auto offset = ppc_memory_offset(state, block, 0x3c);
@@ -508,6 +512,8 @@ void TestNativeDvdQueue() {
                     state.performanceMonitor == monitor && state.piInterruptMask == 0xf0u &&
                     state.miInterruptMask == 0 && state.dspControl == 0x6acu &&
                     state.aiControl == 0x5au &&
+                    state.exiStatus[0] == 0x187au && state.exiStatus[1] == 0x187au &&
+                    state.exiStatus[2] == 0x7au &&
                     state.pc == 0x80003004u && state.externalInterruptsEnabled,
                 "DVD completion priority/FIFO, status, result or CPU restoration differs.");
     }
@@ -524,6 +530,7 @@ void TestNativeDvdQueue() {
     state.miInterruptMask = 0x1fu;
     state.dspControl = 0x7fcu;
     state.aiControl = 0x5eu;
+    state.exiStatus = {0x1c7fu, 0x1c7fu, 0x7fu};
     queue.Cancel(state);
     Require(queue.pending() == 0 && ppc_read_u32(state, info + 0xc) == 10 &&
                 events[3] == std::make_pair(0xfffffffdu, 0xc0001000u) &&
@@ -537,7 +544,8 @@ void TestNativeDvdQueue() {
                 state.hid0 == 0xc200u && state.l2cr == 0x80000000u &&
                 state.performanceMonitor == monitor && state.piInterruptMask == 0xf0u &&
                 state.miInterruptMask == 0 && state.dspControl == 0x6acu &&
-                state.aiControl == 0x5au,
+                state.aiControl == 0x5au && state.exiStatus[0] == 0x187au &&
+                state.exiStatus[1] == 0x187au && state.exiStatus[2] == 0x7au,
             "DVD cancellation callback damaged floating-point context.");
     const auto rejectSubmit = [&](const char* message) {
         const auto before = state.memory;
@@ -599,12 +607,16 @@ void TestNativeDvdQueue() {
         ppc_write_u16(guest, 0xcc00401cu, 0);
         ppc_write_u16(guest, 0xcc00500au, 0x604u);
         ppc_write_u32(guest, 0xcc006c00u, 0x52u);
+        ppc_write_u32(guest, 0xcc006800u, 0x1070u);
+        ppc_write_u32(guest, 0xcc006814u, 0x1070u);
+        ppc_write_u32(guest, 0xcc006828u, 0x70u);
         throw std::runtime_error("Intentional DVD callback failure.");
     };
     state.piInterruptMask = 0;
     state.miInterruptMask = 0x1fu;
     state.dspControl = 0x7fcu;
     state.aiControl = 0x5eu;
+    state.exiStatus = {0x1c7fu, 0x1c7fu, 0x7fu};
     const uint32_t previousPc = state.pc;
     const std::vector<uint32_t> beforeThrowRegisters(std::begin(state.gpr), std::end(state.gpr));
     Reject([&] { queue.Pump(); }, "Intentional DVD callback failure");
@@ -619,7 +631,8 @@ void TestNativeDvdQueue() {
                 state.hid0 == 0xc200u && state.l2cr == 0x80000000u &&
                 state.performanceMonitor == monitor && state.piInterruptMask == 0xf0u &&
                 state.miInterruptMask == 0 && state.dspControl == 0x6acu &&
-                state.aiControl == 0x5au,
+                state.aiControl == 0x5au && state.exiStatus[0] == 0x187au &&
+                state.exiStatus[1] == 0x187au && state.exiStatus[2] == 0x7au,
             "Throwing DVD callback damaged floating-point context.");
     prepare(info, output, 0);
     queue.Submit(state);

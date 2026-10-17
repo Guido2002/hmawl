@@ -303,6 +303,18 @@ queue. Full runtime scheduling and device services are still needed.
   now reaches the unsupported AI control read (`0x801b3c4c`, `0xcc006c00`);
   verify independently and from entry-derived state. No DSP/audio/DMA execution
   or interrupt delivery; OSInit remains incomplete.
+- [x] Add independently opt-in EXI status registers for all three channels
+  (`0xcc006800/14/28`, 32-bit), supporting idle startup interrupt masking.
+  Retain pending write-one-to-clear flags, read-only presence and clock bits;
+  reject chip selection, ROM-disable state, acknowledgements, enable writes,
+  reserved bits and unsupported access forms. Exhaust 1,024 supported initial
+  combinations per channel 0/1 and 128 for channel 2; test repeats, no mutation
+  on rejection, ordinary RAM/flat memory and DVD callback device persistence.
+  Original `__OSInterruptInit` now completes with all startup registers enabled:
+  external exception handler installation, interrupt/ABI restoration and exact
+  RAM/stack guards pass independently and from entry-derived state, returning
+  to `0x801b0f70`. The OSInit prefix fixture still ends at `0x801b0f6c`;
+  remaining OSInit code is not executed. No EXI transfers or interrupt delivery.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

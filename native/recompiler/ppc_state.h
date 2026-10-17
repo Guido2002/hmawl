@@ -50,6 +50,7 @@ struct PpcState {
     std::optional<uint16_t> miInterruptMask;
     std::optional<uint16_t> dspControl;
     std::optional<uint32_t> aiControl;
+    std::array<std::optional<uint32_t>, 3> exiStatus;
     bool externalInterruptsEnabled = true;
 };
 
@@ -136,6 +137,11 @@ inline void ppc_flush_cache_block(const PpcState& state, uint32_t address) {
 }
 
 inline uint32_t ppc_read_u32(const PpcState& state, uint32_t address) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam &&
+        (address == 0xcc006800u || address == 0xcc006814u || address == 0xcc006828u)) {
+        const auto& status = state.exiStatus[(address - 0xcc006800u) / 0x14u];
+        if (status.has_value()) return *status;
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc006c00u &&
         state.aiControl.has_value()) {
         return *state.aiControl;
@@ -203,6 +209,22 @@ inline uint16_t ppc_read_u16(const PpcState& state, uint32_t address) {
 }
 
 inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
+    if (state.memoryMap == PpcMemoryMap::GameCubeRam &&
+        (address == 0xcc006800u || address == 0xcc006814u || address == 0xcc006828u)) {
+        const unsigned channel = (address - 0xcc006800u) / 0x14u;
+        auto& status = state.exiStatus[channel];
+        if (status.has_value()) {
+            const uint32_t previous = *status;
+            const uint32_t supported = channel == 2 ? 0x7fu : 0x1c7fu;
+            const uint32_t written = channel == 2 ? 0xfu : channel == 0 ? 0x2c0fu : 0xc0fu;
+            if ((previous & ~supported) != 0 || value != (previous & ~written)) {
+                throw std::runtime_error("Unsupported EXI status write (only idle startup interrupt masking supported).");
+            }
+            // Zero in W1C fields retains pending status; EXT is read-only.
+            *status = previous & ~(channel == 2 ? 0x5u : 0x405u);
+            return;
+        }
+    }
     if (state.memoryMap == PpcMemoryMap::GameCubeRam && address == 0xcc006c00u &&
         state.aiControl.has_value()) {
         const uint32_t previous = *state.aiControl;
