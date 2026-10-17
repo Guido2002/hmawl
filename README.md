@@ -19,3 +19,431 @@ Unfortunately, the disassembled rels, when built, do not 100% match the original
 
 # Contributions
 Contributions and PRs are more than welcome!
+
+# Native recompilation status
+The native port is intended to be a **static recompile**: translate the US
+GameCube build's PowerPC game code to native Windows machine code, then run it
+with Windows implementations of the GameCube platform services. The Windows
+program must load game data supplied from the user's own disc image; it must
+not start Dolphin or contain the game's assets.
+
+That pipeline is **not implemented yet**. This repository currently contains a
+partial GameCube decompilation, and its Makefile builds GameCube DOL/REL files,
+not native game code. A new experimental tool can read code ranges from an
+DOL text section and translate a small subset of integer PowerPC instructions
+to C++. It can also extract and verify the original US revision 0 executables
+from a GameCube RVZ. It cannot yet discover all game functions, translate the
+full instruction set, or run the game. No playable native Windows version is
+available yet.
+
+The recompiler can inspect the disc ID and revision from the RVZ header without
+extracting or modifying the image:
+
+```powershell
+build/native/native/recompiler/Release/hmawl_recompiler.exe --inspect-rvz "Harvest Moon - A Wonderful Life (USA).rvz"
+```
+
+Extract the original DOL, file-system table, and three REL modules into a
+**new** local output directory:
+
+```powershell
+build\native\native\recompiler\Release\hmawl_recompiler.exe --extract-rvz "Harvest Moon - A Wonderful Life (USA).rvz" build\game-us-r0
+```
+
+The importer requires disc ID `GYWEE9`, disc 0, revision 0. It verifies the RVZ
+header hashes, decompresses only the required groups, decodes RVZ literal/PRNG
+packing, validates the DOL/FST structure, and checks all four executable SHA-1
+hashes listed above **before writing anything**. Existing output directories
+are refused to avoid overwriting local files. An I/O failure is reported and
+may leave a partial output directory; choose a new directory for a retry.
+The source image is opened read-only. Keep extracted files in the ignored
+`build/` tree; do not commit or redistribute game code or assets.
+
+Supported input is GameCube RVZ using NONE or Zstandard compression; Wii,
+other compression methods, ISO/GCM import, and bulk resource extraction are
+not implemented. Parsing has explicit size limits (64 MiB per executable/FST
+and decompressed metadata table, and chunks up to 64 MiB).
+
+Individual disc resources can now be listed and read without extracting the
+whole disc. The executable importer and resource reader share the validated
+FST parser, including directory hierarchy, duplicate-path and disc-range checks.
+Disc paths are exact, case-sensitive FST paths with `/` separators; they are
+not Windows filesystem paths and are not normalized.
+
+```powershell
+build\native\native\recompiler\Release\hmawl_recompiler.exe --list-rvz-files "Harvest Moon - A Wonderful Life (USA).rvz"
+build\native\native\recompiler\Release\hmawl_recompiler.exe --extract-rvz-file "Harvest Moon - A Wonderful Life (USA).rvz" arowana.arc build\arowana.arc
+```
+
+Listing outputs tab-separated path, byte length and logical disc offset.
+Single-file extraction refuses an existing output; parent folders must exist.
+Unlike `--extract-rvz`, these generic disc-file commands do not certify the
+US executable hashes. They return raw file bytes without asset decompression.
+
+For the game's version-0 `CLZ` resources, a separate command decompresses the
+selected disc file into a **new** local output file:
+
+```powershell
+build\native\native\recompiler\Release\hmawl_recompiler.exe --extract-rvz-clz "Harvest Moon - A Wonderful Life (USA).rvz" roomcommon.arc.clz build\roomcommon.arc
+```
+
+This uses a checked decoder with a 24 MiB output limit, rejecting truncated
+headers/tokens, invalid block sizes/strides and out-of-window back-references
+before creating output. The displayed size and SHA-1 describe the decompressed
+bytes. RVZ container compression and game CLZ asset compression are separate.
+
+The recompiler foundation has unit tests and can be built on Windows with CMake
+and Visual Studio 2019 or newer. The first configure needs Git and internet
+access to fetch Zstandard 1.5.7, pinned to commit
+`f8745da6ff1ad1e7bab384bd1f9d742439278e99`. It is built and linked statically;
+no Dolphin installation or external Zstandard executable is needed.
+For an offline build, pre-provision that source tree and pass
+`-DFETCHCONTENT_SOURCE_DIR_ZSTD=<local-source-directory>` to CMake.
+
+```powershell
+cmake -S . -B build/native -G "Visual Studio 16 2019" -A x64
+cmake --build build/native --config Release
+ctest --test-dir build/native -C Release --output-on-failure
+```
+
+The `hmawl_recompiler` tool can inspect/import an RVZ, or take an extracted
+DOL, a guest code address, and a byte count, and write translated C++ for that
+range:
+
+```powershell
+build\native\native\recompiler\Release\hmawl_recompiler.exe build\game-us-r0\main.dol 0x80003100 0x40 build\translated.cpp
+```
+
+The importer test target `hmawl_import_tests` uses synthetic images, including
+compressed/uncompressed and zero groups, chunk-boundary reads, literal/PRNG
+packing, malformed headers/tables/FST, and SHA-1 known-answer vectors. Tests do
+not require a game image.
+
+### Compiled startup tests
+
+`hmawl_generated_tests` tests the actual generated C++ after the host compiler
+has built it, rather than only inspecting emitted strings. It covers register
+logical operations, shifts (including counts above 63), CR0, XER carry, CTR/XER
+transfers, conditional calls and multiple-register loads.
+Signed/unsigned register comparisons and `nor.` are also executed against
+expected results, including nonzero CR fields and preservation of XER SO.
+
+To also compile and test selected original startup functions from your verified
+DOL, opt in locally:
+
+```powershell
+cmake -S . -B build\native -DHMAWL_US_DOL="C:\path\to\hmawl\build\game-us-r0\main.dol"
+cmake --build build\native --config Release
+ctest --test-dir build\native -C Release --output-on-failure
+```
+
+This adds `hmawl_us_startup_tests`. Generation and execution both verify the
+US revision 0 DOL hash. Generated game-derived code stays in the ignored build
+tree and is never committed. Leave `HMAWL_US_DOL` empty to build only synthetic
+tests without game data.
+
+The optional tests load DOL sections into a zero-initialized 24 MiB RAM model
+with physical/cached/uncached aliases. They execute the original entry point's
+first call and register initialization, pad/reset check, SDA flag helpers,
+byte-copy routine, and argument-pointer relocation. The reset service is a
+test callback, not an implemented runtime service.
+
+The original ROM/BSS initializer and its original `memcpy`/`memset`
+dependencies are now compiled too. Tests poison the three BSS ranges and
+verify that initialization clears them, preserves adjacent guard bytes,
+leaves loaded text intact, and restores the stack/callee-saved registers.
+Memory-function tests cover empty buffers, four alignments, boundary lengths,
+fill-byte truncation and both overlapping copy directions.
+The verified DOL's ROM-copy records already have identical source and
+destination addresses, so they do not require a copy or cache flush.
+A modified test record exercises copying and verifies an explicit failure at
+the still-unimplemented cache synchronization service; it is not a no-op stub.
+The memory initializer is tested **independently** of the hardware setup.
+
+These tests **do not boot
+the game**: entry-point execution stops at `0x80003158`, before the call to
+`__init_hardware`. Hardware initialization, OS services, FPU/paired singles,
+GX, audio and dynamic REL runtime integration are still missing. Unmapped addresses, including
+MMIO, throw rather than being silently treated as RAM.
+
+### REL module parsing and linking
+
+Inspect a locally extracted version 3 module without changing it:
+
+```powershell
+build\native\native\recompiler\Release\hmawl_recompiler.exe --inspect-rel build\game-us-r0\wlp0.rel
+```
+
+The host-side linker loads REL sections and zero-initialized, aligned BSS into
+the RAM model. It resolves self imports, cross-module imports, and module 0
+references (absolute DOL addresses). Supported fixups are `ADDR32`,
+`ADDR16_LO`, `ADDR16_HI`, `ADDR16_HA`, and `REL24`, plus SECTION/NOP/END/NONE
+stream records. These cover all relocation types in the verified US modules.
+Unsupported versions/types, missing modules, invalid sections/streams,
+misalignment, overlapping load ranges and out-of-range branches are errors.
+Fixups are staged before guest memory is modified, so a failed link does not
+leave partially loaded modules. Callers must supply reserved memory ranges
+for the DOL, stack and other allocations.
+
+`hmawl_rel_tests` runs synthetic linker tests without game files. To also
+validate the three original modules, configure:
+
+```powershell
+cmake -S . -B build\native -DHMAWL_US_REL_DIRECTORY="C:\path\to\hmawl\build\game-us-r0"
+cmake --build build\native --config Release
+ctest --test-dir build\native -C Release --output-on-failure
+```
+
+This adds `hmawl_us_rel_tests`; it verifies all four executable hashes, links
+all three RELs at explicit **test-only** addresses, and checks all 32,637
+resulting fixups, module BSS and unchanged DOL text.
+The linker reports section addresses and prolog/epilog/unresolved entrypoints
+but does not execute them, update the original SDK's module linked list, or
+implement the SDK's `OSLink`/`OSUnlink` ABI. Dynamic allocation, unloading,
+deferred unresolved imports and automatic discovery/binding of all game
+functions are still missing. Linking PowerPC bytes in RAM is preparation
+for static recompilation, not execution through an interpreter or a game boot.
+
+### Native function dispatch
+
+The native dispatcher maps exact guest entry addresses to precompiled C++
+functions. It connects generated direct/indirect calls, tail branches and
+returns through the existing guest-call callback. Registration is atomic and
+module-scoped. REL bindings additionally identify an executable section and
+offset, and must match their compiled load address; arbitrary rebasing is
+not implemented. Registration and each function entry compare the relocated
+guest words with the translation's expected code, rejecting stale or changed
+code instead of executing a mismatched native function. This is a code-identity
+guard, not an instruction interpreter or a complete self-modifying-code model.
+
+`hmawl_generated_tests` tests compiled direct/indirect calls across module
+registrations, tail calls, return addresses, missing/duplicate bindings,
+unregistration/re-registration, callback restoration and explicit function-entry
+and call-depth limits. These limits do not interrupt a loop wholly inside one
+compiled function. Registration/removal during execution and reentrant use of
+the same dispatcher are rejected; the dispatcher is single-threaded.
+Unregistration removes native bindings only, not guest memory or SDK module state.
+
+With `HMAWL_US_REL_DIRECTORY` enabled, `hmawl_us_rel_native_tests` also generates,
+compiles and executes **two small original wlp0 functions**: a zero-test of an
+object field and a field getter. Generation and execution both verify the DOL
+and all three REL hashes, then link at the same test-only addresses. Tests
+check imported DOL data references, results, return/ABI state, invalid placement,
+changed code and binding removal. Game-derived generated C++ remains in the
+ignored build tree.
+
+The same optional suite now compiles all **13 original wlp0 static constructors**
+(6,428 PowerPC instructions), the module's prolog/epilog, destructor-chain
+helpers and required original DOL register-save/restore and object-construction
+functions. Each constructor runs independently with nonvolatile-register and
+stack/SDA checks. Tests check selected complete member-function-pointer table
+copies, the constructed global object and its registered destructor, and that
+all writes stay inside the module's data/BSS or the test stack.
+
+The original prolog calls all 13 constructors through its relocated array,
+then reaches its scene-selection code. Tests cover its default, mode-8 and
+mode-9 selection paths and verify an explicit failure at the **missing game
+allocator `0x80178E88`**, with the original allocation size/source-line
+arguments and no assigned scene object. The constructed data/BSS must match
+the standalone constructor chain. No allocator success or scene construction
+is simulated. With a fresh test call frame after that expected failure, the
+original epilog invokes the registered destructor and empties its chain;
+calling it again exercises the empty-chain case without a second destruction.
+`extsh`/`extsh.` are compiled and tested for the destructor's signed flag.
+
+An additional binding group now translates the original
+`Memory::InitializeWithArena`, heap-descriptor constructors, allocation
+virtual methods, scalar `new` and scalar `delete`; it does not substitute a
+host allocator or return fabricated allocations. The local test supplies a
+64 KiB arena at an explicit test address and constructs the original 128/4096
+descriptor arrays. Tests cover 32-byte alignment, zero-size requests, splitting,
+exact fit, allocation/high-water counters, allocation timestamps, descriptor
+exhaustion, out-of-memory arguments, null deletion, neighboring-block
+coalescing and reuse. Guest allocator quirks remain unchanged; these tests
+do not certify every allocation/free ordering or array allocation.
+Out-of-memory stops at the unimplemented `OSPanic` binding, not a
+success-shaped null fallback.
+
+The original `OSGetTick` is translated using `mftb`. A native monotonic
+time-base source uses `std::chrono::steady_clock` at the GameCube's 40.5 MHz
+rate, with a per-source epoch. Low/high time-base reads, conversion,
+truncation, long-duration overflow avoidance, missing-source failure and
+host-clock advancement are tested; allocator expectations use a deterministic
+test clock. This does not implement wall-clock time, alarms, scheduling or
+timing synchronization with rendering/audio. `crxor`/`crclr` and `subfic`
+translation are also covered by compiled semantics tests.
+
+With only the allocator/time-base bindings installed, the original module
+prolog allocates the selected scene object and stops at the unregistered
+default, mode-8 or mode-9 scene constructor.
+
+Additional, opt-in scene bindings now translate the integer prefixes of all
+three constructors, stopping before their first floating-point instructions.
+The original shared base constructor executes with checked object fields,
+return ABI and write boundaries. The default path executes two original
+calendar getters using compiled `divwu`/`mullw`, then stops at `0x8000FEE8`.
+Mode 8 constructs its first nested object's intrusive lists and adjusted
+vtables, then stops at the unimplemented registration routine `0x8017CD5C`.
+Mode 9 clears its buffers through the original `memset`, constructs its first
+nested DOL object and stops at the next REL constructor `0x8101DDB0`.
+Tests check allocation counts, arguments and whole-RAM write boundaries.
+
+A further opt-in dependency group now executes the original registration
+manager constructor, including its bitset initialization and singleton
+publication. Its original priority-sorted registration/list code is tested with
+empty and populated lists, duplicate priorities, unsigned extremes, earlier
+reprioritization and moves between managers. The calendar period lookup is
+compiled and checked at bucket boundaries across its full 32-bit input range
+and at saturation. This preserves the original routines, not replacement
+host containers; arbitrary in-place reprioritization is not certified.
+
+With these dependencies installed, the default scene reaches `0x8001BD04`.
+Mode 8 registers its first nested object with the original manager and
+reaches constructor `0x8100DCD8`. Mode 9 enters `0x8101DDB0`, executes an
+original virtual archive initializer for the empty-resource case, constructs
+two nested self-linked lists and reaches game-object constructor `0x8002283C`.
+Without the separate archive bindings, nonempty archive initialization still
+stops explicitly at `ARCInitHandle` (`0x80203B4C`).
+
+The opt-in archive bindings compile the original U8 handle initializer, path
+lookup, indexed file open, file pointer/length/close helpers and the game's
+indexed resource getters. A synthetic nested archive tests case-insensitive
+names, absolute/relative paths, dot/parent components, missing names, zero-byte
+files and rejection of directories/invalid indices. Original separator behavior
+is preserved: an extra separator inside a path restarts lookup from the root,
+rather than applying host path normalization. Payloads and archive bytes remain
+unchanged, with whole-RAM write guards around handle/output/stack buffers.
+Invalid magic reaches the still-unimplemented `OSPanic`; unmapped metadata
+accesses fail through the guest RAM bounds checks. This is not a hardened U8
+validator: the original SDK trusts archive metadata, and the game's indexed
+getters assume valid file indices.
+
+An optional real-disc integration test now connects RVZ random access and FST
+file lookup to the compiled original U8/game archive APIs. It verifies the
+US disc identity, executable/FST hashes and one original resource archive hash,
+then checks all five file pointers/lengths/payloads and its nested animation
+archive. All input remains local; no extracted assets are added to the source.
+
+```powershell
+cmake -S . -B build\native -DHMAWL_US_REL_DIRECTORY="C:\path\to\hmawl\build\game-us-r0" -DHMAWL_US_RVZ="C:\path\to\hmawl\Harvest Moon - A Wonderful Life (USA).rvz"
+build\native\native\recompiler\Release\hmawl_us_rel_native_tests.exe build\game-us-r0 --rvz "Harvest Moon - A Wonderful Life (USA).rvz"
+```
+
+`HMAWL_US_RVZ` also registers `hmawl_us_resource_tests` when the optional REL
+tests are enabled. It also decompresses all eleven original `.clz` archives
+using the statically compiled original decoder (`0x8017837c`, with block decoder
+`0x80178450`), compares every output byte with the checked decoder and opens
+each result through the original U8/game APIs. All file pointers and lengths
+are verified, with ABI and memory-write guards. Synthetic tests cover empty
+output, literals, overlapping references, maximum distance/length, padded
+multi-block streams and invalid magic/version. The original decoder trusts
+its input; malformed streams are tested only against the checked decoder.
+The optional DVD bindings also compile original FST initialization,
+`DVDConvertPathToEntrynum`, `DVDOpen`, `DVDChangeDir`, `DVDGetCurrentDir` and
+the game's fresh `DvdFile` constructor/open path. The real-disc test opens
+all 1,660 files through original `DVDOpen` and checks their disc offsets,
+sizes and `DVDFileInfo` fields against the validated FST. The fixture supplies
+the boot FST pointer and long-filename mode; this does not execute OS startup.
+Synthetic tests preserve original case-insensitive SDK lookup, parent/current
+directory handling, separator quirks, truncation and empty-file semantics.
+Missing-file reporting and invalid short-name validation still reach explicit
+unimplemented `OSReport`/`OSPanic` boundaries; no success stub is substituted.
+
+`NativeDvdReader` consumes original `DVDFileInfo` offsets/sizes and reads
+validated disc ranges into checked guest RAM. It allows the original
+less-than-32-byte EOF padding, copying actual disc bytes rather than inventing
+zeros. Invalid metadata/ranges, unmapped destinations and disc-read errors
+leave guest memory unchanged. It is a synchronous host-side primitive, not a
+replacement for `DVDReadPrio` or an open/close handle registry.
+The `subfe`/`subfe.` carry semantics required by the game wrapper are tested
+with carry/borrow boundaries, register aliases and CR/XER preservation;
+overflow-enabled variants remain unsupported.
+
+The original `DVDReadAsyncPrio` (`0x801ba9dc`) and its SDK callback forwarder
+(`0x801baa9c`) are now compiled as well. Explicit host-service bindings replace
+the hardware-dependent low-level read submission (`0x801bc9d8`) and queued
+cancellation (`0x801bd1cc`); these are native replacements, not original code
+translations. Both bindings check their original code words at registration
+and entry, and fail explicitly when their `PpcState` service is not installed.
+
+`NativeDvdQueue` defers transfer and notification until a host `Pump()` at a
+cooperative guest safe point. It completes one request per pump in priority
+order (SDK priorities 0..3, FIFO within a priority), writes SDK command
+state/count fields, invokes compiled callbacks and restores CPU registers.
+Callbacks can submit subsequent reads, but cannot recursively pump the queue.
+Queued cancellation transfers no bytes, sets status 10 and invokes the read
+callback with -3 before the optional cancel callback with 0. Terminal-command
+cancellation notifies only the cancel callback. Duplicate/aliased command
+blocks, conflicting command/buffer ranges and changed queued metadata are
+rejected. Read failures deliver -1, leave payload memory unchanged and propagate
+the error; callback failures propagate without replaying completed commands.
+Callers must keep the queue, reader and dispatcher alive while service
+callbacks or queued requests refer to them.
+
+Real-disc tests now run original `DvdFile` construction, compiled
+`DVDReadAsyncPrio`, queued RVZ reads, the original SDK callback forwarder
+(with a test-only completion observer), then original CLZ/U8 initialization
+for raw and compressed resources. Submission is checked to leave payloads
+unchanged and callbacks uncalled until pumping. Cancellation and whole-RAM
+write guards are tested too. Synthetic queue tests additionally cover priority,
+FIFO, CPU restoration, requeueing, zero/null callbacks, missing bindings,
+metadata changes, callback exceptions and a truncated-input I/O failure.
+
+The original game async read entry (`0x8017b07c`), alignment helper, read
+callback (`0x8017acf0`) and virtual completion handler (`0x8017b30c`) are now
+compiled too. Real raw/compressed resource tests submit through this game
+entry, pump the native read, then invoke the original SDK/game callbacks and
+the original completion-flag observer (`0x8017b558`). They verify the game's
+done flag, observer consumption, exact bytes and cancellation without a false
+success flag. This observer is the game's own completion class, not a host
+callback substitution. Closed-file rejection, the original DMA rounding
+rules and `DVDGetCommandBlockStatus` normalization are tested separately.
+
+Game status switches require local `bctr` jump-table targets. The recompiler
+now emits one static local-target switch per affected function; external
+targets still go through compiled-only dispatch. Synthetic native tests cover
+conditional/fallthrough, backward, aligned and external branch targets.
+
+Explicit, original-code-checked `OSDisableInterrupts`, `OSEnableInterrupts`
+and `OSRestoreInterrupts` host bindings maintain a cooperative external
+interrupt flag, including nested save/restore behavior. `Pump()` leaves
+requests untouched while this flag is disabled. Read/cancel callbacks execute
+with it disabled and restore the caller's mask and CPU registers even on
+exceptions. This models safe-point delivery only, not privileged MSR state,
+hardware interrupts, preemption or a Windows thread scheduler. The fixture
+starts with delivery enabled; it has not run the original OS startup.
+
+This remains controlled integration, not a full DVD/OS service. Pumping is
+explicit and single-threaded, not interrupt or thread scheduling; cancellation
+of an in-flight hardware transfer, synchronous SDK reads/close, the game's
+decode queue and resource lifetime/allocator integration are still missing.
+These are controlled fixtures with explicitly supplied system/context globals,
+not a full initialization of those game systems. Scene assignment to `g_system`
+has not completed. Floating-point continuations remain unregistered;
+undefined zero-divisor `divwu` fails explicitly and overflow-enabled variants
+are unsupported.
+Module initialization is still **incomplete**; this is not a game boot or
+an implementation of `OSLink`/`OSUnlink`.
+
+Only supported instructions are translated. The tool reports the guest address
+when it reaches an unsupported instruction instead of silently generating
+incorrect game code. Initial coverage includes common integer immediates and
+logical operations, count-leading-zeros, rotates/masks, multiple and indexed word/halfword/byte
+loads and stores, basic arithmetic, condition-register comparisons,
+direct/conditional branches, and link-register calls/returns. Generated output
+is an experimental building block; it does not yet provide the complete game
+runtime or a playable executable.
+
+`native/windows/` contains a separate Direct3D renderer test. It draws an
+invented placeholder scene to test window/device setup; it does not run the
+game and is not part of the eventual port. It is also included in the Windows
+CMake build. Build its target with:
+
+```powershell
+cmake --build build/native --config Release --target hmawl_renderer_prototype
+```
+
+Run `build/native/native/windows/Release/hmawl_renderer_prototype.exe`; use
+arrow keys or WASD to
+move its placeholder character, and Escape to quit. This is just a renderer
+test. See [PORTING.md](PORTING.md) for the actual static-recompilation plan.
