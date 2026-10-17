@@ -458,7 +458,16 @@ without mutation. Original startup checks all three channels and calls
 new device writes. Independent and entry-derived tests verify exact RAM/stack
 writes, CPU/device preservation and partial opt-in boundaries. The compiled
 prefix ends at `0x801f74a4`, before EXI status reset; EXIInit has not returned.
-No transfer completion, device probing or EXI data movement is implemented.
+The separate continuation now also executes the original channel-status resets,
+channel-0 ROMDIS write and all eight EXI interrupt-handler registrations. An
+explicit `exiInitializationEnabled` opt-in requires each reset channel's mapped
+idle transfer control, preserves W1C pending/presence bits, and resets its
+clock/enables. Original uncached channel-0/device-2 identification reaches
+`EXILock` and `EXISelect`, then fails explicitly on the unsupported chip-select
+write at `0x801f6f24` (`0xcc006800`, value `0x200`). Both standalone and
+entry-derived tests cover this connected chain without supplying a cached or
+invented device ID. EXIInit has not returned. No transfer completion or EXI data
+movement is implemented.
 
 Compiled `dcbf`/`icbi` check the addressed 32-byte RAM block and issue a host
 memory fence over coherent storage. They retain static translation bindings

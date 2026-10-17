@@ -340,6 +340,17 @@ queue. Full runtime scheduling and device services are still needed.
   writes, CPU/device preservation and entry-derived continuation. Stop at
   `0x801f74a4` before EXI status reset; EXIInit does not return. No transfers,
   completion events or device probing.
+- [x] Continue the entry-derived EXI initialization through original idle status
+  resets, channel-0 ROMDIS setup, all eight interrupt-handler registrations and
+  uncached channel-0/device-2 identification. Translate original GetID, lock,
+  interrupt-mask helper and select routines. Require explicit initialization
+  opt-in plus mapped inactive controls for reset writes; exhaustively test
+  valid status combinations, preserved pending/presence bits and rejected
+  busy/reserved/unsupported states without mutation. Verify the connected chain's
+  handler slots, software lock/selection, zero uncached ID, bounded calls,
+  non-stack RAM and CPU/device guards. Stop on the real unsupported chip-select
+  write at `0x801f6f24` (`0xcc006800`, `0x200`); do not fabricate a device ID or
+  return success. EXIInit and OSInit remain incomplete.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,

@@ -1225,6 +1225,90 @@ void TestOriginalExiInitializationPrefix(const DolImage& image) {
                  "opt-in boundaries verified. Stops at 0x801f74a4 before EXI status reset.\n";
 }
 
+void RunExiResetToDeviceSelection(PpcState& state) {
+    const auto before = state;
+    const uint32_t stack = state.gpr[1];
+    const uint32_t table = ppc_read_u32(state, 0x80349620u);
+    auto expected = state;
+    const uint32_t handlers[] = {0x801f7090u, 0x801f7158u, 0x801f7370u};
+    for (unsigned index = 0; index < 8; ++index) {
+        ppc_write_u32(expected, table + (9 + index) * 4u, handlers[index % 3]);
+    }
+    ppc_write_u32(expected, 0x80340c6cu, 0x14u);
+    ppc_write_u32(expected, 0x80340c78u, 2);
+    unsigned setters = 0, calls = 0;
+    state.callGuest = [&](uint32_t address, PpcState& guest) {
+        Require(++calls <= 24, "EXI identification chain exceeded its dependency budget.");
+        switch (address) {
+        case 0x801b3a90u:
+            Require(setters < 8 && guest.gpr[3] == 9 + setters &&
+                        guest.gpr[4] == handlers[setters % 3],
+                    "Original EXI init handler slot/address differs.");
+            ++setters;
+            ppc_801B3A90(guest);
+            break;
+        case 0x801f7824u:
+            Require(guest.gpr[3] == 0 && guest.gpr[4] == 2 &&
+                        guest.gpr[5] == 0x80349ad0u,
+                    "Original EXI init did not request channel 0 device 2 identity.");
+            ppc_801F7824(guest);
+            break;
+        case 0x801f7614u: ppc_801F7614(guest); break;
+        case 0x801f61f8u: ppc_801F61F8(guest); break;
+        case 0x801f6e54u: ppc_801F6E54(guest); break;
+        case 0x801b3e0cu: ppc_801B3E0C(guest); break;
+        default: RunHardwareDependency(address, guest); break;
+        }
+    };
+    bool rejected = false;
+    try {
+        ppc_801F74A4(state);
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("only idle startup interrupt masking") != std::string::npos;
+    }
+    Require(rejected && setters == 8 && calls == 19 &&
+                state.gpr[4] == 0xcc006800u && state.gpr[5] == 0x200u &&
+                state.gpr[1] == stack - 0x78u && !state.externalInterruptsEnabled &&
+                state.exiStatus[0] == ((*before.exiStatus[0] & 0x180au) | 0x2000u) &&
+                state.exiStatus[1] == (*before.exiStatus[1] & 0x180au) &&
+                state.exiStatus[2] == (*before.exiStatus[2] & 0xau) &&
+                state.exiTransferControl == before.exiTransferControl &&
+                ppc_read_u32(state, 0x80349ad0u) == 0 &&
+                state.fpr == before.fpr && state.fpscr == before.fpscr &&
+                state.gqr == before.gqr && state.hid0 == before.hid0 &&
+                state.hid2 == before.hid2 && state.l2cr == before.l2cr &&
+                state.msr == before.msr,
+            "Original EXI reset/handler/ID chain did not reach unsupported device selection.");
+    const size_t frame = ppc_memory_offset(state, stack - 0xb0u, 0xb8);
+    for (size_t i = 0; i < expected.memory.size(); ++i) {
+        if (i >= frame && i < frame + 0xb8) continue;
+        Require(state.memory[i] == expected.memory[i],
+                "EXI identification chain wrote outside stack, handler table or lock/selection state.");
+    }
+    state.callGuest = {};
+}
+
+void TestOriginalExiResetAndIdentification(const DolImage& image) {
+    for (bool interrupts : {false, true}) {
+        auto state = image.CreateGameCubeState();
+        ppc_800032B0(state);
+        state.lr = 0x801b0f8cu;
+        state.externalInterruptsEnabled = interrupts;
+        state.exiTransferControl = {0u, 0u, 0u};
+        state.exiStatus = {0x1c7fu, 0x1c7fu, 0x7fu};
+        state.exiInitializationEnabled = true;
+        ppc_write_u32(state, 0x800000c4u, 0xffffffe0u);
+        ppc_write_u32(state, 0x800000c8u, 0);
+        ppc_write_u32(state, 0x80349620u, 0x80003040u);
+        ppc_write_u32(state, 0x80349ad0u, 0);
+        RunExiInitializationPrefix(state, 3);
+        RunExiResetToDeviceSelection(state);
+    }
+    std::cout << "Original EXI reset, ROM-disable setup, eight handler registrations and "
+                 "uncached GetID/lock/select chain reach unsupported channel 0 device 2 "
+                 "selection at 0x801f6f24. No device identity is fabricated.\n";
+}
+
 void TestOriginalContextInitialization(const DolImage& image) {
     for (bool interrupts : {false, true}) {
         for (uint32_t table : {0x80003000u, 0xc0003000u}) {
@@ -1885,6 +1969,8 @@ void TestEntryThroughHardwareAndMemory(const DolImage& image) {
     RunExiInitializationPrefix(state, 3);
     std::cout << "Entry-derived EXIInit prefix passes all idle transfer checks and mask "
                  "reuse, stopping at 0x801f74a4 before status reset. EXIInit has not returned.\n";
+    state.exiInitializationEnabled = true;
+    RunExiResetToDeviceSelection(state);
 }
 
 void TestOriginalArenaAccessors(const DolImage& image) {
@@ -2203,6 +2289,7 @@ int main(int argc, char** argv) {
         TestOriginalInterruptPiSetup(image);
         TestOriginalContextInitialization(image);
         TestOriginalExiInitializationPrefix(image);
+        TestOriginalExiResetAndIdentification(image);
         TestOriginalCacheRanges(image);
         TestOriginalBootInfoAndArena(image);
         TestStartupHelpers(image);

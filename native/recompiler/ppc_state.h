@@ -52,6 +52,7 @@ struct PpcState {
     std::optional<uint32_t> aiControl;
     std::array<std::optional<uint32_t>, 3> exiStatus;
     std::array<std::optional<uint32_t>, 3> exiTransferControl;
+    bool exiInitializationEnabled = false;
     bool externalInterruptsEnabled = true;
 };
 
@@ -226,13 +227,25 @@ inline void ppc_write_u32(PpcState& state, uint32_t address, uint32_t value) {
         auto& status = state.exiStatus[channel];
         if (status.has_value()) {
             const uint32_t previous = *status;
-            const uint32_t supported = channel == 2 ? 0x7fu : 0x1c7fu;
+            const uint32_t supported = channel == 2 ? 0x7fu :
+                channel == 0 && state.exiInitializationEnabled ? 0x3c7fu : 0x1c7fu;
+            if (state.exiInitializationEnabled &&
+                (value == 0 || (channel == 0 && value == 0x2000u))) {
+                const auto& control = state.exiTransferControl[channel];
+                if ((previous & ~supported) != 0 || !control.has_value() ||
+                    (*control & ~0x3eu) != 0) {
+                    throw std::runtime_error("Unsupported EXI status reset (requires mapped idle transfer control and valid status).");
+                }
+                *status = (previous & (channel == 2 ? 0xau : 0x180au)) | value;
+                return;
+            }
             const uint32_t written = channel == 2 ? 0xfu : channel == 0 ? 0x2c0fu : 0xc0fu;
             if ((previous & ~supported) != 0 || value != (previous & ~written)) {
                 throw std::runtime_error("Unsupported EXI status write (only idle startup interrupt masking supported).");
             }
             // Zero in W1C fields retains pending status; EXT is read-only.
-            *status = previous & ~(channel == 2 ? 0x5u : 0x405u);
+            *status = previous & ~(channel == 2 ? 0x5u :
+                channel == 0 && state.exiInitializationEnabled ? 0x2405u : 0x405u);
             return;
         }
     }

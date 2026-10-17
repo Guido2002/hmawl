@@ -980,6 +980,72 @@ void TestExiTransferControl() {
             "EXI transfer support changed flat-memory behavior.");
 }
 
+void TestExiInitializationRegisters() {
+    PpcState state;
+    state.memoryMap = PpcMemoryMap::GameCubeRam;
+    state.memory.resize(kGameCubeRamSize, 0xa5);
+    const auto ram = state.memory;
+    state.exiInitializationEnabled = true;
+    for (unsigned channel = 0; channel < 3; ++channel) {
+        const uint32_t address = 0xcc006800u + channel * 0x14u;
+        const uint32_t supported = channel == 2 ? 0x7fu : channel == 0 ? 0x3c7fu : 0x1c7fu;
+        const auto reject = [&](uint32_t value) {
+            const auto before = state.exiStatus;
+            bool rejected = false;
+            try {
+                ppc_write_u32(state, address, value);
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            Require(rejected && before == state.exiStatus && state.memory == ram,
+                    "Unsupported EXI initialization write did not fail without mutation.");
+        };
+        for (uint32_t initial = 0; initial <= supported; ++initial) {
+            if ((initial & ~supported) != 0) continue;
+            for (uint32_t value : {0u, 0x2000u}) {
+                if (value != 0 && channel != 0) continue;
+                state.exiStatus[channel] = initial;
+                state.exiTransferControl[channel] = 0x3eu;
+                ppc_write_u32(state, address, value);
+                const uint32_t expected = (initial & (channel == 2 ? 0xau : 0x180au)) | value;
+                Require(ppc_read_u32(state, address) == expected &&
+                            state.exiTransferControl[channel] == 0x3eu &&
+                            state.memory == ram,
+                        "EXI initialization reset damaged pending/presence state or failed to reset clock/enables.");
+            }
+        }
+        state.exiStatus[channel] = supported;
+        state.exiTransferControl[channel].reset();
+        reject(0);
+        for (uint32_t control : {1u, 0x40u, UINT32_MAX}) {
+            state.exiTransferControl[channel] = control;
+            reject(0);
+        }
+        state.exiTransferControl[channel] = 0;
+        for (uint32_t value : {1u, 4u, 0x80u, 0x200u, 0x800u, UINT32_MAX}) reject(value);
+        if (channel != 0) reject(0x2000u);
+        for (unsigned bit = 0; bit < 32; ++bit) {
+            if ((supported & (1u << bit)) != 0) continue;
+            state.exiStatus[channel] = supported | (1u << bit);
+            reject(0);
+        }
+    }
+    state.exiStatus[0] = 0x3c7fu;
+    ppc_write_u32(state, 0xcc006800u, 0x1070u);
+    Require(state.exiStatus[0] == 0x187au,
+            "Original interrupt masking did not clear ROMDIS while preserving pending/presence state.");
+    state.exiInitializationEnabled = false;
+    state.exiStatus[0] = 0x70u;
+    bool rejected = false;
+    try {
+        ppc_write_u32(state, 0xcc006800u, 0);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    Require(rejected && state.exiStatus[0] == 0x70u && state.memory == ram,
+            "EXI initialization reset did not require explicit opt-in.");
+}
+
 void TestExiStatus() {
     PpcState state;
     state.memoryMap = PpcMemoryMap::GameCubeRam;
@@ -2187,6 +2253,7 @@ int main() {
         TestAiControl();
         TestExiStatus();
         TestExiTransferControl();
+        TestExiInitializationRegisters();
         TestAndComplement();
         TestCacheBlockInstructions();
         TestL2ControlRegisters();
