@@ -35,6 +35,8 @@ struct NativeGx {
     uint64_t bursts = 0;
     uint64_t decodedCommands = 0;
     uint64_t vertexCacheInvalidations = 0;
+    uint64_t texturePreloads = 0;
+    uint64_t texturePreloadBytes = 0;
     uint64_t draws = 0;
     uint64_t rasterizedPixels = 0;
     std::optional<NativeEfb> efb;

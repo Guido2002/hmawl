@@ -4534,6 +4534,20 @@ void TestNativeDispatch() {
     nativeTestAction = [&](PpcState&) { dispatcher.Unregister(1); };
     Reject([&] { dispatcher.Execute(state, 0x4080); }, "during execution");
     Require(dispatcher.Contains(0x4020), "Active native module was unregistered.");
+    nativeTestAction = [](PpcState&) {};
+    dispatcher.Register(3, state, {{0x40c0, NativeTestHook, {0}}});
+    Reject([&] {
+        dispatcher.Execute(state, 0x4080, 100000, 256, [&](uint32_t pc) {
+            if (pc == 0x4080) dispatcher.Unregister(2);
+        });
+    }, "active native module");
+    Require(dispatcher.Contains(0x4080), "Block observer unregistered its active module.");
+    nativeTestAction = [](PpcState& guest) { guest.pc = guest.lr; };
+    dispatcher.Execute(state, 0x4080, 100000, 256, [&](uint32_t pc) {
+        if (pc == 0x4080) dispatcher.Unregister(3);
+    });
+    Require(dispatcher.Contains(0x4080) && !dispatcher.Contains(0x40c0),
+            "Block observer did not safely unregister an inactive module.");
     nativeTestAction = [&](PpcState&) { dispatcher.Register(3, state, root); };
     Reject([&] { dispatcher.Execute(state, 0x4080); }, "during execution");
     nativeTestAction = [&](PpcState&) { dispatcher.Execute(state, 0x4040); };

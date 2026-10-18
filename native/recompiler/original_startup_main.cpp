@@ -2,6 +2,7 @@
 #include "native_sram.h"
 #include "native_windows_audio.h"
 #include "native_windows_video.h"
+#include "startup_diagnostics.h"
 
 #include <charconv>
 #include <iostream>
@@ -23,11 +24,13 @@ size_t ParseLimit(const std::filesystem::path& text) {
 
 template <typename Character>
 int RunCli(int argc, Character** argv) {
-    if (argc < 3 || argc > 13 || (argc & 1) == 0 ||
+    if (argc < 3 || argc > 19 || (argc & 1) == 0 ||
         std::filesystem::path(argv[1]) != "--original-startup") {
         std::cerr << "Usage: hmawl_original_startup --original-startup <USA-main.dol>"
                      " [--max-blocks <count>] [--max-depth <count>] [--sram <64-byte-profile>]"
-                     " [--rvz <USA-disc.rvz>] [--display <window|off>]\n";
+                     " [--rvz <USA-disc.rvz>] [--display <window|off>]"
+                     " [--diagnostics <directory>] [--trace-blocks <0..65536>]"
+                     " [--trace-instructions <0..65536>]\n";
         return 2;
     }
     try {
@@ -36,6 +39,10 @@ int RunCli(int argc, Character** argv) {
         bool sawBlocks = false, sawDepth = false, sawSram = false;
         bool sawDisplay = false;
         bool showWindow = false;
+        bool sawDiagnostics = false, sawTrace = false, sawInstructionTrace = false;
+        size_t traceBlocks = 128;
+        size_t traceInstructions = 0;
+        std::filesystem::path diagnosticsDirectory = "diagnostics";
         std::filesystem::path rvzPath;
         auto sramPath = std::filesystem::path(argv[2]).parent_path() / "native-console.sram";
         for (int i = 3; i < argc; i += 2) {
@@ -57,16 +64,49 @@ int RunCli(int argc, Character** argv) {
                 if (value != "window" && value != "off") throw std::runtime_error("Display must be window or off.");
                 showWindow = value == "window";
                 sawDisplay = true;
+            } else if (option == "--diagnostics" && !sawDiagnostics) {
+                diagnosticsDirectory = argv[i + 1];
+                if (diagnosticsDirectory.empty()) throw std::runtime_error("Diagnostics path must not be empty.");
+                sawDiagnostics = true;
+            } else if (option == "--trace-blocks" && !sawTrace) {
+                traceBlocks = std::filesystem::path(argv[i + 1]) == "0" ? 0 : ParseLimit(argv[i + 1]);
+                if (traceBlocks > 65536) throw std::runtime_error("Block history is limited to 65536 entries.");
+                sawTrace = true;
+            } else if (option == "--trace-instructions" && !sawInstructionTrace) {
+                traceInstructions = std::filesystem::path(argv[i + 1]) == "0" ? 0 : ParseLimit(argv[i + 1]);
+                if (traceInstructions > 65536)
+                    throw std::runtime_error("Instruction history is limited to 65536 entries.");
+                sawInstructionTrace = true;
             } else {
                 throw std::runtime_error("Unknown or repeated startup option: " + option);
             }
         }
         const auto image = LoadOriginalUsDol(argv[2]);
         auto state = CreateOriginalStartupState(image);
+        StartupDiagnostics diagnostics(traceBlocks, traceInstructions);
+        if (traceInstructions) {
+            state.instructionObserverContext = &diagnostics;
+            state.instructionObserver = [](void* context, uint32_t pc, uint32_t instruction) {
+                static_cast<StartupDiagnostics*>(context)->ObserveInstruction(pc, instruction);
+            };
+        }
         std::unique_ptr<RvzImage> disc;
         if (!rvzPath.empty()) {
             disc = std::make_unique<RvzImage>(rvzPath);
             InstallOriginalStartupDisc(state, *disc);
+            diagnostics.SetFiles(ReadGameCubeFileTable(*disc));
+            auto transfer = std::move(state.transferDisc);
+            state.transferDisc = [&, transfer](const std::array<uint32_t, 3>& command, uint32_t length) {
+                std::vector<uint8_t> bytes;
+                try {
+                    bytes = transfer(command, length);
+                } catch (const std::exception& error) {
+                    diagnostics.ObserveDisc(state, command, length, false, error.what());
+                    throw;
+                }
+                diagnostics.ObserveDisc(state, command, length, true);
+                return bytes;
+            };
         }
         BindNativeSram(state, LoadOrCreateNativeSram(sramPath));
 #ifdef _WIN32
@@ -82,7 +122,7 @@ int RunCli(int argc, Character** argv) {
                      "using compiled native blocks only.\n"
                      "Profile: loader IR/DR, EE disabled, coherent RAM, idle opt-in "
                      "PI/MI/DSP/AI/EXI/SI, native CP/PE and checked GX register-command FIFO "
-                     "(orthographic RGB5A3 UI quads, non-AA RGB8 EFB/XFB copy/clear; texture DMA unimplemented), native NTSC VI timing/configuration/interrupts "
+                     "(orthographic RGB5A3 UI quads, non-AA RGB8 EFB/XFB copy/clear; checked direct-RAM texture preloads, TLUT DMA unimplemented), native NTSC VI timing/configuration/interrupts "
                      "(pixel scanout unimplemented), cold PI reset, 24 MiB RAM BAT profile, disconnected digital cable, "
                      "empty memory-card slots/SP1 and disconnected controllers, native console "
                      "(bounded strings/32-bit integers), persisted SRAM reads (writes/RTC/ROM unimplemented); "
@@ -102,6 +142,8 @@ int RunCli(int argc, Character** argv) {
         uint64_t displayedDraws = 0;
 #endif
         const auto result = RunOriginalStartup(dispatcher, state, blocks, depth, [&](uint32_t pc) {
+            diagnostics.ObserveBlock(pc);
+            if (pc == 0x8017837cu && state.lr == 0x8019a750u) diagnostics.ObserveDecoder(state);
             if (pc == 0x801c1bc0u) ++pcmHandlers;
             if (pc == 0x801f2ab8u) ++pcmCallbacks;
 #ifdef _WIN32
@@ -115,6 +157,28 @@ int RunCli(int argc, Character** argv) {
 #endif
         });
         std::cerr << DescribeOriginalStartupStop(result) << '\n';
+        // Reporting errors must not replace the original execution stop/exit status.
+        try {
+            std::cerr << "Diagnostics: " << diagnostics.Write(diagnosticsDirectory, state, result, blocks, depth).u8string() << '\n';
+        } catch (const std::exception& error) {
+            std::cerr << "Could not save diagnostics: " << error.what() << '\n';
+        }
+        if (result.stop == OriginalStartupStop::Dependency) {
+            const auto module = ppc_read_u32(state, 0x800030c8u);
+            std::cerr << "Native dispatch context: r12=0x" << std::hex << state.gpr[12]
+                      << " linked module=0x" << module << std::dec << ".\n";
+            if (module >= 0x80000000u && module < 0x80000000u + kGameCubeRamSize &&
+                ppc_read_u32(state, module + 0x10u) == module + 0x4cu) {
+                const auto sectionCount = ppc_read_u32(state, module + 0x0cu);
+                if (sectionCount <= 64) {
+                    for (uint32_t index = 0; index < sectionCount; ++index) {
+                        const auto section = ppc_read_u32(state, module + 0x4cu + index * 8u) & ~1u;
+                        std::cerr << "Linked module section " << index << " starts at 0x"
+                                  << std::hex << section << std::dec << ".\n";
+                    }
+                }
+            }
+        }
         if (state.dspHardware) {
             const auto& dsp = *state.dspHardware;
             std::cerr << "Native ARAM: " << dsp.aram.size() << " bytes, " << dsp.dmaTransfers
@@ -153,13 +217,22 @@ int RunCli(int argc, Character** argv) {
                       << timer.delivered << "/" << timer.returned << ", thread context returns="
                       << state.threadContextReturns << ". Original SDK handlers and saved contexts.\n";
         }
+        if (state.fpuException) {
+            const auto& fpu = *state.fpuException;
+            std::cerr << "Native FPU unavailable: delivered/returned=" << fpu.delivered << "/"
+                      << fpu.returned << ", owner=0x" << std::hex
+                      << ppc_read_u32(state, 0x800000d8u) << std::dec
+                      << ". Original SDK lazy context save/restore.\n";
+        }
         if (state.graphics) {
             const auto& gx = *state.graphics;
             std::cerr << "Native GX: " << gx.bursts << " actual 32-byte FIFO bursts, "
                       << gx.decodedCommands << " decoded register/NOP commands, "
                       << gx.commands.size() << " pending command bytes, "
                       << gx.gathered.size() << " gathered bytes, " << gx.draws << " quads, "
-                      << gx.rasterizedPixels << " rasterized pixel writes.\n";
+                      << gx.rasterizedPixels << " rasterized pixel writes, "
+                      << gx.texturePreloads << " direct-RAM texture preloads ("
+                      << gx.texturePreloadBytes << " source bytes validated).\n";
             if (gx.efb) {
                 const auto& efb = *gx.efb;
                 std::cerr << "Native EFB: " << efb.copies << " XFB RAM copies, " << efb.clears

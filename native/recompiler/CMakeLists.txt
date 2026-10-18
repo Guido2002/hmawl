@@ -64,7 +64,7 @@ if(HMAWL_ORIGINAL_US_DOL)
         DEPENDS hmawl_generate_original_scene "${original_directory}/wlp1.rel"
         VERBATIM
     )
-    add_library(hmawl_original_startup_runtime original_startup.cpp
+    add_library(hmawl_original_startup_runtime original_startup.cpp startup_diagnostics.cpp
         "${generated_original_startup}" "${generated_original_scene}")
     target_include_directories(hmawl_original_startup_runtime PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(hmawl_original_startup_runtime PUBLIC hmawl_recompiler_core)
@@ -78,6 +78,10 @@ if(HMAWL_ORIGINAL_US_DOL)
         target_link_libraries(hmawl_original_startup PRIVATE winmm user32 gdi32)
     endif()
     if(BUILD_TESTING)
+        add_executable(hmawl_startup_diagnostics_tests startup_diagnostics_tests.cpp)
+        target_link_libraries(hmawl_startup_diagnostics_tests PRIVATE hmawl_original_startup_runtime)
+        add_test(NAME hmawl_startup_diagnostics_tests
+            COMMAND hmawl_startup_diagnostics_tests "${HMAWL_ORIGINAL_US_DOL}")
         add_executable(hmawl_original_startup_tests original_startup_tests.cpp)
         target_include_directories(hmawl_original_startup_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
         target_link_libraries(hmawl_original_startup_tests PRIVATE hmawl_original_startup_runtime)

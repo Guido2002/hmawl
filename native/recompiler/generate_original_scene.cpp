@@ -101,16 +101,26 @@ int main(int argc, char** argv) {
             // The dispatcher guards these exact operand bytes before executing the fixed native operation.
             return "uint32_t{ppc_read_u16(state, relocationBase + " + Hex(pc - kBase + 2) + ")}";
         };
-        // Original mode-41 dispatcher case and its state-24 asset setup case.
+        // Original mode-41 dispatcher, state-24 setup, observed switch blocks,
+        // module cleanup entry, and destructor callbacks.
         std::vector<uint32_t> pending = {start + image.entryOffsets()[0],
-            kBase + 0x45b8cu, kBase + 0x46040u, kBase + 0x28d0u,
-            kBase + 0x954u, kBase + 0x958u, kBase + 0x263cu, kBase + 0x3e734u,
-            kBase + 0x42ecu, kBase + 0x42f4u};
+            kBase + 0x45b3cu, kBase + 0x2f164u, kBase + 0x41acu,
+            kBase + 0x45b8cu, kBase + 0x46040u, kBase + 0x46074u, kBase + 0x28d0u,
+            kBase + 0x2924u, kBase + 0x954u, kBase + 0x958u, kBase + 0x263cu, kBase + 0x3e734u,
+            kBase + 0x42ecu, kBase + 0x42f4u, start + 0x23bcu, start + 0x3e388u};
         const auto& ctors = image.sections().at(2);
         for (uint32_t offset = 0; offset < ctors.size; offset += 4) {
             const auto found = std::find_if(image.relocations().begin(), image.relocations().end(),
                 [&](const RelRelocation& fixup) {
                     return fixup.patchSection == 2 && fixup.patchOffset == offset;
+                });
+            if (found != image.relocations().end()) pending.push_back(canonicalTarget(*found));
+        }
+        const auto& dtors = image.sections().at(3);
+        for (uint32_t offset = 0; offset < dtors.size; offset += 4) {
+            const auto found = std::find_if(image.relocations().begin(), image.relocations().end(),
+                [&](const RelRelocation& fixup) {
+                    return fixup.patchSection == 3 && fixup.patchOffset == offset;
                 });
             if (found != image.relocations().end()) pending.push_back(canonicalTarget(*found));
         }

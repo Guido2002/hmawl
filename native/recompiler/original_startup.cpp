@@ -93,6 +93,7 @@ PpcState CreateOriginalStartupState(const DolImage& image) {
     state.memoryProtection.emplace();
     state.ramBats.emplace();
     state.externalInterrupt.emplace();
+    state.fpuException.emplace();
     state.dspControl = 0;
     state.dspHardware.emplace();
     state.dspHardware->aram.resize(16u * 1024u * 1024u);
@@ -142,6 +143,7 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
     }
     OriginalStartupResult result{};
     bool sceneRegistered = false;
+    bool sceneUnlinkPending = false;
     bool loopTailReturned = false;
     bool clzActive = false;
     uint32_t clzStack = 0;
@@ -223,6 +225,16 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
                 sceneModule = ppc_read_u32(state, state.gpr[31] + 0x70u);
                 dispatcher.Register(2, state, OriginalSceneTranslations(state, sceneModule));
                 sceneRegistered = true;
+            }
+            if (sceneRegistered && pc == 0x801b4abcu && state.gpr[3] == sceneModule)
+                sceneUnlinkPending = true;
+            if (sceneUnlinkPending && pc == 0x8017785cu) {
+                if (state.gpr[3] != 1)
+                    throw std::runtime_error("Original scene OSUnlink did not report success.");
+                dispatcher.Unregister(2);
+                sceneRegistered = false;
+                sceneUnlinkPending = false;
+                sceneModule = 0;
             }
             if (sceneRegistered && pc == sceneModule + 0x45aecu) result.scenePrologEntered = true;
             if (sceneRegistered && pc == sceneModule + 0x45b14u) ++result.sceneConstructorsReturned;

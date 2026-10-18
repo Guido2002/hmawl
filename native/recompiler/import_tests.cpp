@@ -435,6 +435,7 @@ void TestNativeDvdQueue() {
         guest.sprg0 = 0;
         guest.externalInterrupt.reset();
         guest.systemCallActive = true;
+        guest.fpuException.reset();
         guest.ramBats.reset();
         ppc_write_u32(guest, 0xcc003004u, 0xf0u);
         ppc_write_u16(guest, 0xcc00401cu, 0);
@@ -470,6 +471,8 @@ void TestNativeDvdQueue() {
     state.sprg0 = 0x12345678u;
     state.externalInterrupt.emplace();
     state.externalInterrupt->returned = 4;
+    state.fpuException.emplace();
+    state.fpuException->returned = 7;
     state.ramBats.emplace();
     state.ramBats->writes = 11;
     state.piInterruptMask = 0;
@@ -526,6 +529,8 @@ void TestNativeDvdQueue() {
                     state.srr1 == 0x32u && state.sprg0 == 0x12345678u &&
                     state.externalInterrupt && state.externalInterrupt->returned == 4 &&
                     !state.externalInterrupt->active && !state.systemCallActive && state.ramBats &&
+                    state.fpuException && state.fpuException->returned == 7 &&
+                    !state.fpuException->active &&
                     state.ramBats->writes == 11 && !state.ramBats->realModeActive &&
                     state.piInterruptMask == 0xf0u &&
                     state.miInterruptMask == 0 && state.dspControl == 0x6acu &&
@@ -627,6 +632,7 @@ void TestNativeDvdQueue() {
         guest.externalInterrupt->active = true;
         guest.externalInterrupt->returned = UINT32_MAX;
         guest.systemCallActive = true;
+        guest.fpuException.reset();
         guest.ramBats.reset();
         ppc_write_u32(guest, 0xcc003004u, 0xf0u);
         ppc_write_u16(guest, 0xcc00401cu, 0);
@@ -658,6 +664,8 @@ void TestNativeDvdQueue() {
                 state.srr1 == 0x32u && state.sprg0 == 0x12345678u &&
                 state.externalInterrupt && state.externalInterrupt->returned == 4 &&
                 !state.externalInterrupt->active && !state.systemCallActive && state.ramBats &&
+                state.fpuException && state.fpuException->returned == 7 &&
+                !state.fpuException->active &&
                 state.ramBats->writes == 11 && !state.ramBats->realModeActive &&
                 state.piInterruptMask == 0xf0u &&
                 state.miInterruptMask == 0 && state.dspControl == 0x6acu &&

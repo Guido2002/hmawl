@@ -56,6 +56,7 @@ private:
     std::map<uint32_t, Entry> entries_;
     bool executing_ = false;
     bool registrationBoundary_ = false;
+    uint32_t registrationBoundaryModuleId_ = 0;
 };
 
 #endif

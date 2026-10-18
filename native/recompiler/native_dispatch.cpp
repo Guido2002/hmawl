@@ -105,8 +105,8 @@ void NativeDispatcher::RegisterRel(
 }
 
 void NativeDispatcher::Unregister(uint32_t moduleId) {
-    if (executing_) {
-        throw std::runtime_error("Cannot change native bindings during execution.");
+    if (executing_ && (!registrationBoundary_ || moduleId == registrationBoundaryModuleId_)) {
+        throw std::runtime_error("Cannot unregister the active native module during execution.");
     }
     bool removed = false;
     for (auto entry = entries_.begin(); entry != entries_.end();) {
@@ -164,14 +164,17 @@ void NativeDispatcher::Run(PpcState& state, uint32_t address, uint32_t returnAdd
         const auto function = entry->second.translation.function;
         --remaining;
         if (onBlock) {
+            registrationBoundaryModuleId_ = entry->second.moduleId;
             registrationBoundary_ = true;
             try {
                 onBlock(state.pc);
             } catch (...) {
                 registrationBoundary_ = false;
+                registrationBoundaryModuleId_ = 0;
                 throw;
             }
             registrationBoundary_ = false;
+            registrationBoundaryModuleId_ = 0;
             if (state.pc != blockAddress) {
                 throw std::runtime_error("Native block observer changed execution PC.");
             }

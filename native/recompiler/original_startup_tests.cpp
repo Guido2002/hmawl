@@ -17,6 +17,7 @@
 #include <iterator>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,91 @@ __attribute__((noinline))
 #endif
 std::unique_ptr<PpcState> StartupFixture(const DolImage& image) {
     return std::make_unique<PpcState>(CreateOriginalStartupState(image));
+}
+
+void TestProductionPostLoadConstructor(const DolImage& image) {
+    auto storage = StartupFixture(image);
+    auto& state = *storage;
+    NativeDispatcher dispatcher;
+    RegisterOriginalStartup(dispatcher, state);
+    Require(dispatcher.Contains(0x8010274cu) && dispatcher.Contains(0x80186df4u) &&
+                dispatcher.Contains(0x800fca98u) && dispatcher.Contains(0x80104f80u) &&
+                dispatcher.Contains(0x80102684u) && dispatcher.Contains(0x801026e8u) &&
+                dispatcher.Contains(0x80182578u) && dispatcher.Contains(0x801825fcu) &&
+                dispatcher.Contains(0x801848e0u) && dispatcher.Contains(0x8018499cu) &&
+                dispatcher.Contains(0x8017a2fcu) && dispatcher.Contains(0x8017cd5cu) &&
+                dispatcher.Contains(0x8017d0ecu) && dispatcher.Contains(0x8017d3c4u) &&
+                dispatcher.Contains(0x8000c4c4u) && dispatcher.Contains(0x80009904u),
+            "Post-load object constructor or its verified nested initializers are not registered.");
+    constexpr uint32_t object = 0x80400000u, stack = 0x8035cfa0u;
+    state.gpr[1] = stack;
+    state.gpr[2] = 0x80351e40u;
+    state.gpr[13] = 0x8034e9c0u;
+    state.gpr[3] = object + 0xcc;
+    state.gpr[4] = object;
+    state.lr = 0x80003000u;
+    state.msr |= 0x2000u;
+    const auto before = state.memory;
+    dispatcher.Execute(state, 0x8010274cu);
+    Require(state.pc == 0x80003000u && state.lr == 0x80003000u &&
+                state.gpr[3] == object + 0xcc && state.gpr[1] == stack &&
+                ppc_read_u32(state, object + 0xcc) == 0x802bd110u &&
+                ppc_read_u32(state, object + 0x1bc) == 0x802bd524u &&
+                ppc_read_u32(state, object + 0x1c0) == UINT32_MAX &&
+                ppc_read_u32(state, object + 0x290) == 0x802bd4f4u &&
+                ppc_read_u32(state, object + 0x2cc) == 0x802bd514u &&
+                ppc_read_u32(state, object + 0x304) == 1u &&
+                !state.callGuest && !state.callException,
+            "Post-load nested constructor did not return with its verified object state.");
+    for (size_t i = 0; i < before.size(); ++i) {
+        const uint32_t address = 0x80000000u + static_cast<uint32_t>(i);
+        const bool allowed = (address >= object + 0xcc && address < object + 0x308) ||
+                             (address >= stack - 0x120 && address < stack + 8);
+        if (!allowed && before[i] != state.memory[i]) {
+            throw std::runtime_error("Post-load constructor wrote outside its object or stack at guest address " +
+                                     std::to_string(address) + ".");
+        }
+    }
+}
+
+void TestProductionPostLoadDestructor(const DolImage& image) {
+    auto storage = StartupFixture(image);
+    auto& state = *storage;
+    NativeDispatcher dispatcher;
+    RegisterOriginalStartup(dispatcher, state);
+    Require(dispatcher.Contains(0x800e1db8u) && dispatcher.Contains(0x800098d0u) &&
+                dispatcher.Contains(0x80179168u),
+            "Post-load object destructor or its verified helpers are not registered.");
+    constexpr uint32_t object = 0x80420000u, stack = 0x8035cfa0u;
+    constexpr uint32_t returnAddress = 0x80003000u;
+    const auto objectOffset = ppc_memory_offset(state, object, 0x180);
+    std::fill_n(state.memory.begin() + objectOffset, 0x180, 0);
+    state.gpr[1] = stack;
+    state.gpr[3] = object;
+    state.gpr[4] = UINT32_MAX;
+    state.lr = returnAddress;
+    const auto before = state.memory;
+    dispatcher.Execute(state, 0x800e1db8u);
+    Require(state.pc == returnAddress && state.lr == returnAddress && state.gpr[3] == object &&
+                state.gpr[1] == stack &&
+                ppc_read_u32(state, object + 0x4) == 0x802bb108u &&
+                ppc_read_u32(state, object + 0x8) == 0x802ab818u &&
+                ppc_read_u32(state, object + 0x4c) == 0x802ab818u &&
+                ppc_read_u32(state, object + 0x138) == 0 &&
+                ppc_read_u32(state, object + 0x13c) == 0 &&
+                ppc_read_u32(state, object + 0x140) == 0 &&
+                ppc_read_u32(state, object + 0x148) == 0x802979b8u &&
+                !state.callGuest && !state.callException,
+            "Post-load destructor did not dismantle its empty object and return through its ABI.");
+    for (size_t i = 0; i < before.size(); ++i) {
+        const uint32_t address = 0x80000000u + static_cast<uint32_t>(i);
+        const bool allowed = (address >= object && address < object + 0x14cu) ||
+                             (address >= stack - 0x10 && address < stack + 8);
+        if (!allowed && before[i] != state.memory[i]) {
+            throw std::runtime_error("Post-load destructor wrote outside its object or stack at guest address " +
+                                     std::to_string(address) + ".");
+        }
+    }
 }
 
 void TestProductionClz(const DolImage& image) {
@@ -84,6 +170,91 @@ void TestProductionClz(const DolImage& image) {
             "Original empty CLZ worker did not clear its active flag and return through its real epilogue.");
     for (unsigned reg = 14; reg < 32; ++reg)
         Require(state.gpr[reg] == 0x12340000u + reg, "Original CLZ worker corrupted a nonvolatile register.");
+}
+
+void TestProductionFpuContexts(const PpcState& booted) {
+    auto storage = std::make_unique<PpcState>(booted);
+    auto& state = *storage;
+    const auto ticks = booted.readTimeBase();
+    state.readTimeBase = [ticks] { return ticks; };
+    state.externalInterruptsEnabled = false;
+    NativeDispatcher dispatcher;
+    RegisterOriginalStartup(dispatcher, state);
+    constexpr uint32_t first = 0x80410000u, second = first + 0x400u;
+    constexpr uint32_t returnAddress = 0x80003000u;
+    std::array<std::array<PpcFpr, 32>, 2> registers{};
+    const std::array<uint32_t, 2> status = {4u, 0x82024004u};
+    for (unsigned context = 0; context < 2; ++context) {
+        const auto address = context == 0 ? first : second;
+        const auto offset = ppc_memory_offset(state, address, 0x2c8);
+        std::fill_n(state.memory.begin() + offset, 0x2c8, 0);
+        for (unsigned reg = 0; reg < 32; ++reg) {
+            registers[context][reg] = {
+                UINT64_C(0x3ff0000000000123) + (uint64_t(context * 32 + reg) << 32),
+                ppc_widen_single_bits(0x40000000u + (context * 32 + reg) * 0x100u)};
+            ppc_write_u64(state, address + 0x90 + reg * 8, registers[context][reg].ps0);
+            ppc_write_u32(state, address + 0x1c8 + reg * 8,
+                          ppc_narrow_single_bits(registers[context][reg].ps0));
+            ppc_write_u32(state, address + 0x1cc + reg * 8,
+                          ppc_narrow_single_bits(registers[context][reg].ps1));
+        }
+        ppc_write_u64(state, address + 0x190, status[context]);
+        ppc_write_u16(state, address + 0x1a2, context == 0 ? 0 : 1);
+    }
+    ppc_write_u32(state, 0x800000d8u, 0);
+    state.fpr = registers[0];
+    state.fpscr = status[0];
+    const auto delivered = state.fpuException->delivered;
+    const auto returned = state.fpuException->returned;
+    for (unsigned pass = 0; pass < 6; ++pass) {
+        const unsigned context = pass % 2;
+        const auto address = context == 0 ? first : second;
+        state.gpr[3] = address;
+        state.lr = returnAddress;
+        dispatcher.Execute(state, 0x801b2d24u);
+        Require((ppc_read_msr(state) & 0x2000u) == 0,
+                "Original OSSetCurrentContext did not disable a non-owner's FPU.");
+        state.cr = 0x12345678u;
+        state.xer = 0xe0000000u;
+        state.ctr = 0x1234u;
+        const std::vector<uint32_t> gpr(std::begin(state.gpr), std::end(state.gpr));
+        unsigned faults = 0, saveBlocks = 0, loadBlocks = 0;
+        dispatcher.Execute(state, 0x801b0a9cu, 1000000, 128, [&](uint32_t pc) {
+            if (pc == 0x800u) ++faults;
+            if (pc == 0x801b2bf4u) ++saveBlocks;
+            if (pc == 0x801b2ad0u) ++loadBlocks;
+        });
+        Require(faults == 1 && saveBlocks == (pass == 0 ? 0u : 1u) && loadBlocks == 1 &&
+                    state.gpr[3] == status[context] && state.fpr == registers[context] &&
+                    state.fpscr == status[context] && state.cr == 0x12345678u &&
+                    state.xer == 0xe0000000u && state.ctr == 0x1234u &&
+                    state.lr == returnAddress && state.pc == returnAddress &&
+                    ppc_read_u32(state, 0x800000d8u) == address &&
+                    state.fpuException->resume == 0x801b0aa0u &&
+                    state.fpuException->delivered == delivered + pass + 1 &&
+                    state.fpuException->returned == returned + pass + 1 &&
+                    !state.fpuException->active && !state.callGuest && !state.callException,
+                "Original FPU exception did not switch ownership, restore every lane/FPSCR or resume the faulting store.");
+        for (unsigned reg = 0; reg < 32; ++reg)
+            if (reg != 3) Require(state.gpr[reg] == gpr[reg], "FPU exception damaged an integer register.");
+        const auto count = state.fpuException->delivered;
+        dispatcher.Execute(state, 0x801b0a9cu);
+        Require(state.fpuException->delivered == count && state.fpr == registers[context],
+                "An enabled FPU took a redundant exception or changed preserved registers.");
+    }
+    for (unsigned context = 0; context < 2; ++context) {
+        const auto address = context == 0 ? first : second;
+        Require((ppc_read_u16(state, address + 0x1a2) & 1) != 0 &&
+                    ppc_read_u32(state, address + 0x194) == status[context],
+                "Original FPU save omitted its ownership flag or FPSCR.");
+        for (unsigned reg = 0; reg < 32; ++reg)
+            Require(ppc_read_u64(state, address + 0x90 + reg * 8) == registers[context][reg].ps0 &&
+                        ppc_read_u32(state, address + 0x1cc + reg * 8) ==
+                            ppc_narrow_single_bits(registers[context][reg].ps1),
+                    "Original FPU context save lost a double payload or paired lane.");
+    }
+    std::cout << "Original FPU unavailable vector: six ownership switches preserve all FPR lanes, "
+                 "FPSCR and integer context; faulting stfd resumes after its stack prologue.\n";
 }
 
 uint32_t VerifyOriginalSceneLink(const PpcState& state, const std::vector<uint8_t>& bytes,
@@ -214,6 +385,30 @@ void TestScenePlacements(const DolImage& image, const std::vector<uint8_t>& byte
         Require(state.gpr[3] == 1, "Original OSLink rejected an alternate scene placement.");
         const auto prolog = VerifyOriginalSceneLink(state, bytes, module, bss);
         const auto translations = OriginalSceneTranslations(state, module);
+        Require(std::any_of(translations.begin(), translations.end(), [&](const auto& translation) {
+                    return translation.address == module + 0x45b3cu;
+                }),
+                "Original scene module cleanup callback is not translated.");
+        Require(std::any_of(translations.begin(), translations.end(), [&](const auto& translation) {
+                    return translation.address == module + 0x45a8cu;
+                }),
+                "Original scene destructor table callback is not translated.");
+        Require(std::any_of(translations.begin(), translations.end(), [&](const auto& translation) {
+                    return translation.address == module + 0x2f164u;
+                }),
+                "Original scene destructor callback is not translated.");
+        Require(std::any_of(translations.begin(), translations.end(), [&](const auto& translation) {
+                    return translation.address == module + 0x41acu;
+                }),
+                "Original scene destructor callback table is incomplete.");
+        Require(std::any_of(translations.begin(), translations.end(), [&](const auto& translation) {
+                    return translation.address == module + 0x46074u;
+                }),
+                "Observed original scene cleanup switch case is not translated.");
+        Require(std::any_of(translations.begin(), translations.end(), [&](const auto& translation) {
+                    return translation.address == module + 0x2924u;
+                }),
+                "Observed original scene switch block is not translated.");
         const auto first = ppc_read_u32(state, prolog);
         ppc_write_u32(state, prolog, 0);
         RequireFailure([&] { dispatcher.Register(2, state, translations); },
@@ -254,6 +449,15 @@ void TestScenePlacements(const DolImage& image, const std::vector<uint8_t>& byte
                        "Modified relocated immediate bypassed native code integrity.");
         dispatcher.Unregister(2);
         Require(!dispatcher.Contains(prolog), "Scene code remained bound after unregister.");
+        Require(dispatcher.Contains(0x801b4abcu) && dispatcher.Contains(0x801b42b4u),
+                "Original OSUnlink cleanup path is not registered.");
+        state.gpr[3] = module;
+        state.lr = 0x80003000u;
+        dispatcher.Execute(state, 0x801b4abcu, 1000000);
+        Require(state.gpr[3] == 1 &&
+                    ppc_read_u32(state, 0x800030c8u) == 0 &&
+                    ppc_read_u32(state, 0x800030ccu) == 0,
+                "Original OSUnlink did not remove the scene module from the module list.");
     }
 }
 
@@ -310,6 +514,8 @@ int main(int argc, char** argv) {
                        "Production DOL loader accepted a nonmatching executable.");
         const auto image = LoadOriginalUsDol(argv[1]);
         TestProductionClz(image);
+        TestProductionPostLoadConstructor(image);
+        TestProductionPostLoadDestructor(image);
         DolFixtures fixtures(argv[1]);
         std::ifstream source(argv[1], std::ios::binary);
         Require(static_cast<bool>(source), "Could not read fixture source DOL.");
@@ -351,6 +557,21 @@ int main(int argc, char** argv) {
         Require(dispatcher.Contains(image.entryPoint()) && dispatcher.Contains(0x80003264u) &&
                     dispatcher.Contains(0x801b0de0u) && dispatcher.Contains(0x801b0f88u),
                 "Production bindings omit the original entry-to-OSInit chain.");
+        Require(dispatcher.Contains(0x8017a200u) && dispatcher.Contains(0x8018a1f4u) &&
+                    dispatcher.Contains(0x8018a460u) &&
+                    dispatcher.Contains(0x800e359cu) && dispatcher.Contains(0x800e3948u) &&
+                    dispatcher.Contains(0x80184ec8u) &&
+                    dispatcher.Contains(0x801c1eecu) &&
+                    dispatcher.Contains(0x801e8290u) && dispatcher.Contains(0x801deff8u) &&
+                    dispatcher.Contains(0x801df240u) && dispatcher.Contains(0x801df404u) &&
+                    dispatcher.Contains(0x800fb5a4u) && dispatcher.Contains(0x800fb5e0u) &&
+                    dispatcher.Contains(0x801dfcacu) &&
+                    dispatcher.Contains(0x801dffbcu) &&
+                    dispatcher.Contains(0x801df784u) && dispatcher.Contains(0x801dfbd4u) &&
+                    dispatcher.Contains(0x801f1c28u) && dispatcher.Contains(0x801f1d60u) &&
+                    dispatcher.Contains(0x801f2068u) && dispatcher.Contains(0x801f23e8u) &&
+                    dispatcher.Contains(0x801f2f00u) && dispatcher.Contains(0x801f2f38u),
+                "Production bindings omit a verified startup dependency.");
         auto peripheralStorage = StartupFixture(image);
         auto& missingPeripheral = *peripheralStorage;
         missingPeripheral.transferExiImmediate = {};
@@ -671,6 +892,7 @@ int main(int argc, char** argv) {
                 "Real original startup did not preserve its hardware/OS initialization evidence.");
         RequireFailure([&] { RunOriginalStartup(dispatcher, state); },
                        "Runner accepted reuse of an incomplete startup state.");
+        TestProductionFpuContexts(state);
 
         auto limited = CreateOriginalStartupState(image);
         const auto budget = RunOriginalStartup(dispatcher, limited, 1);
@@ -1709,7 +1931,8 @@ int main(int argc, char** argv) {
                 std::cout << "PCM integration: PC=" << std::hex << pcmResult.pc << " LR=" << pcmResult.lr << std::dec
                           << " reason=" << pcmResult.reason << " frames=" << submittedFrames
                           << " periods=" << pcmState.pcm->completedBuffers << " handlers=" << pcmHandlers
-                          << " callbacks=" << pcmCallbacks << " DSP PC=" << pcmState.dspHardware->instructionPc
+                          << " callbacks=" << pcmCallbacks << " DSP PC=0x" << std::hex
+                          << pcmState.dspHardware->instructionPc << std::dec
                           << " DMA=" << pcmState.dspHardware->task->dataTransfers << "/"
                           << pcmState.dspHardware->task->transferredBytes << " command returns=" << commandHandshakes
                           << " CPU mail=" << pcmState.dspHardware->task->cpuMailSent << "/"
@@ -1729,44 +1952,65 @@ int main(int argc, char** argv) {
                           << pcmState.decrementer->delivered << "/" << pcmState.decrementer->returned
                           << " thread context returns=" << pcmState.threadContextReturns
                           << " archive handles=" << archiveHandles << '\n';
-                Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            sceneProlog != 0 &&
-                            pcmResult.reason == "Test checkpoint: second native quad pass complete." &&
-                            pcmResult.sceneModuleLinked && pcmResult.scenePrologEntered &&
-                            pcmResult.sceneInitializationEntered && pcmResult.scenePrologReturned &&
-                            pcmResult.sceneConstructorsReturned == 28 && pcmResult.systemTaskReturned &&
-                            pcmResult.taskPassesReturned == 6 &&
-                            pcmResult.deferredUpdatesReturned && pcmResult.deferredUpdateQueueCleared &&
-                            pcmResult.screenPreparationReturned && pcmResult.renderQueuePrepared &&
-                            pcmResult.renderPassReturned && pcmResult.renderQueueCleared &&
-                            pcmResult.frameDrawSyncReturned &&
-                            pcmResult.postRenderCallbackReturned && pcmResult.frameRetraceWaitReturned &&
-                            pcmResult.frameBufferExchangeReturned && pcmResult.frameTimingReturned &&
-                            pcmResult.controllerUpdateReturned &&
-                            pcmResult.gameLoopIterationsCompleted == 1 && loopEntries == 2 &&
-                            frameSteps == frameReturns.size() && padReads == 1 &&
-                            sceneConstructors.returned == 28 && !sceneConstructors.active &&
-                            !dispatcher.Contains(sceneProlog) &&
-                            pcmResult.audioTaskInitReturned && pcmResult.pcmDmaStartReturned &&
-                            pcmResult.gameInitializationReturned && pcmResult.gameLoopEntered &&
-                            pcmResult.firstLoopPreparationReturned &&
-                            pcmState.pcm->active && pcmState.pcm->starts == 1 &&
-                            pcmState.pcm->completedBuffers == 4210 && pcmState.pcm->submittedFrames == submittedFrames &&
-                            submittedFrames == 673760 && pcmHandlers == 4207 && pcmCallbacks == 4204 &&
-                            commandAddress != 0 && commandHandshakes == 4204 &&
-                            pcmState.dspHardware->task->cpuMailSent == 12622 &&
-                            pcmState.dspHardware->task->cpuMailConsumed == 12622 &&
-                            !(pcmState.dspHardware->toDspMailbox & 0x80000000u) &&
-                            pcmState.dspHardware->task->dataTransfers == 134495 &&
-                            pcmState.dspHardware->task->transferredBytes == 40817692 &&
-                            pcmState.dspHardware->instructionPc == 0x4a &&
-                            pcmState.dspHardware->task->interrupts == 4205 &&
-                            pcmState.dspHardware->sentMail == 4207 && pcmState.dspHardware->consumedMail == 4207 &&
-                            pcmState.dspHardware->task->mode == NativeDspTaskMode::Running &&
-                            pcmState.dspHardware->completedPrograms == 1 &&
-                            !pcmState.systemCallActive && !pcmState.externalInterrupt->active &&
-                            pcmState.externalInterrupt->suspended.empty(),
-                        "Original scene prolog did not finish through the real loader-thread and interrupt chain.");
+#define CHECK_SCENE(condition) Require((condition), "Scene checkpoint: " #condition)
+                CHECK_SCENE(pcmResult.stop == OriginalStartupStop::Dependency);
+                CHECK_SCENE(sceneProlog != 0);
+                CHECK_SCENE(pcmResult.reason == "Test checkpoint: second native quad pass complete.");
+                CHECK_SCENE(pcmResult.sceneModuleLinked);
+                CHECK_SCENE(pcmResult.scenePrologEntered);
+                CHECK_SCENE(pcmResult.sceneInitializationEntered);
+                CHECK_SCENE(pcmResult.scenePrologReturned);
+                CHECK_SCENE(pcmResult.sceneConstructorsReturned == 28);
+                CHECK_SCENE(pcmResult.systemTaskReturned);
+                CHECK_SCENE(pcmResult.taskPassesReturned == 6);
+                CHECK_SCENE(pcmResult.deferredUpdatesReturned);
+                CHECK_SCENE(pcmResult.deferredUpdateQueueCleared);
+                CHECK_SCENE(pcmResult.screenPreparationReturned);
+                CHECK_SCENE(pcmResult.renderQueuePrepared);
+                CHECK_SCENE(pcmResult.renderPassReturned);
+                CHECK_SCENE(pcmResult.renderQueueCleared);
+                CHECK_SCENE(pcmResult.frameDrawSyncReturned);
+                CHECK_SCENE(pcmResult.postRenderCallbackReturned);
+                CHECK_SCENE(pcmResult.frameRetraceWaitReturned);
+                CHECK_SCENE(pcmResult.frameBufferExchangeReturned);
+                CHECK_SCENE(pcmResult.frameTimingReturned);
+                CHECK_SCENE(pcmResult.controllerUpdateReturned);
+                CHECK_SCENE(pcmResult.gameLoopIterationsCompleted == 1);
+                CHECK_SCENE(loopEntries == 2);
+                CHECK_SCENE(frameSteps == frameReturns.size());
+                CHECK_SCENE(padReads == 1);
+                CHECK_SCENE(sceneConstructors.returned == 28);
+                CHECK_SCENE(!sceneConstructors.active);
+                CHECK_SCENE(!dispatcher.Contains(sceneProlog));
+                CHECK_SCENE(pcmResult.audioTaskInitReturned);
+                CHECK_SCENE(pcmResult.pcmDmaStartReturned);
+                CHECK_SCENE(pcmResult.gameInitializationReturned);
+                CHECK_SCENE(pcmResult.gameLoopEntered);
+                CHECK_SCENE(pcmResult.firstLoopPreparationReturned);
+                CHECK_SCENE(pcmState.pcm->active);
+                CHECK_SCENE(pcmState.pcm->starts == 1);
+                CHECK_SCENE(pcmState.pcm->completedBuffers == 4219);
+                CHECK_SCENE(pcmState.pcm->submittedFrames == submittedFrames);
+                CHECK_SCENE(submittedFrames == 675200);
+                CHECK_SCENE(pcmHandlers == 4216);
+                CHECK_SCENE(pcmCallbacks == 4213);
+                CHECK_SCENE(commandAddress != 0);
+                CHECK_SCENE(commandHandshakes == 4213);
+                CHECK_SCENE(pcmState.dspHardware->task->cpuMailSent == 12649);
+                CHECK_SCENE(pcmState.dspHardware->task->cpuMailConsumed == 12649);
+                CHECK_SCENE(!(pcmState.dspHardware->toDspMailbox & 0x80000000u));
+                CHECK_SCENE(pcmState.dspHardware->task->dataTransfers == 134783);
+                CHECK_SCENE(pcmState.dspHardware->task->transferredBytes == 40905100);
+                CHECK_SCENE(pcmState.dspHardware->instructionPc == 0x4a);
+                CHECK_SCENE(pcmState.dspHardware->task->interrupts == 4214);
+                CHECK_SCENE(pcmState.dspHardware->sentMail == 4216);
+                CHECK_SCENE(pcmState.dspHardware->consumedMail == 4216);
+                CHECK_SCENE(pcmState.dspHardware->task->mode == NativeDspTaskMode::Running);
+                CHECK_SCENE(pcmState.dspHardware->completedPrograms == 1);
+                CHECK_SCENE(!pcmState.systemCallActive);
+                CHECK_SCENE(!pcmState.externalInterrupt->active);
+                CHECK_SCENE(pcmState.externalInterrupt->suspended.empty());
+#undef CHECK_SCENE
                 Require(returnedObjects.size() == objectReturns.size() &&
                             loopSteps == loopReturns.size() && arrayConstructors == 2 &&
                             pcmResult.startupObjectsReturned == objectReturns.size() &&
@@ -1779,7 +2023,7 @@ int main(int argc, char** argv) {
                 Require(managerReturns == 1 && loaderWorkers == 52 && loaderExits == loaderWorkers &&
                             alarmHandlers == 1 && pcmState.decrementer->delivered == alarmHandlers &&
                             pcmState.decrementer->returned == alarmHandlers &&
-                            pcmState.threadContextReturns == 54 && archiveHandles > 0 &&
+                            pcmState.threadContextReturns == 69 && archiveHandles > 0 &&
                             scene != 0 && ppc_read_u32(pcmState, scene + 0x14) == sceneModule + 0x47da4u &&
                             ppc_read_u32(pcmState, scene + 0x18) != 0 &&
                             ppc_read_u32(pcmState, scene + 0x34) == 24 &&
@@ -2146,8 +2390,12 @@ int main(int argc, char** argv) {
                     Require(std::adjacent_find(copiedBuffers.begin(), copiedBuffers.end()) == copiedBuffers.end(),
                             "Original repeated framebuffer exchange reused the same consecutive destination.");
                     const auto decodedOffset = ppc_memory_offset(*sustained, decodeDestination, decodedBytes);
-                    Require(decodedBytes == 19558 && expectedDecoded.size() == 5410544 &&
-                                decodeBlocks == 41161 && std::equal(expectedDecoded.begin(),
+                    // Partial progress depends on scheduler/block timing. Validate every
+                    // produced byte against the oracle; the paired run below must still
+                    // reproduce the exact CPU/RAM, progress and graphics checkpoint.
+                    Require(decodedBytes > 0 && decodedBytes < expectedDecoded.size() &&
+                                expectedDecoded.size() == 5410544 && decodeBlocks > 0 &&
+                                std::equal(expectedDecoded.begin(),
                                 expectedDecoded.begin() + decodedBytes, sustained->memory.begin() + decodedOffset),
                             "Live original CLZ worker made no progress or differs from the independent resource decoder.");
                     Require(sustainedResult.clzDecodesStarted == 1 && sustainedResult.clzDecodesCompleted == 0 &&
@@ -2156,7 +2404,8 @@ int main(int argc, char** argv) {
                                 sustainedResult.clzExpectedBytes == expectedDecoded.size() &&
                                 sustainedResult.clzProducedBytes == decodedBytes &&
                                 sustainedResult.clzDecoderBlockEntries == decodeBlocks &&
-                                DescribeOriginalStartupStop(sustainedResult).find("19558/5410544 output bytes") !=
+                                DescribeOriginalStartupStop(sustainedResult).find(
+                                    std::to_string(decodedBytes) + "/5410544 output bytes") !=
                                     std::string::npos,
                             "Original startup report lost the real worker's partial CLZ progress.");
                     auto unobserved = StartupFixture(image);

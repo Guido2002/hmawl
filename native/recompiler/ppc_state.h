@@ -24,6 +24,8 @@ constexpr uint32_t kGameCubeRamSize = 24u * 1024u * 1024u;
 
 enum class PpcMemoryMap { Flat, GameCubeRam };
 
+using PpcInstructionObserver = void (*)(void*, uint32_t, uint32_t);
+
 struct ExiImmediateRequest {
     unsigned channel;
     unsigned device;
@@ -144,6 +146,15 @@ struct PpcDecrementer {
 struct PpcInterruptContextReturn {};
 struct PpcThreadContextReturn {};
 
+struct PpcFpuException {
+    bool active = false;
+    bool inHandler = false;
+    uint32_t resume = 0;
+    uint32_t savedMsr = 0;
+    uint64_t delivered = 0;
+    uint64_t returned = 0;
+};
+
 struct PpcState {
     uint32_t gpr[32] = {};
     // Raw IEEE-754 bits keep NaN payloads and the independent paired lane intact.
@@ -161,9 +172,12 @@ struct PpcState {
     uint32_t lr = 0;
     uint32_t ctr = 0;
     uint32_t pc = 0;
+    void* instructionObserverContext = nullptr;
+    PpcInstructionObserver instructionObserver = nullptr;
     uint32_t srr0 = 0;
     uint32_t srr1 = 0;
     bool systemCallActive = false;
+    std::optional<PpcFpuException> fpuException;
     uint32_t sprg0 = 0;
     std::optional<PpcExternalInterrupt> externalInterrupt;
     std::optional<PpcDecrementer> decrementer;
@@ -1242,6 +1256,29 @@ inline void ppc_validate_thread_context_return(const PpcState& state) {
 }
 
 inline void ppc_return_from_system_call(PpcState& state) {
+    if (state.fpuException && state.fpuException->active) {
+        auto& exception = *state.fpuException;
+        if (!exception.inHandler) {
+            if (ppc_read_msr(state) != 0 || state.srr1 != 0x30u ||
+                state.srr0 < 0x80000000u || state.srr0 >= 0x80000000u + kGameCubeRamSize ||
+                (state.srr0 & 3u) != 0) {
+                throw std::runtime_error("FPU unavailable vector requires a translated RAM handler.");
+            }
+            exception.inHandler = true;
+        } else {
+            if (state.srr0 != exception.resume || state.srr1 != (exception.savedMsr | 0x2000u) ||
+                state.externalInterruptsEnabled) {
+                throw std::runtime_error("FPU unavailable handler did not restore the faulting context.");
+            }
+            exception.active = false;
+            exception.inHandler = false;
+            ++exception.returned;
+        }
+        state.msr = state.srr1 & ~0x8000u;
+        state.externalInterruptsEnabled = (state.srr1 & 0x8000u) != 0;
+        state.pc = state.srr0;
+        return;
+    }
     if (state.externalInterrupt && state.externalInterrupt->active && !state.systemCallActive) {
         auto& interrupt = *state.externalInterrupt;
         if ((state.srr0 & 3u) != 0 ||
@@ -1397,6 +1434,31 @@ inline void ppc_deliver_decrementer_interrupt(PpcState& state) {
     const auto now = state.readTimeBase();
     if (now < state.decrementer->deadline) return;
     ppc_deliver_interrupt(state, 0x900u);
+}
+
+inline void ppc_require_fpu(PpcState& state, uint32_t instruction) {
+    if (!state.fpuException || (ppc_read_msr(state) & 0x2000u) != 0) return;
+    auto& exception = *state.fpuException;
+    if (state.memoryMap != PpcMemoryMap::GameCubeRam || !state.ramBats ||
+        state.ramBats->realModeActive || exception.active || state.systemCallActive ||
+        !state.callException || (ppc_read_msr(state) & ~0xb032u) != 0 ||
+        instruction < 0x80000000u || instruction >= 0x80000000u + kGameCubeRamSize ||
+        (instruction & 3u) != 0) {
+        throw std::runtime_error("Unsupported native FPU unavailable exception context.");
+    }
+    exception.resume = instruction;
+    exception.savedMsr = ppc_read_msr(state);
+    exception.active = true;
+    exception.inHandler = false;
+    ++exception.delivered;
+    state.srr0 = instruction;
+    state.srr1 = exception.savedMsr;
+    state.msr = 0;
+    state.externalInterruptsEnabled = false;
+    state.callException(0x800u, instruction, state);
+    if (exception.active || state.pc != instruction || (ppc_read_msr(state) & 0x2000u) == 0) {
+        throw std::runtime_error("Native FPU unavailable handler returned without restoring FPU access.");
+    }
 }
 
 inline uint64_t ppc_read_time_base(const PpcState& state) {

@@ -223,7 +223,7 @@ void TestExplicitBoundaries() {
     Reject([&] { Send(xf, {0x10, 0, 1, 0x10, 0x57, 0, 0, 0, 1, 0, 0, 0, 2}); }, "XF load");
     Require(xf.graphics->xf.back() == 0, "Out-of-bounds XF load partially committed.");
     auto tlut = State();
-    Reject([&] { Send(tlut, {0x61, 0x65, 0, 0, 0}); }, "texture-memory");
+    Reject([&] { Send(tlut, {0x61, 0x65, 0, 0, 0}); }, "TLUT-memory");
     auto opcode = State();
     Reject([&] { Send(opcode, {0x40, 0, 0, 0, 0}); }, "FIFO opcode");
     auto fragmented = State();
@@ -732,12 +732,43 @@ void TestEfbFailuresAndRetry() {
                 retry.graphics->bursts == 1 && retry.graphics->fifo[6] == 0x1020,
             "Retry did not consume exactly one staged copy without replaying the token/FIFO burst.");
     auto committed = CopyState();
-    Reject([&] { Send(committed, {0x61, 0x52, 0, 0x48, 3, 0x61, 0x65, 0, 0, 1}); }, "texture/TLUT");
-    Reject([&] { ppc_write_u16(committed, 0xcc000002, 0x11); }, "texture/TLUT");
+    Reject([&] { Send(committed, {0x61, 0x52, 0, 0x48, 3, 0x61, 0x65, 0, 0, 1}); }, "TLUT-memory");
+    Reject([&] { ppc_write_u16(committed, 0xcc000002, 0x11); }, "TLUT-memory");
     Require(committed.graphics->efb->copies == 1 && committed.graphics->efb->clears == 1 &&
                 committed.graphics->decodedCommands == 1 && committed.graphics->commands[1] == 0x65 &&
                 committed.graphics->fifo[4] == 0 && committed.graphics->fifo[6] == 0x1020,
             "Retry after a later DMA rejection replayed an already committed EFB copy/clear.");
+}
+
+void TestTexturePreloadValidation() {
+    auto state = State();
+    Send(state, {0x61, 0x60, 0, 0, 0x40,
+                 0x61, 0x61, 0, 0, 1,
+                 0x61, 0x62, 0, 0, 2,
+                 0x61, 0x63, 0, 0x80, 2});
+    Require(state.graphics->texturePreloads == 1 &&
+                state.graphics->texturePreloadBytes == 64 &&
+                state.graphics->bp[0x63] == 0x8002 &&
+                state.graphics->decodedCommands >= 4 &&
+                state.graphics->commands.empty(),
+            "Valid native texture preload did not validate its RAM source and retain its BP state.");
+
+    auto invalid = State();
+    Reject([&] {
+        Send(invalid, {0x61, 0x60, 0, 1, 0,
+                       0x61, 0x63, 0, 0, 1});
+    }, "outside guest memory");
+    Require(invalid.graphics->texturePreloads == 0 &&
+                invalid.graphics->bp[0x63] == 0 &&
+                invalid.graphics->commands[0] == 0x61 &&
+                invalid.graphics->commands[1] == 0x63,
+            "Rejected texture preload committed its BP register or transfer count.");
+    invalid.graphics->bp[0x60] = 0x40;
+    ppc_write_u16(invalid, 0xcc000002, 0x11);
+    Require(invalid.graphics->texturePreloads == 1 &&
+                invalid.graphics->texturePreloadBytes == 32 &&
+                invalid.graphics->commands.empty(),
+            "Correcting an invalid texture source did not retry the retained preload once.");
 }
 
 } // namespace
@@ -751,11 +782,13 @@ int main() {
         TestQuadRenderer();
         TestEfbCopies();
         TestEfbFailuresAndRetry();
+        TestTexturePreloadValidation();
     } catch (const std::exception& error) {
         std::cerr << "Native GX test failure: " << error.what() << '\n';
         return 1;
     }
     std::cout << "Native GX FIFO RAM/gather, CP/BP/XF commands, ring wrap, interrupt sources "
                  "RGB5A3 quad pixels/coverage/blend/depth/scissor/atomic rejection, "
-                 "and checked RGB8/Z24 EFB clear/YUYV XFB copy/undefined-pixel provenance passed.\n";
+                 "checked RGB8/Z24 EFB clear/YUYV XFB copy/undefined-pixel provenance, and "
+                 "validated texture-preload RAM sources passed.\n";
 }

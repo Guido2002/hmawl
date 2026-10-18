@@ -65,6 +65,16 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
         leaders.insert(target);
         pending.push_back(target);
     }
+    // The original texture-preload tile-type switch is bounded to 61 entries.
+    for (uint32_t index = 0; index < 61; ++index) {
+        const auto target = ppc_read_u32(source, 0x802e1df0u + index * 4);
+        if (target != 0x801cf738u && target != 0x801cf748u &&
+            target != 0x801cf75cu && target != 0x801cf76cu) {
+            throw std::runtime_error("Original texture-preload switch exceeds its bounded case range.");
+        }
+        leaders.insert(target);
+        pending.push_back(target);
+    }
     // The original VI timing selector guards this 27-entry indirect branch table.
     for (uint32_t index = 0; index < 27; ++index) {
         const auto target = ppc_read_u32(source, 0x802e127cu + index * 4);
@@ -116,7 +126,8 @@ void AddOriginalDependencies(const DolImage& image, const PpcState& source,
                             0x80190008u, 0x801900c0u,
                             0x8019018cu, 0x801901ccu, 0x80199240u, 0x80199dd4u,
                             0x801b72bcu, 0x8019a070u, 0x80198f0cu, 0x80190fc0u,
-                            0x80178768u}) {
+                            0x80178768u, 0x8019a904u, 0x8019a980u,
+                            0x8019aa58u, 0x8019aa8cu}) {
         leaders.insert(target);
         pending.push_back(target);
     }
@@ -207,9 +218,13 @@ int main(int argc, char** argv) {
             auto timerWord = interruptVector[i];
             if (i == (0x801b14f8u - 0x801b1490u) / 4u) timerWord |= 8u;
             instructions.emplace(0x900u + static_cast<uint32_t>(i * 4), timerWord);
+            auto fpuWord = interruptVector[i];
+            if (i == (0x801b14f8u - 0x801b1490u) / 4u) fpuWord |= 7u;
+            instructions.emplace(0x800u + static_cast<uint32_t>(i * 4), fpuWord);
         }
         leaders.insert(0x500u);
         leaders.insert(0x900u);
+        leaders.insert(0x800u);
         const auto ramConfiguration = image.ReadWords(0x801b4f54u, 0x80u);
         for (size_t i = 0; i < ramConfiguration.size(); ++i) {
             instructions.emplace(0x001b4f54u + static_cast<uint32_t>(i * 4), ramConfiguration[i]);
@@ -234,6 +249,9 @@ int main(int argc, char** argv) {
         addSwitchTable(0x802e8c54u, 33, 0x80239aa0u, 0x80239cc0u);
         addSwitchTable(0x802e0ed8u, 16, 0x801bc080u, 0x801bc3a0u);
         addSwitchTable(0x802cb198u, 8, 0x80199000u, 0x80199240u);
+        addSwitchTable(0x802e1dd0u, 7, 0x801cf0bcu, 0x801cf1b8u);
+        addSwitchTable(0x802cb630u, 17, 0x801a445cu, 0x801a4570u);
+        addSwitchTable(0x802e6260u, 26, 0x801f82e8u, 0x801f88e4u);
         for (const auto& instruction : instructions) {
             if (IsBranch(instruction.second)) {
                 leaders.insert(instruction.first + 4);
@@ -310,8 +328,9 @@ int main(int argc, char** argv) {
             if (address >= 0xc00u && address < 0xc1cu) {
                 bindings << ",0x" << Hex(0x801b6968u + address - 0xc00u) << "u";
             } else if ((address >= 0x500u && address < 0x598u) ||
+                       (address >= 0x800u && address < 0x898u) ||
                        (address >= 0x900u && address < 0x998u)) {
-                const auto vector = address < 0x900u ? 0x500u : 0x900u;
+                const auto vector = address < 0x800u ? 0x500u : address < 0x900u ? 0x800u : 0x900u;
                 const auto source = 0x801b1490u + address - vector;
                 bindings << ",0x" << Hex(source) << "u,{";
                 for (auto word : image.ReadWords(source, static_cast<uint32_t>(words.size() * 4u))) {

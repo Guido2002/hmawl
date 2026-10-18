@@ -209,6 +209,18 @@ std::string RecompileFunction(uint32_t address,
         if (options.precisePc) {
             output << "    state.pc = " << location(pc) << ";\n";
         }
+        output << "    if (state.instructionObserver) state.instructionObserver("
+               << "state.instructionObserverContext, " << location(pc) << ", "
+               << instruction << "u);\n";
+        const auto extendedOpcode = Bits(instruction, 1, 10);
+        const bool indexedFloat = opcode == 31 &&
+            (extendedOpcode == 535 || extendedOpcode == 567 || extendedOpcode == 599 ||
+             extendedOpcode == 631 || extendedOpcode == 663 || extendedOpcode == 695 ||
+             extendedOpcode == 727 || extendedOpcode == 759 || extendedOpcode == 983);
+        if (opcode == 4 || (opcode >= 48 && opcode <= 57) || opcode == 59 ||
+            opcode == 60 || opcode == 61 || opcode == 63 || indexedFloat) {
+            output << "    ppc_require_fpu(state, " << location(pc) << ");\n";
+        }
 
         switch (opcode) {
         case 10:

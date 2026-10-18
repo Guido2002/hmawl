@@ -54,14 +54,29 @@ void Decode(PpcState& state, NativeGx& gx) {
             const auto address = word >> 24;
             const auto data = (gx.bp[address] & ~gx.bpMask) | (word & gx.bpMask);
             if (address == 0x52) NativeEfbCopy(state, data);
-            if (address == 0x63 || address == 0x65) {
-                throw std::runtime_error("Native GX texture/TLUT DMA requires a texture-memory backend.");
+            if (address == 0x63) {
+                if ((data & ~0x1ffffu) != 0) {
+                    throw std::runtime_error("Invalid native GX texture preload mode.");
+                }
+                const auto tileCount = data & 0x7fffu;
+                if (tileCount != 0) {
+                    const auto source = gx.bp[0x60] << 5;
+                    const auto bytesToRead = size_t(tileCount) * 32;
+                    ppc_memory_offset(state, source, bytesToRead);
+                }
+            }
+            if (address == 0x65) {
+                throw std::runtime_error("Native GX TLUT DMA requires a TLUT-memory backend.");
             }
             if (address == 0x45 && data != 2) {
                 throw std::runtime_error("Unsupported native GX draw-done command.");
             }
             gx.bp[address] = data;
             gx.bpMask = address == 0xfe ? data : 0xffffffu;
+            if (address == 0x63 && (data & 0x7fffu) != 0) {
+                ++gx.texturePreloads;
+                gx.texturePreloadBytes += uint64_t(data & 0x7fffu) * 32;
+            }
             if (address == 0x45) gx.pePending |= 8u;
             if (address == 0x47 || address == 0x48) {
                 gx.token = static_cast<uint16_t>(data);

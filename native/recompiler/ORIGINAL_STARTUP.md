@@ -1,5 +1,17 @@
 # Original USA native startup runner
 
+See [PORT_ARCHITECTURE.md](../../PORT_ARCHITECTURE.md) and
+[PORT_PROGRESS.md](../../PORT_PROGRESS.md) for the 2026-10-18 audit, current
+post-decode dependency and executed regression results. Headless smoke runs:
+`powershell -File tools/native_smoke.ps1 -MaxBlocks 150000000`.
+Every caught execution stop now writes JSON and a summary under `diagnostics/`.
+Use `--diagnostics <directory>` to select the report location and
+`--trace-blocks <0..65536>` to configure the recent-block ring (default 128).
+`--trace-instructions <0..65536>` enables a bounded recent PC/opcode ring
+(default 0, disabled to avoid per-instruction observer work during normal
+boots). Reports distinguish block entries from generated instruction entries,
+include explicit capture limitations, and preserve the original stop/exit code.
+
 `hmawl_original_startup` is a console executable for Windows (also portable to
 other native C++ hosts). It executes the original USA revision 0 DOL entry,
 not the Direct3D renderer prototype or a synthetic game. This path is available
@@ -485,7 +497,9 @@ block-observer boundary. Native guest function bodies still cannot change bindin
 The current block is revalidated after the observer; changing its code or PC
 cannot bypass the relocation guards.
 Run-scoped scene bindings are removed on stop/failure, so subsequent fresh runs
-cannot reuse stale addresses. General OSUnlink/reload integration is not implemented.
+cannot reuse stale addresses. The observed scene cleanup path also removes its
+bindings after original OSUnlink reports success, allowing registration at the
+next original OSLink. Arbitrary module unload/reload coverage is not established.
 
 The original prolog now executes all 28 constructors in table order, preserving
 stack/SDA and nonvolatile GPR/FPR state. Two alternative code/BSS placements are
@@ -733,7 +747,10 @@ Disabled readers do not consume bytes; full/mismatched rings fail before
 overwriting unread data. CP/BP/XF register loads, BP write masks, NOPs and
 vertex-cache invalidation update explicit graphics state. Token/finish commands
 assert their PE sources only after decoding, rather than reporting success early.
-Draws, unsupported EFB copy modes, texture/TLUT DMA, display lists and unknown opcodes fail explicitly.
+Draws, unsupported EFB copy modes, TLUT DMA, display lists and unknown opcodes fail explicitly.
+Texture-preload commands validate their complete guest-RAM source range and are counted;
+the bounded software renderer reads texture image data directly from guest RAM instead
+of modeling the hardware texture cache.
 There is no replacement scene or generated frame.
 
 The real Windows runner publishes **77 FIFO bursts** and decodes **404 register/NOP

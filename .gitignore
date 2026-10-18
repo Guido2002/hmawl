@@ -25,6 +25,7 @@
 *.gcz
 *.wia
 build
+diagnostics/
 tools/mwcc_compiler/
 tools/elf2dol
 tools/elf2rel
