@@ -230,8 +230,9 @@ lookup, retrace gate, framebuffer exchange, timing and controller update and tak
 the backedge. The second loop completes its task passes and reaches its original
 textured quad. Its native renderer now produces EFB pixels and a Windows EFB
 preview. The original loader callback `0x8019A6BC`, CLZ decoder and post-render
-transition callback now execute as production translations. Repeated loops reach
-a later unsupported texture configuration.
+transition callback now execute as production translations. The captured later
+texture LOD state and out-of-depth geometry are supported; a production run now
+reaches the unchanged execution budget inside the original CLZ decoder.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -413,9 +414,9 @@ framebuffer exchange, timing and controller publication now return and execution
 takes the original backedge. One complete main-loop iteration is verified.
 The second loop renders the original textured quad and fade. Production now
 continues through the original loader worker and post-render transition callback.
-A Windows run reached 215 complete loops, 263 quads and 217 EFB-to-XFB copies
-before an unsupported texture configuration. The generic renderer diagnostic
-does not yet isolate which texture field violates the supported profile.
+A Windows run reached 688 complete loops, 787 quads and 690 EFB-to-XFB copies
+before its unchanged 50-million-block budget expired inside the original CLZ
+decoder (`PC=0x80178458`, LR `0x8017841C`, exit code 4).
 DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier.
 Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
@@ -596,6 +597,23 @@ material color for the fade. It applies matrix/projection/viewport, culling,
 top-left coverage, scissor, texture wrap/filtering, TEV modulation, alpha/Z24
 tests and source-alpha blending. Unsupported profiles fail before any pixels
 or draw counters are changed.
+
+The later observed 359x127 texture uses image word `0x51F966`, LOD word `0x800`
+and mode `0x190` or `0x1F90`. Nonzero LOD limits and signed bias are supported
+when minification/magnification both use the same nearest or bilinear base-level
+filter: neither can select a different mip level or filtering kernel. Mipmap
+filters, differing min/mag filters, anisotropy and reserved bits remain rejected.
+Texture rejections now report the actual image/address/mode/LOD/scale words.
+
+Orthographic geometry is clipped to projected GX depth `[-1, 0]` before
+rasterization rather than rejecting vertices outside the viewport's depth range.
+Both constituent triangles retain interpolated ST, RGBA and viewport depth at
+new clip vertices. Fully clipped primitives consume their FIFO packet and count
+as submitted quads without pixel or depth writes. Disabled XF clipping is outside
+the supported profile and fails explicitly. Pixel fixtures verify both planes,
+exact boundary inclusion, clipping across both planes, shared-edge coverage,
+interpolated textures/colors/blending and Z24, plus unchanged base-level pixels
+under LOD limits/bias and atomic rejection of unsupported texture state.
 
 The disc test stops at the first second-pass cleanup dispatch, before the final
 fade packet has drained from write gathering. It verifies all 16 render callbacks,

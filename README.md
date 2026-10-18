@@ -166,7 +166,9 @@ paired-single transform, disc texture initialization/binding and four-vertex
 quad submission execute without replacement game code.
 The native software renderer consumes complete FIFO primitives, transforms actual
 vertices, samples the tiled RGB5A3 disc texture and writes EFB pixels with checked
-TEV modulation, alpha/depth tests, scissor and blending. The original 431x147
+TEV modulation, orthographic near/far clipping, alpha/depth tests, scissor and blending.
+Non-mipmapped textures accept LOD limits/bias when the min/mag filters match;
+unsupported mipmap filters and reserved state still fail explicitly. The original 431x147
 license sprite produces 63357 pixel writes. The Windows runner defaults to an
 explicitly labelled **EFB preview**, not VI scanout, when a disc is supplied.
 Use `--display off` for unattended/headless runs or `--display window` to enable it
@@ -177,9 +179,12 @@ A separate deterministic disc fixture checks eight complete loops, 24 task passe
 14 quads and nine EFB-to-XFB copies, including six fully defined 640x448 post-draw
 copies with alternating destinations. The worker starts in this fixture; its live
 decompression completion is not yet verified there.
-With `--max-blocks 50000000`, a Windows production run completed 215 original loops,
-263 quads and 217 copies before an explicitly unsupported texture configuration
-(**exit code 3**, not a successful playable boot). These counts depend on host timing.
+The later 359x127 RGB5A3 texture's nonzero LOD limits/bias and vertices outside
+the orthographic depth range no longer cause renderer stops.
+With `--max-blocks 50000000`, a Windows production run completed 688 original loops,
+787 quads and 690 copies before exhausting the unchanged execution budget inside
+the original CLZ decoder at `0x80178458` (**exit code 4**, not a successful playable boot).
+These counts depend on host timing; this does not establish live decompression completion.
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
 imports), 31 real reads totaling 8819232 bytes, original archive initialization,

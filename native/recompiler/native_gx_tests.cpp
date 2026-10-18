@@ -339,6 +339,72 @@ void TestQuadRenderer() {
     std::fill(depth.graphics->efb->depth.begin(), depth.graphics->efb->depth.end(), 0);
     Send(depth, Quad());
     Require(depth.graphics->rasterizedPixels == 0, "Z24 less-equal comparison ignored destination depth.");
+    for (const uint32_t clipZ : {0x3f000000u, 0xbfc00000u}) {
+        auto outside = RenderState();
+        outside.graphics->xf[0x1025] = clipZ;
+        const auto before = *outside.graphics->efb;
+        Send(outside, Quad());
+        Require(outside.graphics->draws == 1 && outside.graphics->rasterizedPixels == 0 &&
+                    outside.graphics->efb->color == before.color &&
+                    outside.graphics->efb->depth == before.depth &&
+                    outside.graphics->efb->defined == before.defined &&
+                    outside.graphics->commands.empty(),
+                "Fully near/far-clipped quad changed pixels or failed to consume its primitive.");
+    }
+    for (const bool near : {false, true}) {
+        auto clipped = RenderState();
+        clipped.graphics->xf[8] = 0x3f000000; // Position Z varies from zero to two across X.
+        clipped.graphics->xf[0x1024] = 0x3f800000;
+        clipped.graphics->xf[0x1025] = near ? 0xbf800000 : 0xc0000000;
+        clipped.graphics->xf[0x101c] = clipped.graphics->xf[0x101f] = 0x43800000;
+        for (unsigned y = 0; y < 4; ++y)
+            for (unsigned x = 0; x < 4; ++x)
+                ppc_write_u16(clipped, 0x800 + y * 8 + x * 2, x < 2 ? 0xfc00 : 0x801f);
+        auto reference = clipped;
+        reference.graphics->xf[0x1024] = reference.graphics->xf[0x1025] = 0;
+        auto gradient = Quad(0xffffff80);
+        for (unsigned i = 0; i < 4; ++i) {
+            const bool right = i == 1 || i == 2;
+            gradient[7 + i * 16] = right ? 0x20 : 0xff;
+            gradient[8 + i * 16] = right ? 0xff : 0x20;
+            gradient[9 + i * 16] = right ? 0x40 : 0x80;
+        }
+        Send(reference, gradient);
+        Send(clipped, gradient);
+        Require(clipped.graphics->draws == 1 && clipped.graphics->rasterizedPixels == 8,
+                "Near/far plane crossing did not cover exactly half the quad.");
+        for (unsigned y = 0; y < 4; ++y) {
+            for (unsigned x = 0; x < 4; ++x) {
+                const auto index = y * NativeEfb::width + x;
+                const bool visible = near ? x < 2 : x >= 2;
+                Require(clipped.graphics->efb->color[index] ==
+                            (visible ? reference.graphics->efb->color[index] : 0x000000ff) &&
+                            clipped.graphics->efb->depth[index] ==
+                            (visible ? (x % 2 == 0 ? 64u : 192u) : 0xffffffu),
+                        "Depth clipping changed interpolated texture/blend values, seams or Z24.");
+            }
+        }
+    }
+    for (const uint32_t clipZ : {0xbf800000u, 0u}) {
+        auto boundary = RenderState();
+        boundary.graphics->xf[0x1025] = clipZ;
+        boundary.graphics->xf[0x101c] = boundary.graphics->xf[0x101f] = 0x43800000;
+        Send(boundary, Quad());
+        Require(boundary.graphics->rasterizedPixels == 16 &&
+                    boundary.graphics->efb->depth[641] == (clipZ == 0 ? 256u : 0u),
+                "Quad exactly on the near/far clip plane was rejected or mapped to the wrong depth.");
+    }
+    auto bothPlanes = RenderState();
+    bothPlanes.graphics->xf[8] = bothPlanes.graphics->xf[0x1024] = 0x3f800000;
+    bothPlanes.graphics->xf[0x1025] = 0xc0000000;
+    bothPlanes.graphics->xf[0x101c] = bothPlanes.graphics->xf[0x101f] = 0x43800000;
+    Send(bothPlanes, Quad());
+    Require(bothPlanes.graphics->rasterizedPixels == 4 &&
+                bothPlanes.graphics->efb->color[641] == 0xff0000ff &&
+                bothPlanes.graphics->efb->depth[641] == 128 &&
+                bothPlanes.graphics->efb->color[640] == 0x000000ff &&
+                bothPlanes.graphics->efb->color[642] == 0x000000ff,
+            "Clipping a triangle against both depth planes lost its four-pixel strip.");
     auto tiled = RenderState();
     tiled.graphics->bp[0x88] = (5 << 20) | (3 << 10) | 7;
     tiled.graphics->bp[0x30] = 7;
@@ -365,6 +431,42 @@ void TestQuadRenderer() {
                 filtered.graphics->efb->color[2] == 0x4000bfff &&
                 filtered.graphics->efb->color[3] == 0x0000ffff,
             "Bilinear half-texel positions or edge clamp differ.");
+    for (const uint32_t mode : {0x100u, 0x190u, 0x1f90u, 0x10100u, 0x1ff90u}) {
+        for (const uint32_t lod : {0x800u, 0xff00u, 0xffffu, 0x80u}) {
+            auto reference = RenderState();
+            reference.graphics->bp[0x80] = mode & 0x19f;
+            for (unsigned y = 0; y < 4; ++y)
+                for (unsigned x = 0; x < 4; ++x)
+                    ppc_write_u16(reference, 0x800 + y * 8 + x * 2, x < 2 ? 0xfc00 : 0x801f);
+            auto limited = reference;
+            limited.graphics->bp[0x80] = mode;
+            limited.graphics->bp[0x84] = lod;
+            Send(reference, Quad());
+            Send(limited, Quad());
+            Require(limited.graphics->draws == 1 && limited.graphics->rasterizedPixels == 16 &&
+                        limited.graphics->efb->color == reference.graphics->efb->color &&
+                        limited.graphics->efb->depth == reference.graphics->efb->depth &&
+                        limited.graphics->efb->defined == reference.graphics->efb->defined,
+                    "Non-mipmapped LOD limits/bias changed nearest/bilinear base-level pixels.");
+        }
+    }
+    auto laterTexture = RenderState();
+    laterTexture.memory.resize(0x20000, 0xa5);
+    laterTexture.graphics->bp[0x88] = 0x51f966;
+    laterTexture.graphics->bp[0x30] = 0x166;
+    laterTexture.graphics->bp[0x31] = 0x7e;
+    laterTexture.graphics->bp[0x84] = 0x800;
+    laterTexture.graphics->bp[0x80] = 0x1f90;
+    laterTexture.graphics->bp[0x94] = 0x4000 >> 5;
+    constexpr unsigned laterTextureBytes = 90 * 32 * 32;
+    for (unsigned offset = 0; offset < laterTextureBytes; offset += 2)
+        ppc_write_u16(laterTexture, 0x4000 + offset, 0x83e0);
+    Send(laterTexture, Quad());
+    Require(laterTexture.graphics->rasterizedPixels == 16 &&
+                laterTexture.graphics->efb->color[641] == 0x00ff00ff &&
+                laterTexture.memory[0x3fff] == 0xa5 &&
+                laterTexture.memory[0x4000 + laterTextureBytes] == 0xa5,
+            "Observed 359x127 RGB5A3 texture with max LOD 0x800 did not render its base level.");
     auto wrap = RenderState();
     wrap.graphics->bp[0x80] = 0x101;
     // A separate texture matrix translates S by one full repeat.
@@ -395,16 +497,25 @@ void TestQuadRenderer() {
     Send(culled, Quad());
     Require(culled.graphics->draws == 1 && culled.graphics->rasterizedPixels == 0,
             "GX front/back culling orientation differs.");
-    for (unsigned failure = 0; failure < 4; ++failure) {
+    for (unsigned failure = 0; failure < 13; ++failure) {
         auto invalid = RenderState();
         if (failure == 0) invalid.graphics->bp[0xc0] = 0;
         if (failure == 1) invalid.graphics->bp[0x88] = 0;
-        if (failure == 2) invalid.graphics->xf[0x1020] = 0x7fc00000;
+        if (failure == 2) invalid.graphics->xf[0x1024] = 0x7fc00000;
+        if (failure == 4) invalid.graphics->bp[0x84] = 0x10000;
+        if (failure >= 5 && failure < 9) {
+            constexpr unsigned mipFilters[] = {1, 2, 5, 6};
+            invalid.graphics->bp[0x80] = 0x110 | (mipFilters[failure - 5] << 5);
+        }
+        if (failure == 9) invalid.graphics->bp[0x80] |= 1 << 17;
+        if (failure == 10) invalid.graphics->bp[0x80] |= 1 << 19;
+        if (failure == 11) invalid.graphics->bp[0x80] &= ~16u;
+        if (failure == 12) invalid.graphics->xf[0x1005] = 1;
         auto command = Quad();
         if (failure == 3) command[2] = 3;
         const auto before = *invalid.graphics->efb;
-        Reject([&] { Send(invalid, command); }, failure == 0 ? "TEV" :
-            failure == 1 ? "RGB5A3" : failure == 2 ? "non-finite" : "groups of four");
+        Reject([&] { Send(invalid, command); }, failure == 12 ? "lighting/projection" : failure == 0 ? "TEV" :
+            failure == 2 ? "non-finite" : failure == 3 ? "groups of four" : "RGB5A3");
         Require(invalid.graphics->efb->color == before.color && invalid.graphics->efb->depth == before.depth &&
                     invalid.graphics->efb->defined == before.defined && invalid.graphics->draws == 0 &&
                     invalid.graphics->decodedCommands == 0 && invalid.graphics->commands[0] == 0x80,

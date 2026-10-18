@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <sstream>
 #include <stdexcept>
 
 namespace {
@@ -12,8 +13,8 @@ namespace {
 using Color = std::array<int, 4>;
 
 struct Vertex {
-    double x, y, z, s, t;
-    Color color;
+    double x, y, z, s, t, clipZ;
+    std::array<double, 4> color;
 };
 
 uint32_t Word(const std::vector<uint8_t>& bytes, size_t offset) {
@@ -120,6 +121,33 @@ bool TopLeft(const Vertex& a, const Vertex& b) {
     return b.y < a.y || (b.y == a.y && b.x > a.x);
 }
 
+std::vector<Vertex> ClipDepth(const std::vector<Vertex>& input, double plane, bool minimum) {
+    std::vector<Vertex> output;
+    auto previous = input.back();
+    bool previousInside = minimum ? previous.clipZ >= plane : previous.clipZ <= plane;
+    for (const auto& current : input) {
+        const bool inside = minimum ? current.clipZ >= plane : current.clipZ <= plane;
+        if (inside != previousInside) {
+            const double t = (plane - previous.clipZ) / (current.clipZ - previous.clipZ);
+            const auto lerp = [t](double a, double b) { return a + (b - a) * t; };
+            Vertex intersection{};
+            intersection.x = lerp(previous.x, current.x);
+            intersection.y = lerp(previous.y, current.y);
+            intersection.z = lerp(previous.z, current.z);
+            intersection.s = lerp(previous.s, current.s);
+            intersection.t = lerp(previous.t, current.t);
+            intersection.clipZ = plane;
+            for (unsigned ch = 0; ch < 4; ++ch)
+                intersection.color[ch] = lerp(previous.color[ch], current.color[ch]);
+            output.push_back(intersection);
+        }
+        if (inside) output.push_back(current);
+        previous = current;
+        previousInside = inside;
+    }
+    return output;
+}
+
 void Triangle(NativeEfb& efb, const NativeGx& gx, const Texture* texture,
               Vertex a, Vertex b, Vertex c, uint64_t& written) {
     double area = Edge(a, b, c.x, c.y);
@@ -211,7 +239,7 @@ void NativeRenderQuads(PpcState& state, size_t count) {
     if ((bp[0] & ~0xc000u) != (textured ? 0x11u : 0x10u) ||
         bp[0x43] & ~0x40u || bp[0x42] != 0 || (bp[0x41] & ~0x1fu) != 0x4a0u ||
         (bp[0x41] & 2) || bp[0x40] & ~31u ||
-        xf[0x1026] != 1 || xf[0x1009] != 1 || xf[0x1008] != (textured ? 0x11u : 0u) ||
+        xf[0x1026] != 1 || xf[0x1005] != 0 || xf[0x1009] != 1 || xf[0x1008] != (textured ? 0x11u : 0u) ||
         xf[0x1018] != gx.cp[0x30] || xf[0x1019] != gx.cp[0x40] ||
         xf[0x100e] != (textured ? 0x401u : 0x400u) || xf[0x1010] != (textured ? 0x401u : 0x400u) ||
         bp[0xf0] != 1 || bp[0xf1] != 0 || bp[0xf2] != 0 ||
@@ -234,13 +262,20 @@ void NativeRenderQuads(PpcState& state, size_t count) {
     if (textured) {
         const auto image = bp[0x88], mode = bp[0x80];
         if ((image >> 20) != 5 || (bp[0x94] >> 21) != 0 ||
-            (mode & ~0x19fu) != 0 || (((mode >> 5) & 7) != 0 && ((mode >> 5) & 7) != 4) ||
+            (mode & ~0x1ff9fu) != 0 || (((mode >> 5) & 7) != 0 && ((mode >> 5) & 7) != 4) ||
             bool(mode & 16) != (((mode >> 5) & 7) == 4) ||
-            (mode & 3) == 3 || ((mode >> 2) & 3) == 3 || bp[0x84] != 0 ||
+            // LOD limits/bias cannot change samples when both filters match and use only the base level.
+            (mode & 3) == 3 || ((mode >> 2) & 3) == 3 || (bp[0x84] & ~0xffffu) != 0 ||
             (bp[0x30] & 0xffffu) != (image & 0x3ffu) ||
             (bp[0x31] & 0xffffu) != ((image >> 10) & 0x3ffu) ||
-            (bp[0x30] >> 16) != 0 || (bp[0x31] >> 16) != 0)
-            throw std::runtime_error("Native renderer supports only unscaled, non-mipmapped RGB5A3 textures.");
+            (bp[0x30] >> 16) != 0 || (bp[0x31] >> 16) != 0) {
+            std::ostringstream message;
+            message << "Native renderer supports only unscaled, non-mipmapped RGB5A3 textures."
+                    << std::hex << " image=0x" << image << " address=0x" << bp[0x94]
+                    << " mode=0x" << mode << " lod=0x" << bp[0x84]
+                    << " scaleS=0x" << bp[0x30] << " scaleT=0x" << bp[0x31];
+            throw std::runtime_error(message.str());
+        }
         const int width = (image & 0x3ff) + 1, height = ((image >> 10) & 0x3ff) + 1;
         const auto base = ppc_memory_offset(state, bp[0x94] << 5,
                                             size_t((width + 3) / 4) * ((height + 3) / 4) * 32);
@@ -268,9 +303,10 @@ void NativeRenderQuads(PpcState& state, size_t count) {
                     Float(xf[0x101a]) + Float(xf[0x101d]) - 342;
         vertex.y = (position[1] * Float(xf[0x1022]) + Float(xf[0x1023])) *
                     Float(xf[0x101b]) + Float(xf[0x101e]) - 342;
-        vertex.z = (position[2] * Float(xf[0x1024]) + Float(xf[0x1025])) *
-                    Float(xf[0x101c]) + Float(xf[0x101f]);
-        vertex.color = Unpack(textured ? Word(gx.commands, offset + 4) : xf[0x100c]);
+        vertex.clipZ = position[2] * Float(xf[0x1024]) + Float(xf[0x1025]);
+        vertex.z = vertex.clipZ * Float(xf[0x101c]) + Float(xf[0x101f]);
+        const auto color = Unpack(textured ? Word(gx.commands, offset + 4) : xf[0x100c]);
+        std::copy(color.begin(), color.end(), vertex.color.begin());
         if (textured) {
             const double s = Float(Word(gx.commands, offset + 8)), t = Float(Word(gx.commands, offset + 12));
             if (texMatrix == 240) { vertex.s = s; vertex.t = t; }
@@ -280,16 +316,28 @@ void NativeRenderQuads(PpcState& state, size_t count) {
             }
         }
         if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y) || !std::isfinite(vertex.z) ||
-            !std::isfinite(vertex.s) || !std::isfinite(vertex.t) ||
-            std::abs(vertex.x) > 1000000 || std::abs(vertex.y) > 1000000 ||
-            vertex.z < 0 || vertex.z > 16777216)
-            throw std::runtime_error("Native renderer vertex exceeds supported orthographic clip range.");
+            !std::isfinite(vertex.s) || !std::isfinite(vertex.t) || !std::isfinite(vertex.clipZ) ||
+            std::abs(vertex.x) > 1000000 || std::abs(vertex.y) > 1000000) {
+            std::ostringstream message;
+            message << "Native renderer vertex exceeds supported orthographic clip range."
+                    << " index=" << i << " x=" << vertex.x << " y=" << vertex.y
+                    << " z=" << vertex.z << " clipZ=" << vertex.clipZ
+                    << " s=" << vertex.s << " t=" << vertex.t;
+            throw std::runtime_error(message.str());
+        }
         vertices.push_back(vertex);
     }
     uint64_t written = 0;
     for (size_t i = 0; i < count; i += 4) {
-        Triangle(*gx.efb, gx, texture ? &*texture : nullptr, vertices[i], vertices[i + 1], vertices[i + 2], written);
-        Triangle(*gx.efb, gx, texture ? &*texture : nullptr, vertices[i], vertices[i + 2], vertices[i + 3], written);
+        for (unsigned corner = 1; corner < 3; ++corner) {
+            std::vector<Vertex> polygon{vertices[i], vertices[i + corner], vertices[i + corner + 1]};
+            polygon = ClipDepth(polygon, -1, true);
+            if (polygon.empty()) continue;
+            polygon = ClipDepth(polygon, 0, false);
+            for (size_t j = 1; j + 1 < polygon.size(); ++j)
+                Triangle(*gx.efb, gx, texture ? &*texture : nullptr,
+                         polygon[0], polygon[j], polygon[j + 1], written);
+        }
     }
     gx.draws += count / 4;
     gx.rasterizedPixels += written;

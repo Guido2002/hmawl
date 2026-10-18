@@ -96,8 +96,11 @@ and post-render transition callback are now compiled into production. A determin
 disc fixture completes eight loops and 24 task passes, with 14 quads and nine XFB
 copies. Six post-draw copies are fully defined 640x448 buffers with alternating
 destinations. The worker starts, but live decompression completion is not yet
-verified by this fixture. Production has reached 215 loops, 263 quads and 217
-copies before an unsupported texture configuration; counts depend on Windows timing.
+verified by this fixture. The later RGB5A3 texture's nonzero LOD limits/bias are now
+supported with matching, non-mipmapped filters; orthographic near/far depth clipping
+replaces rejection of out-of-depth geometry. Production has reached 688 loops,
+787 quads and 690 copies before its unchanged 50-million-block budget expires
+inside the original CLZ decoder (`0x80178458`); counts depend on Windows timing.
 This visible EFB preview is not VI pixel scanout or gameplay.
 No rendered game frame is verified.
 The default one-million-block limit can expire earlier.
@@ -1047,8 +1050,10 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Diagnose the next unsupported texture configuration and connect actual XFB/VI
-   pixel scanout. The original loader worker and CLZ decoder are now production-bound;
+1. Trace progress/cost of the live CLZ worker within the unchanged execution budget,
+   then connect actual XFB/VI pixel scanout. The captured non-mipmapped texture
+   LOD limits/bias and near/far-clipped geometry now execute without renderer stops.
+   The original loader worker and CLZ decoder are now production-bound;
    eight complete loops, 14 quads and nine XFB copies are covered by a separate
    deterministic disc fixture, including observed/unobserved CPU/RAM and graphics parity.
    Synthetic fixtures verify the production CLZ decoder's overlapping/cross-block
@@ -1056,7 +1061,9 @@ systems and the executable can be packaged without the GameCube build toolchain.
    resource decoding has completed. The checked native orthographic UI renderer and Windows EFB
    preview now render the original license texture and fade, preserving real
    gather timing and rejecting unsupported GX profiles atomically. Pixel tests
-   cover coverage, texture tiles/transparency, blending, scissor and depth.
+   cover coverage, texture tiles/transparency, LOD limits/bias, blending, scissor,
+   near/far clipping and depth. Unsupported filters, reserved bits and disabled
+   clipping remain explicit failures.
    Use `--display off` for headless runs; Windows disc runs show the EFB preview
    by default. The first complete original main-loop iteration now
    returns through retrace gating, framebuffer exchange, timing and controller
