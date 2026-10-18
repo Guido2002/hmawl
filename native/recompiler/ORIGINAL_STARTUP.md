@@ -615,6 +615,26 @@ exact boundary inclusion, clipping across both planes, shared-edge coverage,
 interpolated textures/colors/blending and Z24, plus unchanged base-level pixels
 under LOD limits/bias and atomic rejection of unsupported texture state.
 
+The later timing-dependent pipeline rejection was caused by requiring reset fog
+coefficients even when fog is disabled. The original SDK fog setter at `0x801D1978`
+stores type in BP `0xF1` bits 21..23; type zero disables fog. Its retained A/B/shift/C
+coefficients (BP `0xEE..0xF1`), projection selector and RGB color (BP `0xF2`) then
+have no pixel effect. Captured disabled profiles include `EE=0x7F800`,
+`EF=0x7AE165`, `F0=0x1E`, `F1=0`, and `EF=0x40000E`, `F0=1`, `F1=0`.
+Validation now checks the fog type, not these inactive values. This is not enabled
+fog support. All seven nonzero type encodings still fail before EFB mutation
+or primitive consumption. Pixel tests send real FIFO BP updates for captured and
+extreme inactive values, verify their retention and exact textured/fade EFB parity,
+and verify rejection/retry for every nonzero type. Pipeline errors now include the
+actual checked BP/XF/CP words rather than only a generic category.
+
+After this fix, two Windows production runs reached the unchanged 50-million-block
+budget with 2186194 and 2215054 decoded output bytes, and 688 and 675 XFB copies.
+A different timing stopped at `0x801D1A44`, LR `0x80182030`, because PowerPC
+non-IEEE denormal result arithmetic in the original fog coefficient normalization
+is still unsupported. No coefficients, callback completions or game operations
+are fabricated to bypass that CPU dependency.
+
 The disc test stops at the first second-pass cleanup dispatch, before the final
 fade packet has drained from write gathering. It verifies all 16 render callbacks,
 the 431x147 sprite's 63357 pixel writes, original texture/matrix bindings and

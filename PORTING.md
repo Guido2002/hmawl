@@ -106,7 +106,10 @@ Live-worker verification now establishes 19558 correct output bytes of its
 Isolated production-decoder replay completes that same real resource in 15507310
 entries with exact output/RAM/ABI guards, without changing the normal boot path
 or increasing its budget. The Windows runner reports latest-resource CLZ progress;
-other host timings can still hit unsupported GX pipeline state.
+the captured timing-dependent GX stop is now fixed by checking fog type rather
+than requiring reset values in disabled fog coefficients/color. Enabled fog is
+still rejected atomically. Other host timings can expose unsupported PowerPC
+non-IEEE denormal results in the original fog setter at `0x801D1A44`.
 This visible EFB preview is not VI pixel scanout or gameplay.
 No rendered game frame is verified.
 The default one-million-block limit can expire earlier.
@@ -1056,8 +1059,11 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue scheduled CLZ worker completion and diagnose timing-dependent unsupported
-   GX pipeline state, then connect actual XFB/VI pixel scanout. The live worker
+1. Continue scheduled CLZ worker completion and implement verified non-IEEE denormal
+   arithmetic exposed in the original fog setter, then connect actual XFB/VI pixel
+   scanout. The inactive-fog GX rejection is fixed: coefficients/color/projection
+   are retained but have no pixel effect while fog type is zero; enabled types
+   remain explicit failures. The live worker
    makes verified progress; isolated replay proves its full 5410544-byte resource
    decodes correctly in 15507310 native block entries. Production now reports
    started/returned decodes and completed-token output progress rather than

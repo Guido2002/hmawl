@@ -242,11 +242,22 @@ void NativeRenderQuads(PpcState& state, size_t count) {
         xf[0x1026] != 1 || xf[0x1005] != 0 || xf[0x1009] != 1 || xf[0x1008] != (textured ? 0x11u : 0u) ||
         xf[0x1018] != gx.cp[0x30] || xf[0x1019] != gx.cp[0x40] ||
         xf[0x100e] != (textured ? 0x401u : 0x400u) || xf[0x1010] != (textured ? 0x401u : 0x400u) ||
-        bp[0xf0] != 1 || bp[0xf1] != 0 || bp[0xf2] != 0 ||
-        (bp[0xef] != 0 && (bp[0xef] != 0x40000f || bp[0xee] != 0)) ||
+        // Fog type zero disables its coefficients, projection selector and color.
+        (bp[0xf1] & 0xe00000u) != 0 ||
         (bp[0xe8] & 0x400) || bp[0x25] != 0 || bp[0x27] != 0 || bp[0x10] != 0 ||
-        bp[0xf4] != 0 || bp[0xf5] != 0)
-        throw std::runtime_error("Unsupported native renderer lighting/projection/PE/fog/indirect state.");
+        bp[0xf4] != 0 || bp[0xf5] != 0) {
+        std::ostringstream message;
+        message << "Unsupported native renderer lighting/projection/PE/fog/indirect state."
+                << std::hex << " textured=" << textured;
+        for (const unsigned reg : {0u, 0x40u, 0x41u, 0x42u, 0x43u, 0xf0u, 0xf1u, 0xf2u,
+                                   0xeeu, 0xefu, 0xe8u, 0x25u, 0x27u, 0x10u, 0xf4u, 0xf5u})
+            message << " BP[" << reg << "]=" << bp[reg];
+        for (const unsigned reg : {0x1026u, 0x1005u, 0x1009u, 0x1008u, 0x1018u, 0x1019u,
+                                   0x100eu, 0x1010u})
+            message << " XF[" << reg << "]=" << xf[reg];
+        message << " CP[30]=" << gx.cp[0x30] << " CP[40]=" << gx.cp[0x40];
+        throw std::runtime_error(message.str());
+    }
     if (textured && (bp[0xc0] != 0x8f8af || bp[0xc1] != 0x8f2f0 ||
                      (bp[0x28] & 0x3ffu) != 0x40 || xf[0x103f] != 1 ||
                      xf[0x1040] != 0x280 || xf[0x1050] != 0x3d))

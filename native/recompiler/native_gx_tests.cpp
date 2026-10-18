@@ -492,6 +492,57 @@ void TestQuadRenderer() {
     Send(fade, fadeBytes);
     Require(fg.draws == 1 && fg.rasterizedPixels == 16 && fg.efb->color[641] == 0x7f0000ff,
             "Direct XYZ/material-color fade did not blend over the textured EFB.");
+    for (unsigned profile = 0; profile < 4; ++profile) {
+        for (const bool textured : {false, true}) {
+            auto reference = textured ? RenderState() : fade;
+            auto inactiveFog = reference;
+            const uint32_t fogWords[] = {
+                profile == 0 ? 0u : profile == 1 ? 0x7f800u : 0xffffffu,
+                profile == 0 ? 0x40000eu : profile == 1 ? 0x7ae165u : 0xffffffu,
+                profile == 0 ? 1u : profile == 1 ? 0x1eu : 0xffffffu,
+                profile < 2 ? 0u : profile == 2 ? 0x100000u : 0x1fffffu,
+                profile < 2 ? 0u : 0x123456u
+            };
+            std::vector<uint8_t> fogCommands;
+            for (unsigned index = 0; index < 5; ++index) {
+                const auto word = ((0xeeu + index) << 24) | fogWords[index];
+                fogCommands.push_back(0x61);
+                for (int shift = 24; shift >= 0; shift -= 8)
+                    fogCommands.push_back(uint8_t(word >> shift));
+            }
+            Send(inactiveFog, fogCommands);
+            Send(reference, textured ? Quad(0xffffff80) : fadeBytes);
+            Send(inactiveFog, textured ? Quad(0xffffff80) : fadeBytes);
+            Require(inactiveFog.graphics->draws == reference.graphics->draws &&
+                        inactiveFog.graphics->rasterizedPixels == reference.graphics->rasterizedPixels &&
+                        inactiveFog.graphics->efb->color == reference.graphics->efb->color &&
+                        inactiveFog.graphics->efb->depth == reference.graphics->efb->depth &&
+                        inactiveFog.graphics->efb->defined == reference.graphics->efb->defined &&
+                        inactiveFog.graphics->commands.empty(),
+                    "Disabled fog coefficients/color/projection changed textured or fade pixels.");
+            for (unsigned index = 0; index < 5; ++index)
+                Require(inactiveFog.graphics->bp[0xee + index] == fogWords[index],
+                        "Disabled fog command words were discarded instead of retained.");
+        }
+    }
+    for (unsigned fogType = 1; fogType < 8; ++fogType) {
+        auto enabledFog = RenderState();
+        enabledFog.graphics->bp[0xf1] = fogType << 21;
+        const auto before = *enabledFog.graphics->efb;
+        Reject([&] { Send(enabledFog, Quad()); }, "lighting/projection/PE/fog/indirect");
+        Require(enabledFog.graphics->draws == 0 && enabledFog.graphics->rasterizedPixels == 0 &&
+                    enabledFog.graphics->efb->color == before.color &&
+                    enabledFog.graphics->efb->depth == before.depth &&
+                    enabledFog.graphics->efb->defined == before.defined &&
+                    enabledFog.graphics->commands[0] == 0x80 &&
+                    enabledFog.graphics->decodedCommands == 0,
+                "Unsupported enabled fog modified EFB or consumed its primitive.");
+        enabledFog.graphics->bp[0xf1] = 0x1fffff;
+        ppc_write_u16(enabledFog, 0xcc000002, 0x11);
+        Require(enabledFog.graphics->draws == 1 && enabledFog.graphics->rasterizedPixels == 16 &&
+                    enabledFog.graphics->commands.empty(),
+                "Disabling fog did not retry the retained primitive exactly once.");
+    }
     auto culled = RenderState();
     culled.graphics->bp[0] = 0x8011;
     Send(culled, Quad());

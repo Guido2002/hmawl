@@ -193,8 +193,13 @@ With `--max-blocks 50000000`, a Windows production run completed 688 original lo
 787 quads and 690 copies before exhausting the unchanged execution budget inside
 the original CLZ decoder at `0x80178458` (**exit code 4**, not a successful playable boot).
 These counts depend on host timing; this does not establish live decompression completion.
-Other Windows timings can still expose unsupported GX pipeline state before the
-budget is exhausted; no timing-independent playable boot is claimed.
+The timing-dependent GX rejection from stale fog coefficients is fixed: fog type
+zero disables its coefficients, projection selector and color, regardless of their
+retained values. Enabled fog still fails explicitly before changing EFB pixels.
+Two subsequent Windows runs reached the unchanged budget with over 2.18 million
+CLZ output bytes; another timing exposed unsupported non-IEEE denormal arithmetic
+in the original fog-parameter calculation at `0x801D1A44`. No timing-independent
+playable boot is claimed.
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
 imports), 31 real reads totaling 8819232 bytes, original archive initialization,
