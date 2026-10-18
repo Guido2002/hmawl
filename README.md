@@ -171,9 +171,15 @@ license sprite produces 63357 pixel writes. The Windows runner defaults to an
 explicitly labelled **EFB preview**, not VI scanout, when a disc is supplied.
 Use `--display off` for unattended/headless runs or `--display window` to enable it
 explicitly; close the preview window to exit after a dependency stop.
-With `--max-blocks 50000000`, the production path renders the sprite and fade, then
-currently stops at untranslated loader callback `PC=0x8019A6BC`,
-`LR=0x801B72BC` (**exit code 3**, not a successful playable boot).
+The original loader worker `0x8019A6BC`, CLZ size/block decoder, allocation wrappers
+and post-render transition callback are now production-bound as original translated code.
+A separate deterministic disc fixture checks eight complete loops, 24 task passes,
+14 quads and nine EFB-to-XFB copies, including six fully defined 640x448 post-draw
+copies with alternating destinations. The worker starts in this fixture; its live
+decompression completion is not yet verified there.
+With `--max-blocks 50000000`, a Windows production run completed 215 original loops,
+263 quads and 217 copies before an explicitly unsupported texture configuration
+(**exit code 3**, not a successful playable boot). These counts depend on host timing.
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
 imports), 31 real reads totaling 8819232 bytes, original archive initialization,

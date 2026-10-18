@@ -229,8 +229,9 @@ The first complete main-loop iteration now executes its original post-render
 lookup, retrace gate, framebuffer exchange, timing and controller update and takes
 the backedge. The second loop completes its task passes and reaches its original
 textured quad. Its native renderer now produces EFB pixels and a Windows EFB
-preview. The current production dependency is untranslated loader callback
-`PC=0x8019A6BC`, LR `0x801B72BC`.
+preview. The original loader callback `0x8019A6BC`, CLZ decoder and post-render
+transition callback now execute as production translations. Repeated loops reach
+a later unsupported texture configuration.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -410,8 +411,11 @@ scheduling return. All eight scheduled render callbacks, render queue cleanup an
 frame draw-sync submission return. The original post-render lookup, retrace gate,
 framebuffer exchange, timing and controller publication now return and execution
 takes the original backedge. One complete main-loop iteration is verified.
-The second loop renders the original textured quad and fade. Production currently
-stops at untranslated loader callback `PC=0x8019A6BC`, LR `0x801B72BC`;
+The second loop renders the original textured quad and fade. Production now
+continues through the original loader worker and post-render transition callback.
+A Windows run reached 215 complete loops, 263 quads and 217 EFB-to-XFB copies
+before an unsupported texture configuration. The generic renderer diagnostic
+does not yet isolate which texture field violates the supported profile.
 DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier.
 Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
@@ -605,10 +609,27 @@ default with `--rvz`; `--display off` keeps unattended runs headless. The previe
 uses the last copy's active height and visibly marks undefined EFB pixels.
 It remains open after execution stops; close it to exit. The original license
 screen has been visually verified in that window. The production path flushes
-both sprite and fade, then reaches untranslated loader callback `0x8019A6BC`.
+both sprite and fade and continues through repeated original loops and XFB copies.
 This preview does not claim VI framebuffer scanout or a complete playable boot.
 
-At this boundary the deterministic PCM fixture has 4210 completed DMA periods,
+The production manifest now includes the complete original worker at `0x8019A6BC`,
+CLZ header/getter and block/stream decoder at `0x801782F4..0x801784EC`,
+allocation wrappers at `0x80190EF4`/`0x80190F24`, and the original post-render
+transition callback at `0x8000CE50`. No host decoder replaces guest execution.
+Production-binding fixtures compare the original decoder with the independent host
+CLZ reader for overlapping maximum-length references and padded, cross-block
+references. They check exact output, input/output guards, stack and nonvolatile
+registers. An empty worker fixture verifies its actual active-flag clear and epilogue.
+
+A separate real-disc fixture stops on entry to the ninth iteration, after eight
+complete loops, 24 original task passes, 14 quads and nine EFB-to-XFB copies.
+Six post-draw copies are fully defined 640x448 buffers with 1280-byte stride;
+consecutive destinations differ as the original framebuffer exchange runs.
+CPU/RAM, deterministic timing, GX/FIFO/EFB and VI state match an unobserved run
+at the same execution boundary. The real worker starts once in this fixture;
+completion of its live resource decompression is not claimed.
+
+At the earlier second-pass cleanup boundary the deterministic PCM fixture has 4210 completed DMA periods,
 673760 submitted zero frames, 4207 original handlers and 4204 original callbacks/
 command returns. CPU mail sent/consumed is 12622/12622, DSP mail 4207/4207 and
 task IRQ count 4205; 134495 DSP data DMAs transfer 40817692 bytes.

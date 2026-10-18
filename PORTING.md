@@ -91,8 +91,14 @@ The scene schedules six render-state tasks, a resource-backed sprite and the
 interpolated fade. Original nested resource traversal, transform and disc texture
 binding lead to a four-vertex GX quad. With `--max-blocks 50000000`, execution
 renders the original RGB5A3 license sprite and fade into a native EFB preview.
-The production path now stops at untranslated loader callback `PC=0x8019A6BC`,
-LR `0x801B72BC`. This visible EFB preview is not VI pixel scanout or gameplay.
+The original loader worker `0x8019A6BC`, CLZ helpers/decoder, allocation wrappers
+and post-render transition callback are now compiled into production. A deterministic
+disc fixture completes eight loops and 24 task passes, with 14 quads and nine XFB
+copies. Six post-draw copies are fully defined 640x448 buffers with alternating
+destinations. The worker starts, but live decompression completion is not yet
+verified by this fixture. Production has reached 215 loops, 263 quads and 217
+copies before an unsupported texture configuration; counts depend on Windows timing.
+This visible EFB preview is not VI pixel scanout or gameplay.
 No rendered game frame is verified.
 The default one-million-block limit can expire earlier.
 A deterministic disc fixture verifies all 15170 relocation records, section addresses,
@@ -827,7 +833,8 @@ queue. Full runtime scheduling and device services are still needed.
   The former missing-renderer boundary at `PC=0x80181C80` is now implemented:
   checked orthographic RGB5A3/material-color quads rasterize into the EFB and a
   real Windows preview displays the original license sprite. Unsupported states
-  remain explicit failures. VI scanout and a complete second frame remain open.
+  remain explicit failures. Repeated rendered loops and XFB copies now execute;
+  VI scanout remains open.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -1040,8 +1047,13 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Continue original loader callback `0x8019A6BC`, then connect actual XFB/VI
-   pixel scanout. The checked native orthographic UI renderer and Windows EFB
+1. Diagnose the next unsupported texture configuration and connect actual XFB/VI
+   pixel scanout. The original loader worker and CLZ decoder are now production-bound;
+   eight complete loops, 14 quads and nine XFB copies are covered by a separate
+   deterministic disc fixture, including observed/unobserved CPU/RAM and graphics parity.
+   Synthetic fixtures verify the production CLZ decoder's overlapping/cross-block
+   references and the empty worker's real epilogue without pretending that live
+   resource decoding has completed. The checked native orthographic UI renderer and Windows EFB
    preview now render the original license texture and fade, preserving real
    gather timing and rejecting unsupported GX profiles atomically. Pixel tests
    cover coverage, texture tiles/transparency, blending, scissor and depth.

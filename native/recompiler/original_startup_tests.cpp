@@ -5,6 +5,7 @@
 #include "native_exi_bus.h"
 #include "native_si_bus.h"
 #include "native_sram.h"
+#include "clz_image.h"
 
 #include <chrono>
 #include <algorithm>
@@ -33,6 +34,56 @@ __attribute__((noinline))
 #endif
 std::unique_ptr<PpcState> StartupFixture(const DolImage& image) {
     return std::make_unique<PpcState>(CreateOriginalStartupState(image));
+}
+
+void TestProductionClz(const DolImage& image) {
+    auto storage = StartupFixture(image);
+    auto& state = *storage;
+    NativeDispatcher dispatcher;
+    RegisterOriginalStartup(dispatcher, state);
+    constexpr uint32_t source = 0x80400000u, destination = 0x80800000u;
+    const std::array<std::vector<uint8_t>, 2> inputs = {{
+        {'C', 'L', 'Z', 0, 0, 0, 0, 19, 0, 0, 0, 0, 0, 0, 0, 19, 2, 'x', 255, 255},
+        {'C', 'L', 'Z', 0, 0, 0, 0, 4, 0, 0, 0, 32, 0, 0, 0, 1, 0, 'z',
+         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 1, 255, 240}
+    }};
+    for (const auto& input : inputs) {
+        const auto expected = DecodeClz(input, 4096);
+        const auto sourceOffset = ppc_memory_offset(state, source, input.size());
+        std::copy(input.begin(), input.end(), state.memory.begin() + sourceOffset);
+        const auto output = ppc_memory_offset(state, destination, expected.size());
+        std::fill_n(state.memory.begin() + output - 1, expected.size() + 2, 0xa5);
+        state.gpr[1] = 0x8035cfa0u;
+        state.gpr[3] = source;
+        state.lr = 0x80003000u;
+        dispatcher.Execute(state, 0x801782f4u);
+        Require(state.gpr[3] == expected.size(), "Production-bound original CLZ size getter differs.");
+        for (unsigned reg = 14; reg < 32; ++reg) state.gpr[reg] = 0x12340000u + reg;
+        state.gpr[3] = destination;
+        state.gpr[4] = source;
+        state.lr = 0x80003000u;
+        dispatcher.Execute(state, 0x8017837cu);
+        Require(state.gpr[3] == expected.size() && state.gpr[1] == 0x8035cfa0u &&
+                    std::equal(expected.begin(), expected.end(), state.memory.begin() + output) &&
+                    state.memory[output - 1] == 0xa5 && state.memory[output + expected.size()] == 0xa5 &&
+                    std::equal(input.begin(), input.end(), state.memory.begin() + sourceOffset) &&
+                    !state.callGuest && !state.callException,
+                "Production-bound original CLZ output, guards, source or ABI differ.");
+        for (unsigned reg = 14; reg < 32; ++reg)
+            Require(state.gpr[reg] == 0x12340000u + reg, "Original CLZ decoder corrupted a nonvolatile register.");
+    }
+    constexpr uint32_t worker = 0x80410000u;
+    ppc_write_u32(state, worker + 4, 0);
+    ppc_write_u32(state, worker + 8, 0);
+    ppc_write_u8(state, worker + 0x414, 1);
+    state.gpr[3] = worker;
+    state.lr = 0x80003000u;
+    dispatcher.Execute(state, 0x8019a6bcu);
+    Require(state.gpr[3] == 0 && state.gpr[1] == 0x8035cfa0u &&
+                ppc_read_u8(state, worker + 0x414) == 0,
+            "Original empty CLZ worker did not clear its active flag and return through its real epilogue.");
+    for (unsigned reg = 14; reg < 32; ++reg)
+        Require(state.gpr[reg] == 0x12340000u + reg, "Original CLZ worker corrupted a nonvolatile register.");
 }
 
 uint32_t VerifyOriginalSceneLink(const PpcState& state, const std::vector<uint8_t>& bytes,
@@ -258,6 +309,7 @@ int main(int argc, char** argv) {
         RequireFailure([&] { LoadOriginalUsDol(argv[0]); },
                        "Production DOL loader accepted a nonmatching executable.");
         const auto image = LoadOriginalUsDol(argv[1]);
+        TestProductionClz(image);
         DolFixtures fixtures(argv[1]);
         std::ifstream source(argv[1], std::ios::binary);
         Require(static_cast<bool>(source), "Could not read fixture source DOL.");
@@ -2023,6 +2075,78 @@ int main(int argc, char** argv) {
                             observedVi.writes == plainVi.writes && observedVi.resets == plainVi.resets &&
                             observedVi.clockStarted == plainVi.clockStarted,
                         "First-loop observation changed VI timing, interrupts or framebuffer register state.");
+                {
+                    auto sustained = StartupFixture(image);
+                    InstallOriginalStartupDisc(*sustained, disc);
+                    sustained->pcm.emplace();
+                    uint64_t ticks = 1000000, frames = 0;
+                    bindPcmTest(*sustained, ticks, frames);
+                    unsigned entries = 0, workers = 0;
+                    size_t blocks = 0;
+                    std::vector<uint32_t> copiedBuffers;
+                    uint64_t copies = 0;
+                    const auto sustainedResult = RunOriginalStartup(dispatcher, *sustained, 50000000, 128,
+                        [&](uint32_t pc) {
+                            ++blocks;
+                            if (pc == 0x8019a6bcu) ++workers;
+                            const auto& gx = *sustained->graphics;
+                            if (gx.efb->copies != copies) {
+                                copies = gx.efb->copies;
+                                if (gx.draws >= 2) {
+                                    const auto& copy = gx.efb->lastCopy.value();
+                                    Require(copy.width == 640 && copy.height == 448 && copy.stride == 1280 &&
+                                                copy.undefinedPixels == 0,
+                                            "Sustained original rendering copied an invalid or undefined game framebuffer.");
+                                    copiedBuffers.push_back(copy.address);
+                                }
+                            }
+                            if (pc == 0x8000ac34u && ++entries == 9) {
+                                throw std::runtime_error("Test checkpoint: eight original game loops complete.");
+                            }
+                        });
+                    std::cout << "Sustained original loops=" << sustainedResult.gameLoopIterationsCompleted
+                              << " workers started=" << workers
+                              << " quads=" << sustained->graphics->draws << " copies=" << copies
+                              << " PC=" << std::hex << sustainedResult.pc << std::dec
+                              << " reason=" << sustainedResult.reason << '\n';
+                    Require(sustainedResult.reason == "Test checkpoint: eight original game loops complete." &&
+                                sustainedResult.gameLoopIterationsCompleted == 8 &&
+                                sustainedResult.taskPassesReturned == 24 &&
+                                sustained->graphics->draws == 14 && copies == 9 &&
+                                copiedBuffers.size() == 6 && workers == 1 &&
+                                !sustained->callGuest && !sustained->callException,
+                            "Original worker startup or eight repeated rendered game loops did not complete.");
+                    Require(std::adjacent_find(copiedBuffers.begin(), copiedBuffers.end()) == copiedBuffers.end(),
+                            "Original repeated framebuffer exchange reused the same consecutive destination.");
+                    auto unobserved = StartupFixture(image);
+                    InstallOriginalStartupDisc(*unobserved, disc);
+                    unobserved->pcm.emplace();
+                    uint64_t plainTime = 1000000, plainSubmitted = 0;
+                    bindPcmTest(*unobserved, plainTime, plainSubmitted);
+                    const auto unobservedResult = RunOriginalStartup(dispatcher, *unobserved, blocks - 1);
+                    const auto& a = *sustained->graphics;
+                    const auto& b = *unobserved->graphics;
+                    Require(unobservedResult.stop == OriginalStartupStop::Budget &&
+                                unobservedResult.pc == sustainedResult.pc &&
+                                ticks == plainTime && frames == plainSubmitted &&
+                                sustained->memory == unobserved->memory &&
+                                std::equal(std::begin(sustained->gpr), std::end(sustained->gpr), std::begin(unobserved->gpr)) &&
+                                sustained->fpr == unobserved->fpr && sustained->fpscr == unobserved->fpscr &&
+                                sustained->cr == unobserved->cr && sustained->xer == unobserved->xer &&
+                                sustained->lr == unobserved->lr && sustained->ctr == unobserved->ctr &&
+                                ppc_read_msr(*sustained) == ppc_read_msr(*unobserved),
+                            "Sustained render/loader observation changed original CPU/RAM or timing.");
+                    Require(a.cp == b.cp && a.bp == b.bp && a.xf == b.xf && a.fifo == b.fifo &&
+                                a.commands == b.commands && a.gathered == b.gathered &&
+                                a.draws == b.draws && a.rasterizedPixels == b.rasterizedPixels &&
+                                a.efb->color == b.efb->color && a.efb->depth == b.efb->depth &&
+                                a.efb->defined == b.efb->defined && a.efb->copies == b.efb->copies &&
+                                a.efb->clears == b.efb->clears &&
+                                sustained->video->registers == unobserved->video->registers &&
+                                sustained->video->elapsedTicks == unobserved->video->elapsedTicks &&
+                                sustained->video->fields == unobserved->video->fields,
+                            "Sustained render/loader observation changed original graphics effects.");
+                }
                 auto failedScene = CreateOriginalStartupState(image);
                 InstallOriginalStartupDisc(failedScene, disc);
                 failedScene.pcm.emplace();
