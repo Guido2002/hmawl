@@ -64,6 +64,13 @@ struct OriginalStartupResult {
     uint32_t constructorsReturned = 0;
     uint32_t startupObjectsReturned = 0;
     uint32_t resourceReadNotifications = 0;
+    uint32_t clzDecodesStarted = 0;
+    uint32_t clzDecodesCompleted = 0;
+    uint32_t clzSource = 0;
+    uint32_t clzDestination = 0;
+    uint32_t clzExpectedBytes = 0;
+    uint32_t clzProducedBytes = 0;
+    uint64_t clzDecoderBlockEntries = 0;
 };
 
 DolImage LoadOriginalUsDol(const std::filesystem::path& path);

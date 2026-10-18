@@ -143,6 +143,8 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
     OriginalStartupResult result{};
     bool sceneRegistered = false;
     bool loopTailReturned = false;
+    bool clzActive = false;
+    uint32_t clzStack = 0;
     uint32_t sceneModule = 0;
     const auto finish = [&](OriginalStartupStop stop, const std::string& reason) {
         if (sceneRegistered) {
@@ -161,6 +163,28 @@ OriginalStartupResult RunOriginalStartup(NativeDispatcher& dispatcher, PpcState&
     };
     try {
         dispatcher.Execute(state, state.pc, blockBudget, maxCallDepth, [&](uint32_t pc) {
+            if (pc == 0x8017837cu && state.lr == 0x8019a750u) {
+                ++result.clzDecodesStarted;
+                result.clzSource = state.gpr[4];
+                result.clzDestination = state.gpr[3];
+                result.clzExpectedBytes = ppc_read_u32(state, result.clzSource + 4);
+                result.clzProducedBytes = 0;
+                result.clzDecoderBlockEntries = 0;
+                clzStack = state.gpr[1] - 0x30;
+                clzActive = true;
+            }
+            if (clzActive && state.gpr[1] == clzStack && state.lr == 0x8017841cu &&
+                pc >= 0x80178450u && pc <= 0x801784ecu) {
+                ++result.clzDecoderBlockEntries;
+                // The loop head is reached only after a complete literal or back-reference.
+                if (pc == 0x801784e4u)
+                    result.clzProducedBytes = state.gpr[3] - result.clzDestination;
+            }
+            if (clzActive && pc == 0x8019a750u && state.gpr[1] == clzStack + 0x30) {
+                ++result.clzDecodesCompleted;
+                result.clzProducedBytes = state.gpr[3];
+                clzActive = false;
+            }
             if (pc == 0x80003268u) result.osInitReturned = true;
             if (pc == 0x801b7cc8u) ++result.constructorsReturned;
             if (pc == 0x800032a0u) result.userInitReturned = true;
@@ -295,5 +319,15 @@ std::string DescribeOriginalStartupStop(const OriginalStartupResult& result) {
     text << "This is NOT a playable game boot; ";
     if (!result.gameLoopIterationsCompleted) text << "no complete game-loop iteration or rendered frame is verified.";
     else text << "no rendered game frame is verified.";
+    if (result.clzDecodesStarted) {
+        text << "\nOriginal CLZ worker: " << std::dec << result.clzDecodesStarted
+             << " decodes started, " << result.clzDecodesCompleted
+             << " returned; latest source=0x" << std::hex << result.clzSource
+             << " destination=0x" << result.clzDestination << std::dec
+             << ", " << result.clzProducedBytes << "/" << result.clzExpectedBytes
+             << " output bytes at completed-token boundaries, "
+             << result.clzDecoderBlockEntries << " decoder block entries."
+             << " Decoder return is not resource publication or worker completion.";
+    }
     return text.str();
 }

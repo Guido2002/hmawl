@@ -2082,6 +2082,10 @@ int main(int argc, char** argv) {
                     uint64_t ticks = 1000000, frames = 0;
                     bindPcmTest(*sustained, ticks, frames);
                     unsigned entries = 0, workers = 0;
+                    uint32_t decodeSource = 0, decodeDestination = 0, decodeStack = 0;
+                    size_t decodedBytes = 0, decodeBlocks = 0;
+                    std::vector<uint8_t> expectedDecoded;
+                    std::unique_ptr<PpcState> decodeReplay;
                     size_t blocks = 0;
                     std::vector<uint32_t> copiedBuffers;
                     uint64_t copies = 0;
@@ -2089,6 +2093,27 @@ int main(int argc, char** argv) {
                         [&](uint32_t pc) {
                             ++blocks;
                             if (pc == 0x8019a6bcu) ++workers;
+                            if (pc == 0x8017837cu && sustained->lr == 0x8019a750u) {
+                                Require(expectedDecoded.empty(), "Eight-loop fixture entered another CLZ resource.");
+                                decodeSource = sustained->gpr[4];
+                                decodeDestination = sustained->gpr[3];
+                                decodeStack = sustained->gpr[1] - 0x30;
+                                const auto offset = ppc_memory_offset(*sustained, decodeSource, 12);
+                                expectedDecoded = DecodeClz(std::vector<uint8_t>(
+                                    sustained->memory.begin() + offset, sustained->memory.end()), 24 * 1024 * 1024);
+                                decodeReplay = StartupFixture(image);
+                                decodeReplay->memory = sustained->memory;
+                            }
+                            if (!expectedDecoded.empty() && sustained->gpr[1] == decodeStack &&
+                                sustained->lr == 0x8017841cu && pc >= 0x80178450u && pc <= 0x801784ecu) {
+                                ++decodeBlocks;
+                                if (pc == 0x801784e4u) {
+                                    const size_t produced = sustained->gpr[3] - decodeDestination;
+                                    Require(produced >= decodedBytes && produced <= expectedDecoded.size(),
+                                            "Live CLZ output cursor regressed or exceeded its declared resource.");
+                                    decodedBytes = produced;
+                                }
+                            }
                             const auto& gx = *sustained->graphics;
                             if (gx.efb->copies != copies) {
                                 copies = gx.efb->copies;
@@ -2107,6 +2132,8 @@ int main(int argc, char** argv) {
                     std::cout << "Sustained original loops=" << sustainedResult.gameLoopIterationsCompleted
                               << " workers started=" << workers
                               << " quads=" << sustained->graphics->draws << " copies=" << copies
+                              << " CLZ bytes=" << decodedBytes << "/" << expectedDecoded.size()
+                              << " decoder blocks=" << decodeBlocks
                               << " PC=" << std::hex << sustainedResult.pc << std::dec
                               << " reason=" << sustainedResult.reason << '\n';
                     Require(sustainedResult.reason == "Test checkpoint: eight original game loops complete." &&
@@ -2118,6 +2145,20 @@ int main(int argc, char** argv) {
                             "Original worker startup or eight repeated rendered game loops did not complete.");
                     Require(std::adjacent_find(copiedBuffers.begin(), copiedBuffers.end()) == copiedBuffers.end(),
                             "Original repeated framebuffer exchange reused the same consecutive destination.");
+                    const auto decodedOffset = ppc_memory_offset(*sustained, decodeDestination, decodedBytes);
+                    Require(decodedBytes == 19558 && expectedDecoded.size() == 5410544 &&
+                                decodeBlocks == 41161 && std::equal(expectedDecoded.begin(),
+                                expectedDecoded.begin() + decodedBytes, sustained->memory.begin() + decodedOffset),
+                            "Live original CLZ worker made no progress or differs from the independent resource decoder.");
+                    Require(sustainedResult.clzDecodesStarted == 1 && sustainedResult.clzDecodesCompleted == 0 &&
+                                sustainedResult.clzSource == decodeSource &&
+                                sustainedResult.clzDestination == decodeDestination &&
+                                sustainedResult.clzExpectedBytes == expectedDecoded.size() &&
+                                sustainedResult.clzProducedBytes == decodedBytes &&
+                                sustainedResult.clzDecoderBlockEntries == decodeBlocks &&
+                                DescribeOriginalStartupStop(sustainedResult).find("19558/5410544 output bytes") !=
+                                    std::string::npos,
+                            "Original startup report lost the real worker's partial CLZ progress.");
                     auto unobserved = StartupFixture(image);
                     InstallOriginalStartupDisc(*unobserved, disc);
                     unobserved->pcm.emplace();
@@ -2146,6 +2187,45 @@ int main(int argc, char** argv) {
                                 sustained->video->elapsedTicks == unobserved->video->elapsedTicks &&
                                 sustained->video->fields == unobserved->video->fields,
                             "Sustained render/loader observation changed original graphics effects.");
+                    Require(sustainedResult.clzDecodesStarted == unobservedResult.clzDecodesStarted &&
+                                sustainedResult.clzDecodesCompleted == unobservedResult.clzDecodesCompleted &&
+                                sustainedResult.clzSource == unobservedResult.clzSource &&
+                                sustainedResult.clzDestination == unobservedResult.clzDestination &&
+                                sustainedResult.clzExpectedBytes == unobservedResult.clzExpectedBytes &&
+                                sustainedResult.clzProducedBytes == unobservedResult.clzProducedBytes &&
+                                sustainedResult.clzDecoderBlockEntries == unobservedResult.clzDecoderBlockEntries,
+                            "Observed and unobserved CLZ progress reports differ at the same execution boundary.");
+                    Require(bool(decodeReplay), "Live worker did not capture a resource for isolated decoder replay.");
+                    auto& replay = *decodeReplay;
+                    const auto beforeReplay = replay.memory;
+                    const auto outputOffset = ppc_memory_offset(replay, decodeDestination, expectedDecoded.size());
+                    constexpr uint32_t replayStack = 0x8035cfa0u;
+                    const auto stackOffset = ppc_memory_offset(replay, replayStack - 0x40, 0x48);
+                    replay.gpr[1] = replayStack;
+                    replay.gpr[3] = decodeDestination;
+                    replay.gpr[4] = decodeSource;
+                    for (unsigned reg = 14; reg < 32; ++reg) replay.gpr[reg] = 0x12340000u + reg;
+                    replay.lr = 0x80003000u;
+                    size_t replayBlocks = 0;
+                    dispatcher.Execute(replay, 0x8017837cu, 50000000, 128,
+                        [&](uint32_t) { ++replayBlocks; });
+                    Require(replay.gpr[3] == expectedDecoded.size() && replay.gpr[1] == replayStack &&
+                                replayBlocks == 15507310 &&
+                                replay.pc == 0x80003000u && !replay.callGuest && !replay.callException &&
+                                std::equal(expectedDecoded.begin(), expectedDecoded.end(),
+                                           replay.memory.begin() + outputOffset),
+                            "Isolated original decoder did not return the complete live resource with intact ABI.");
+                    for (unsigned reg = 14; reg < 32; ++reg)
+                        Require(replay.gpr[reg] == 0x12340000u + reg,
+                                "Full real-resource decode corrupted a nonvolatile register.");
+                    for (size_t offset = 0; offset < replay.memory.size(); ++offset) {
+                        if ((offset >= outputOffset && offset - outputOffset < expectedDecoded.size()) ||
+                            (offset >= stackOffset && offset - stackOffset < 0x48)) continue;
+                        Require(replay.memory[offset] == beforeReplay[offset],
+                                "Full real-resource decode changed RAM outside its output and stack frame.");
+                    }
+                    std::cout << "Isolated production CLZ replay bytes=" << expectedDecoded.size()
+                              << " blocks=" << replayBlocks << " returned with exact RAM/ABI guards.\n";
                 }
                 auto failedScene = CreateOriginalStartupState(image);
                 InstallOriginalStartupDisc(failedScene, disc);

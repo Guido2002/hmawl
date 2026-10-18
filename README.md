@@ -179,12 +179,22 @@ A separate deterministic disc fixture checks eight complete loops, 24 task passe
 14 quads and nine EFB-to-XFB copies, including six fully defined 640x448 post-draw
 copies with alternating destinations. The worker starts in this fixture; its live
 decompression completion is not yet verified there.
+The fixture now verifies 19558 actual decoded bytes of the worker's 5410544-byte
+resource against the independent CLZ reader, after 41161 decoder block entries.
+An isolated replay of the production-bound original decoder completes all 5410544
+bytes in 15507310 block entries, with exact output, nonvolatile-register/stack
+preservation and no RAM changes outside its output and stack frame.
+This proves decoder progress/correctness, not completion of the scheduled worker.
+The runner reports started/returned decodes, latest source/destination, expected
+and produced bytes at completed-token boundaries, and decoder block entries.
 The later 359x127 RGB5A3 texture's nonzero LOD limits/bias and vertices outside
 the orthographic depth range no longer cause renderer stops.
 With `--max-blocks 50000000`, a Windows production run completed 688 original loops,
 787 quads and 690 copies before exhausting the unchanged execution budget inside
 the original CLZ decoder at `0x80178458` (**exit code 4**, not a successful playable boot).
 These counts depend on host timing; this does not establish live decompression completion.
+Other Windows timings can still expose unsupported GX pipeline state before the
+budget is exhausted; no timing-independent playable boot is claimed.
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
 imports), 31 real reads totaling 8819232 bytes, original archive initialization,

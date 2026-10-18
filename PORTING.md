@@ -101,6 +101,12 @@ supported with matching, non-mipmapped filters; orthographic near/far depth clip
 replaces rejection of out-of-depth geometry. Production has reached 688 loops,
 787 quads and 690 copies before its unchanged 50-million-block budget expires
 inside the original CLZ decoder (`0x80178458`); counts depend on Windows timing.
+Live-worker verification now establishes 19558 correct output bytes of its
+5410544-byte resource during eight loops (41161 decoder block entries).
+Isolated production-decoder replay completes that same real resource in 15507310
+entries with exact output/RAM/ABI guards, without changing the normal boot path
+or increasing its budget. The Windows runner reports latest-resource CLZ progress;
+other host timings can still hit unsupported GX pipeline state.
 This visible EFB preview is not VI pixel scanout or gameplay.
 No rendered game frame is verified.
 The default one-million-block limit can expire earlier.
@@ -1050,8 +1056,12 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Trace progress/cost of the live CLZ worker within the unchanged execution budget,
-   then connect actual XFB/VI pixel scanout. The captured non-mipmapped texture
+1. Continue scheduled CLZ worker completion and diagnose timing-dependent unsupported
+   GX pipeline state, then connect actual XFB/VI pixel scanout. The live worker
+   makes verified progress; isolated replay proves its full 5410544-byte resource
+   decodes correctly in 15507310 native block entries. Production now reports
+   started/returned decodes and completed-token output progress rather than
+   treating a budget stop as evidence of a decoder hang. The captured non-mipmapped texture
    LOD limits/bias and near/far-clipped geometry now execute without renderer stops.
    The original loader worker and CLZ decoder are now production-bound;
    eight complete loops, 14 quads and nine XFB copies are covered by a separate

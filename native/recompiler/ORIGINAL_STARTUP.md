@@ -647,6 +647,32 @@ CPU/RAM, deterministic timing, GX/FIFO/EFB and VI state match an unobserved run
 at the same execution boundary. The real worker starts once in this fixture;
 completion of its live resource decompression is not claimed.
 
+The eight-loop fixture captures the actual worker's source/destination at original
+decoder entry, without changing guest registers, scheduling or output. Its 5410544-byte
+resource is independently decoded by the host CLZ reader only as a test oracle.
+After eight loops the original worker has produced 19558 matching bytes and entered
+41161 decoder blocks. Observed/unobserved runs retain identical progress counters
+as well as CPU/RAM and graphics state.
+
+An isolated fresh-state replay copies the captured RAM and calls the production-bound
+original decoder with the same source/destination. It returns all 5410544 bytes
+in exactly 15507310 native block entries, below the unchanged 50-million-block
+bound. Every output byte matches the oracle; nonvolatile registers and stack pointer
+are preserved, and every RAM byte outside the declared output and 72-byte stack
+scratch region remains unchanged. No host decoder substitutes for guest execution.
+This replay is a decoder correctness/cost test, not a resumed game boot or a
+completed live worker: flushing, freeing the compressed source, publishing the
+entry and worker exit remain separate original operations.
+
+The normal runner reports original worker decoder starts/returns and latest-resource
+source, destination, declared output size, output bytes at completed-token boundaries,
+and decoder block entries. Progress is sampled only in the original decoder's
+matching stack frame/return path, so interrupt/thread register reuse is not counted.
+It intentionally excludes an in-progress back-reference until the token completes.
+Counts reset for each latest resource; decoder returns are not worker/publication
+completion. Windows timing affects progress and can still expose unsupported
+GX pipeline state before budget exhaustion.
+
 At the earlier second-pass cleanup boundary the deterministic PCM fixture has 4210 completed DMA periods,
 673760 submitted zero frames, 4207 original handlers and 4204 original callbacks/
 command returns. CPU mail sent/consumed is 12622/12622, DSP mail 4207/4207 and
