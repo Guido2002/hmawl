@@ -212,7 +212,7 @@ void TestExplicitBoundaries() {
     Reject([&] { ppc_read_u8(state, 0xcc00100au); }, "access width");
     Reject([&] { ppc_write_u16(state, 0xcc000020u, 0); }, "reader disabled");
     Reject([&] { NativeGxSetWriteGatherAddress(state, 0); }, "WPAR");
-    Reject([&] { Send(state, {0x80, 0, 1}); }, "vertex/renderer");
+    Reject([&] { Send(state, {0x80, 0, 1}); }, "direct XY");
     Require(state.graphics->decodedCommands == 0,
             "Unsupported draw was counted as successfully consumed.");
     auto copy = State();
@@ -242,6 +242,181 @@ void TestExplicitBoundaries() {
                 std::string::npos,
             "Original WPAR instruction did not compile to checked write-gather setup.");
     Reject([&] { RecompileFunction(0x80004000, {0x7c79e3a7}); }, "WPAR");
+}
+
+PpcState RenderState() {
+    auto state = State();
+    auto& gx = *state.graphics;
+    gx.efb.emplace();
+    std::fill(gx.efb->color.begin(), gx.efb->color.end(), 0x000000ff);
+    std::fill(gx.efb->depth.begin(), gx.efb->depth.end(), 0xffffff);
+    std::fill(gx.efb->defined.begin(), gx.efb->defined.end(), 3);
+    gx.cp[0x30] = 60 << 6;
+    gx.cp[0x50] = 0x2200;
+    gx.cp[0x60] = 1;
+    gx.cp[0x70] = 0x01216006;
+    gx.bp[0] = 0x4011;
+    gx.bp[0x21] = (639 << 12) | 527;
+    gx.bp[0x40] = 0x17;
+    gx.bp[0x41] = 0x4b9;
+    gx.bp[0x28] = 0x40;
+    gx.bp[0x30] = gx.bp[0x31] = 3;
+    gx.bp[0x80] = 0x190;
+    gx.bp[0x88] = (5 << 20) | (3 << 10) | 3;
+    gx.bp[0x94] = 0x800 >> 5;
+    gx.bp[0xc0] = 0x8f8af;
+    gx.bp[0xc1] = 0x8f2f0;
+    gx.bp[0xf0] = 1;
+    gx.bp[0xf3] = 0x3f0000;
+    gx.xf[0] = gx.xf[5] = gx.xf[10] = 0x3f800000;
+    gx.xf[0x1009] = 1;
+    gx.xf[0x1008] = 0x11;
+    gx.xf[0x1018] = gx.cp[0x30];
+    gx.xf[0x100e] = gx.xf[0x1010] = 0x401;
+    gx.xf[0x101a] = gx.xf[0x101b] = gx.xf[0x1020] = gx.xf[0x1022] = 0x3f800000;
+    gx.xf[0x101d] = gx.xf[0x101e] = 0x43ab0000; // GX viewport's 342-pixel bias.
+    gx.xf[0x1026] = gx.xf[0x103f] = 1;
+    gx.xf[0x1040] = 0x280;
+    gx.xf[0x1050] = 0x3d;
+    for (unsigned i = 0; i < 16; ++i) ppc_write_u16(state, 0x800 + i * 2, 0xfc00);
+    return state;
+}
+
+std::vector<uint8_t> Quad(uint32_t color = 0xffffffff) {
+    std::vector<uint8_t> bytes{0x80, 0, 4};
+    const auto word = [&](uint32_t value) {
+        for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(uint8_t(value >> shift));
+    };
+    for (unsigned i = 0; i < 4; ++i) {
+        bytes.push_back(0); bytes.push_back(i == 1 || i == 2 ? 4 : 0);
+        bytes.push_back(0); bytes.push_back(i >= 2 ? 4 : 0);
+        word(color);
+        word(i == 1 || i == 2 ? 0x3f800000 : 0);
+        word(i >= 2 ? 0x3f800000 : 0);
+    }
+    return bytes;
+}
+
+void TestQuadRenderer() {
+    auto state = RenderState();
+    const auto bytes = Quad();
+    for (unsigned i = 0; i < 64; ++i) ppc_write_u8(state, 0xcc008000, bytes[i]);
+    Require(state.graphics->draws == 0 && state.graphics->commands.size() == 64 &&
+                state.graphics->efb->color[0] == 0x000000ff,
+            "Incomplete quad was rasterized or consumed across a gather boundary.");
+    Send(state, {bytes.begin() + 64, bytes.end()});
+    Require(state.graphics->draws == 1 && state.graphics->rasterizedPixels == 16 &&
+                state.graphics->commands.empty(),
+            "Complete split quad did not rasterize exactly sixteen pixels once.");
+    for (unsigned y = 0; y < 5; ++y) {
+        for (unsigned x = 0; x < 5; ++x)
+            Require(state.graphics->efb->color[y * 640 + x] ==
+                        (x < 4 && y < 4 ? 0xff0000ff : 0x000000ff),
+                    "Quad coverage, RGB555 expansion, shared edge or viewport differs.");
+    }
+    auto blend = RenderState();
+    Send(blend, Quad(0xffffff80));
+    Require(blend.graphics->rasterizedPixels == 16 && blend.graphics->efb->color[641] == 0x800000ff &&
+                blend.graphics->efb->color[642] == 0x800000ff,
+            "Alpha blending double-shaded the quad diagonal or used the wrong factors.");
+    auto transparent = RenderState();
+    for (unsigned i = 0; i < 16; ++i) ppc_write_u16(transparent, 0x800 + i * 2, 0x0f00);
+    transparent.graphics->bp[0xf3] = 0x240000;
+    Send(transparent, Quad());
+    Require(transparent.graphics->rasterizedPixels == 0 &&
+                transparent.graphics->efb->color[0] == 0x000000ff,
+            "RGB5A3 transparent alpha test did not suppress the fragment.");
+    auto scissor = RenderState();
+    scissor.graphics->bp[0x20] = (1 << 12) | 2;
+    scissor.graphics->bp[0x21] = (2 << 12) | 3;
+    Send(scissor, Quad());
+    Require(scissor.graphics->rasterizedPixels == 4 &&
+                scissor.graphics->efb->color[1281] == 0xff0000ff &&
+                scissor.graphics->efb->color[641] == 0x000000ff,
+            "GX scissor X/Y fields or inclusive limits differ.");
+    auto depth = RenderState();
+    depth.graphics->xf[0x101f] = 0x3f800000;
+    std::fill(depth.graphics->efb->depth.begin(), depth.graphics->efb->depth.end(), 0);
+    Send(depth, Quad());
+    Require(depth.graphics->rasterizedPixels == 0, "Z24 less-equal comparison ignored destination depth.");
+    auto tiled = RenderState();
+    tiled.graphics->bp[0x88] = (5 << 20) | (3 << 10) | 7;
+    tiled.graphics->bp[0x30] = 7;
+    tiled.graphics->bp[0x80] = 0x100;
+    for (unsigned i = 0; i < 16; ++i) ppc_write_u16(tiled, 0x820 + i * 2, 0x83e0);
+    Send(tiled, Quad());
+    Require(tiled.graphics->efb->color[0] == 0xff0000ff &&
+                tiled.graphics->efb->color[3] == 0x00ff00ff,
+            "RGB5A3 tile addressing or nearest sampling crossed the wrong tile.");
+    auto a3 = RenderState();
+    for (unsigned i = 0; i < 16; ++i) ppc_write_u16(a3, 0x800 + i * 2, 0x7f00);
+    Send(a3, Quad());
+    Require(a3.graphics->efb->color[0] == 0xff0000ff, "A3RGB4 expansion differs from opaque RGB555.");
+    auto filtered = RenderState();
+    filtered.graphics->bp[0x88] = (5 << 20) | (3 << 10) | 1;
+    filtered.graphics->bp[0x30] = 1;
+    for (unsigned y = 0; y < 4; ++y) {
+        ppc_write_u16(filtered, 0x800 + y * 8, 0xfc00);
+        ppc_write_u16(filtered, 0x802 + y * 8, 0x801f);
+    }
+    Send(filtered, Quad());
+    Require(filtered.graphics->efb->color[0] == 0xff0000ff &&
+                filtered.graphics->efb->color[1] == 0xbf0040ff &&
+                filtered.graphics->efb->color[2] == 0x4000bfff &&
+                filtered.graphics->efb->color[3] == 0x0000ffff,
+            "Bilinear half-texel positions or edge clamp differ.");
+    auto wrap = RenderState();
+    wrap.graphics->bp[0x80] = 0x101;
+    // A separate texture matrix translates S by one full repeat.
+    wrap.graphics->cp[0x30] = wrap.graphics->xf[0x1018] = 30 << 6;
+    wrap.graphics->xf[120] = wrap.graphics->xf[125] = 0x3f800000;
+    wrap.graphics->xf[123] = 0x3f800000;
+    Send(wrap, Quad());
+    Require(wrap.graphics->efb->color[0] == 0xff0000ff &&
+                wrap.graphics->rasterizedPixels == 16, "Texture-matrix translation/repeat wrap differs.");
+    auto fade = RenderState();
+    auto& fg = *fade.graphics;
+    fg.cp[0x50] = 0x200; fg.cp[0x60] = 0; fg.cp[0x70] = 7;
+    fg.bp[0] = 0x4010; fg.bp[0x28] = 0;
+    fg.bp[0xc0] = 0x8fffa; fg.bp[0xc1] = 0x8ffd0;
+    fg.xf[0x100e] = fg.xf[0x1010] = 0x400;
+    fg.xf[0x1008] = 0;
+    fg.xf[0x100c] = 0x00000080; fg.xf[0x103f] = 0;
+    std::fill(fg.efb->color.begin(), fg.efb->color.end(), 0xff0000ff);
+    std::vector<uint8_t> fadeBytes{0x80, 0, 4};
+    for (unsigned i = 0; i < 4; ++i)
+        fadeBytes.insert(fadeBytes.end(), {0, uint8_t(i == 1 || i == 2 ? 4 : 0),
+                                          0, uint8_t(i >= 2 ? 4 : 0), 0, 0});
+    Send(fade, fadeBytes);
+    Require(fg.draws == 1 && fg.rasterizedPixels == 16 && fg.efb->color[641] == 0x7f0000ff,
+            "Direct XYZ/material-color fade did not blend over the textured EFB.");
+    auto culled = RenderState();
+    culled.graphics->bp[0] = 0x8011;
+    Send(culled, Quad());
+    Require(culled.graphics->draws == 1 && culled.graphics->rasterizedPixels == 0,
+            "GX front/back culling orientation differs.");
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        auto invalid = RenderState();
+        if (failure == 0) invalid.graphics->bp[0xc0] = 0;
+        if (failure == 1) invalid.graphics->bp[0x88] = 0;
+        if (failure == 2) invalid.graphics->xf[0x1020] = 0x7fc00000;
+        auto command = Quad();
+        if (failure == 3) command[2] = 3;
+        const auto before = *invalid.graphics->efb;
+        Reject([&] { Send(invalid, command); }, failure == 0 ? "TEV" :
+            failure == 1 ? "RGB5A3" : failure == 2 ? "non-finite" : "groups of four");
+        Require(invalid.graphics->efb->color == before.color && invalid.graphics->efb->depth == before.depth &&
+                    invalid.graphics->efb->defined == before.defined && invalid.graphics->draws == 0 &&
+                    invalid.graphics->decodedCommands == 0 && invalid.graphics->commands[0] == 0x80,
+                "Rejected draw mutated pixels/counters or consumed its command.");
+        if (failure == 0) {
+            invalid.graphics->bp[0xc0] = 0x8f8af;
+            ppc_write_u16(invalid, 0xcc000002, 0x11);
+            Require(invalid.graphics->draws == 1 && invalid.graphics->rasterizedPixels == 16 &&
+                        invalid.graphics->commands.empty(),
+                    "Retry did not rasterize the retained complete quad exactly once.");
+        }
+    }
 }
 
 PpcState CopyState() {
@@ -411,6 +586,7 @@ int main() {
         TestInterruptsAndReader();
         TestBurstBoundaries();
         TestExplicitBoundaries();
+        TestQuadRenderer();
         TestEfbCopies();
         TestEfbFailuresAndRetry();
     } catch (const std::exception& error) {
@@ -418,5 +594,6 @@ int main() {
         return 1;
     }
     std::cout << "Native GX FIFO RAM/gather, CP/BP/XF commands, ring wrap, interrupt sources "
-                 "and checked RGB8/Z24 EFB clear/YUYV XFB copy/undefined-pixel provenance passed. No geometry renderer ran.\n";
+                 "RGB5A3 quad pixels/coverage/blend/depth/scissor/atomic rejection, "
+                 "and checked RGB8/Z24 EFB clear/YUYV XFB copy/undefined-pixel provenance passed.\n";
 }

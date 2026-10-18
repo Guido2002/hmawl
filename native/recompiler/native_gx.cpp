@@ -1,5 +1,6 @@
 #include "native_gx.h"
 #include "ppc_state.h"
+#include "native_renderer.h"
 
 #include <stdexcept>
 
@@ -30,13 +31,17 @@ void Decode(PpcState& state, NativeGx& gx) {
                 throw std::runtime_error("Native GX XF load exceeds transform register memory.");
             }
             length = 5 + 4 * count;
+        } else if (opcode >= 0x80) {
+            const auto stride = NativeQuadVertexSize(state, opcode);
+            if (bytes.size() < 3) break;
+            length = 3 + size_t((uint32_t(bytes[1]) << 8) | bytes[2]) * stride;
         } else if (opcode != 0 && opcode != 0x48) {
-            throw std::runtime_error(opcode >= 0x80
-                ? "Native GX draw command requires a vertex/renderer backend."
-                : "Unsupported native GX FIFO opcode.");
+            throw std::runtime_error("Unsupported native GX FIFO opcode.");
         }
         if (bytes.size() < length) break;
-        if (opcode == 0x08) {
+        if (opcode >= 0x80) {
+            NativeRenderQuads(state, (length - 3) / NativeQuadVertexSize(state, opcode));
+        } else if (opcode == 0x08) {
             gx.cp[bytes[1]] = Word(bytes, 2);
         } else if (opcode == 0x10) {
             const auto address = Word(bytes, 1) & 0xffffu;

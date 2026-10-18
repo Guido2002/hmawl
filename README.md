@@ -158,16 +158,22 @@ The optional post-render callback lookup, retrace gate, original Screen framebuf
 exchange, timing update and controller sampling/publication return. Execution
 takes the original backedge and starts the second iteration with the same stack.
 The disconnected controllers remain disconnected; no host input is synthesized.
-**The second iteration now reaches the first original textured GX quad.**
+**The second iteration now renders the original textured GX quad in a Windows window.**
 All three second-loop task passes return, including timed fade interpolation.
 Six original scene render-state tasks, the resource-backed sprite and fade task
 join the kernel/camera/scene queue. The original nested resource traversal,
 paired-single transform, disc texture initialization/binding and four-vertex
 quad submission execute without replacement game code.
-With `--max-blocks 50000000`, execution stops at `PC=0x80181C80`,
-`LR=0x80181C4C`: `Native GX draw command requires a vertex/renderer backend.`
-The real FIFO retains the quad header and partial first vertex; drawing is not
-silently accepted. This is **exit code 3**, not a rendered frame or successful game boot.
+The native software renderer consumes complete FIFO primitives, transforms actual
+vertices, samples the tiled RGB5A3 disc texture and writes EFB pixels with checked
+TEV modulation, alpha/depth tests, scissor and blending. The original 431x147
+license sprite produces 63357 pixel writes. The Windows runner defaults to an
+explicitly labelled **EFB preview**, not VI scanout, when a disc is supplied.
+Use `--display off` for unattended/headless runs or `--display window` to enable it
+explicitly; close the preview window to exit after a dependency stop.
+With `--max-blocks 50000000`, the production path renders the sprite and fade, then
+currently stops at untranslated loader callback `PC=0x8019A6BC`,
+`LR=0x801B72BC` (**exit code 3**, not a successful playable boot).
 The default one-million-block safety limit can expire before this milestone.
 A deterministic disc test checks all 15170 relocation records (including deferred
 imports), 31 real reads totaling 8819232 bytes, original archive initialization,
@@ -180,9 +186,9 @@ not intro music; general voice mixing/ADPCM remains unsupported.
 Device/queue errors fail explicitly;
 hosts or library callers without a PCM backend retain the AIStartDMA dependency error.
 No ROM bytes, task-ready mail, mixed samples or task completion are fabricated.
-Draws, unsupported copy modes and texture DMA still fail
-explicitly. One complete original loop is verified, but pixel scanout, a game
-window/intro and a rendered game frame have not been verified.
+Unsupported draw profiles, copy modes and texture DMA still fail explicitly.
+One complete original loop and visible native EFB content are verified; a
+VI-scanned-out complete game frame, sustained intro and gameplay are not.
 RTC/ROM, SRAM writes, AD16 and connected EXI devices
 are not implemented; attempts to use them fail explicitly.
 The CLI creates an English/NTSC/stereo `native-console.sram` beside the input DOL

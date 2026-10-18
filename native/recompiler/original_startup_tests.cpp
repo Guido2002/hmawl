@@ -1284,6 +1284,8 @@ int main(int argc, char** argv) {
                 unsigned secondTaskPass = 0;
                 std::vector<uint32_t> secondSceneQueue, secondRenderQueue, secondRenderMethods;
                 bool secondCameraReset = false;
+                size_t integrationBlocks = 0;
+                std::optional<NativeGx> firstRenderedQuad;
                 uint32_t textureHeader = 0, textureObject = 0, quad = 0, transform = 0;
                 unsigned textureInitializations = 0, quadSubmissions = 0, fadeInterpolations = 0;
                 std::array<uint8_t, 4> fadeColor{};
@@ -1346,6 +1348,10 @@ int main(int argc, char** argv) {
                 };
                 bindPcmTest(pcmState, pcmTicks, submittedFrames);
                 const auto pcmResult = RunOriginalStartup(dispatcher, pcmState, 50000000, 128, [&](uint32_t pc) {
+                    ++integrationBlocks;
+                    if (!firstRenderedQuad && pcmState.graphics->draws != 0) firstRenderedQuad = *pcmState.graphics;
+                    if (loopEntries == 2 && pc == 0x80235d7cu && pcmState.lr == 0x8017d1e0u)
+                        throw std::runtime_error("Test checkpoint: second native quad pass complete.");
                     if (pc == 0x8000ac34u) {
                         ++loopEntries;
                         if (loopEntries == 1) loopStack = pcmState.gpr[1];
@@ -1672,9 +1678,8 @@ int main(int argc, char** argv) {
                           << " thread context returns=" << pcmState.threadContextReturns
                           << " archive handles=" << archiveHandles << '\n';
                 Require(pcmResult.stop == OriginalStartupStop::Dependency &&
-                            sceneProlog != 0 && pcmResult.pc == 0x80181c80u &&
-                            pcmResult.lr == 0x80181c4cu &&
-                            pcmResult.reason == "Native GX draw command requires a vertex/renderer backend." &&
+                            sceneProlog != 0 &&
+                            pcmResult.reason == "Test checkpoint: second native quad pass complete." &&
                             pcmResult.sceneModuleLinked && pcmResult.scenePrologEntered &&
                             pcmResult.sceneInitializationEntered && pcmResult.scenePrologReturned &&
                             pcmResult.sceneConstructorsReturned == 28 && pcmResult.systemTaskReturned &&
@@ -1786,44 +1791,42 @@ int main(int argc, char** argv) {
                 expectedRenderQueue.insert(expectedRenderQueue.begin(),
                     {0x80315534u, 0x80315558u, 0x8031557cu, 0x803155a0u, 0x803155c4u});
                 expectedRenderQueue.insert(expectedRenderQueue.begin() + 6, 0x803155e8u);
-                Require(secondSceneQueue == expectedSceneQueue && secondRenderQueue == expectedRenderQueue &&
-                            secondRenderMethods == std::vector<uint32_t>{
+                std::cout << "Second render methods:";
+                for (auto method : secondRenderMethods) std::cout << " " << std::hex << method;
+                std::cout << std::dec << '\n';
+                const std::vector<uint32_t> texturedPrefix{
                                 0x80181e7cu, 0x80181efcu, 0x80181f6cu, 0x80181f94u, 0x80181fd4u,
                                 0x8008660cu, 0x80182048u, 0x800e0f70u, 0x800e0fa4u,
-                                0x800e0f34u, 0x800e1004u, 0x800e3574u} &&
+                                0x800e0f34u, 0x800e1004u, 0x800e3574u};
+                Require(secondSceneQueue == expectedSceneQueue && secondRenderQueue == expectedRenderQueue &&
+                            secondRenderMethods.size() == 16 &&
+                            std::equal(texturedPrefix.begin(), texturedPrefix.end(), secondRenderMethods.begin()) &&
                             ppc_read_u32(pcmState, 0x803492acu) == 0xffffffffu &&
                             fadeInterpolations == 1 && textureInitializations == 1 && quadSubmissions == 1,
                         "Original second scene did not register and dispatch its complete ordered textured draw chain.");
-                const auto& draw = *pcmState.graphics;
+                Require(firstRenderedQuad.has_value(), "Original quad never reached native EFB pixels.");
+                const auto& draw = *firstRenderedQuad;
                 std::cout << "Quad registers: " << std::hex << draw.cp[0x50] << "/" << draw.cp[0x60] << "/"
                           << draw.cp[0x70] << " texture " << draw.bp[0x88] << "/" << draw.bp[0x94]
                           << " object " << ppc_read_u32(pcmState, textureObject + 8) << "/"
                           << ppc_read_u32(pcmState, textureObject + 12) << std::dec
-                          << " copies/clears " << draw.efb->copies << "/" << draw.efb->clears << '\n';
+                          << " copies/clears " << draw.efb->copies << "/" << draw.efb->clears
+                          << " draws/pixels " << draw.draws << "/" << draw.rasterizedPixels
+                          << " final " << pcmState.graphics->draws << "/" << pcmState.graphics->rasterizedPixels << '\n';
                 Require(draw.cp[0x50] == 0x2200 && draw.cp[0x60] == 1 &&
                             (draw.cp[0x70] & 0x3fe1e1ffu) == 0x01216006u &&
                             (draw.bp[0x88] & 0xffffffu) ==
                                 (ppc_read_u32(pcmState, textureObject + 8) & 0xffffffu) &&
                             (draw.bp[0x94] & 0xffffffu) ==
                                 (ppc_read_u32(pcmState, textureObject + 12) & 0xffffffu),
-                        "Original GX vertex format or texture binding differs from the rejected quad.");
-                Require(draw.commands.size() == 16 && draw.commands[0] == 0x80 &&
-                            draw.commands[1] == 0 && draw.commands[2] == 4 &&
+                        "Original GX vertex format or texture binding differs from the rendered quad.");
+                Require(draw.draws == 1 && draw.rasterizedPixels == 431 * 147 &&
+                            pcmState.graphics->draws == 1 &&
+                            pcmState.graphics->rasterizedPixels == draw.rasterizedPixels &&
                             draw.efb->copies == 3 && draw.efb->clears == 3 &&
                             ppc_read_u32(pcmState, sprite + 0x108) != 0 && quad != 0 && transform != 0,
-                        "Original four-vertex quad was not retained at the explicit unsupported renderer boundary.");
-                for (unsigned index = 0; index < 4; ++index) {
-                    const auto positionOffset = index < 2 ? 4u : 6u;
-                    const auto shift = index % 2 == 0 ? 8u : 0u;
-                    Require(draw.commands[3 + index] ==
-                                uint8_t(ppc_read_u16(pcmState, quad + positionOffset) >> shift) &&
-                                draw.commands[7 + index] ==
-                                    ppc_read_u8(pcmState, pcmResult.stack + 8 + index) &&
-                                draw.commands[11 + index] == ppc_read_u8(pcmState, quad + 0x1c + index),
-                            "Original rejected GX quad lost its signed position, RGBA or texture coordinate bytes.");
-                }
-                Require(draw.commands[15] == ppc_read_u8(pcmState, quad + 0x20) &&
-                            readFloat(transform + 0x14) == 0 && readFloat(transform + 0x18) == 0 &&
+                        "Original textured quad did not rasterize into real native EFB storage.");
+                Require(readFloat(transform + 0x14) == 0 && readFloat(transform + 0x18) == 0 &&
                             readFloat(transform + 0x1c) == 0,
                         "Original first quad has unexpected texture data or rotation.");
                 const std::array<double, 12> quadMatrix = {
@@ -1925,14 +1928,14 @@ int main(int argc, char** argv) {
                 plainPcm.pcm.emplace();
                 uint64_t plainTicks = 1000000, plainFrames = 0;
                 bindPcmTest(plainPcm, plainTicks, plainFrames);
-                const auto plainResult = RunOriginalStartup(dispatcher, plainPcm, 50000000);
+                const auto plainResult = RunOriginalStartup(dispatcher, plainPcm, integrationBlocks - 1);
                 Require(DescribeOriginalStartupStop(pcmResult).find("Verified complete original game-loop iterations: 1.") !=
                             std::string::npos &&
                             DescribeOriginalStartupStop(pcmResult).find("no complete game-loop iteration") == std::string::npos &&
                             DescribeOriginalStartupStop(pcmResult).find("no rendered game frame is verified.") != std::string::npos,
                         "Original startup report omitted the verified loop or claimed a rendered game frame.");
                 Require(plainResult.pc == pcmResult.pc && plainResult.lr == pcmResult.lr &&
-                            plainResult.reason == pcmResult.reason && plainTicks == pcmTicks &&
+                            plainResult.stop == OriginalStartupStop::Budget && plainTicks == pcmTicks &&
                             plainFrames == submittedFrames && plainPcm.memory == pcmState.memory &&
                             std::equal(std::begin(plainPcm.gpr), std::end(plainPcm.gpr), std::begin(pcmState.gpr)) &&
                             plainPcm.fpr == pcmState.fpr && plainPcm.fpscr == pcmState.fpscr &&
@@ -2002,6 +2005,7 @@ int main(int argc, char** argv) {
                             observedGx.performanceResets == plainGx.performanceResets &&
                             observedGx.bursts == plainGx.bursts && observedGx.decodedCommands == plainGx.decodedCommands &&
                             observedGx.vertexCacheInvalidations == plainGx.vertexCacheInvalidations &&
+                            observedGx.draws == plainGx.draws && observedGx.rasterizedPixels == plainGx.rasterizedPixels &&
                             observedGx.efb->color == plainGx.efb->color && observedGx.efb->depth == plainGx.efb->depth &&
                             observedGx.efb->defined == plainGx.efb->defined && observedGx.efb->copies == plainGx.efb->copies &&
                             observedGx.efb->clears == plainGx.efb->clears &&

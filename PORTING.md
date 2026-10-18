@@ -90,8 +90,9 @@ completes all three task passes and reaches the original textured draw chain.
 The scene schedules six render-state tasks, a resource-backed sprite and the
 interpolated fade. Original nested resource traversal, transform and disc texture
 binding lead to a four-vertex GX quad. With `--max-blocks 50000000`, execution
-stops explicitly at `PC=0x80181C80`, LR `0x80181C4C` because native GX drawing
-requires a vertex/renderer backend. The pending draw is retained, not discarded.
+renders the original RGB5A3 license sprite and fade into a native EFB preview.
+The production path now stops at untranslated loader callback `PC=0x8019A6BC`,
+LR `0x801B72BC`. This visible EFB preview is not VI pixel scanout or gameplay.
 No rendered game frame is verified.
 The default one-million-block limit can expire earlier.
 A deterministic disc fixture verifies all 15170 relocation records, section addresses,
@@ -823,8 +824,10 @@ queue. Full runtime scheduling and device services are still needed.
   four-vertex quad submission. Complete all six task-list passes across the two
   iterations. Verify the 16-node render queue, ordered callback prefix, real
   texture dimensions/format/address, transform and pending primitive payload.
-  Stop explicitly at `PC=0x80181C80`, LR `0x80181C4C` on the unimplemented native
-  vertex/renderer backend, without completing the second render pass or frame.
+  The former missing-renderer boundary at `PC=0x80181C80` is now implemented:
+  checked orthographic RGB5A3/material-color quads rasterize into the EFB and a
+  real Windows preview displays the original license sprite. Unsupported states
+  remain explicit failures. VI scanout and a complete second frame remain open.
 - [x] Add opt-in idle AI control readback and startup-only interrupt-disable
   writes at `0xcc006c00` (32-bit). Retain pending write-one-to-clear status,
   interrupt validity and frequency bits. Reject playback, counter-reset commands,
@@ -1037,17 +1040,16 @@ systems and the executable can be packaged without the GameCube build toolchain.
 
 ## Immediate next steps
 
-1. Implement a checked native vertex/renderer path for the actual textured quad
-   now submitted by original code. The current explicit hardware boundary is
-   `PC=0x80181C80`, LR `0x80181C4C`; the pending GX command is opcode `0x80`,
-   vertex format 0, four vertices with direct signed-16 XY, RGBA8 and float ST.
-   Preserve 32-byte FIFO burst timing and incomplete payloads, use the actual
-   CP/XF/BP state and the 431x147 RGB5A3 disc texture, and reject unsupported formats explicitly.
-   Verify resulting EFB pixels before claiming rendering; then connect actual
-   XFB pixel scanout and Windows presentation. The first complete original main-loop iteration now
+1. Continue original loader callback `0x8019A6BC`, then connect actual XFB/VI
+   pixel scanout. The checked native orthographic UI renderer and Windows EFB
+   preview now render the original license texture and fade, preserving real
+   gather timing and rejecting unsupported GX profiles atomically. Pixel tests
+   cover coverage, texture tiles/transparency, blending, scissor and depth.
+   Use `--display off` for headless runs; Windows disc runs show the EFB preview
+   by default. The first complete original main-loop iteration now
    returns through retrace gating, framebuffer exchange, timing and controller
-   publication and takes its backedge with the stack preserved. No visible
-   geometry or displayed game frame is verified.
+   publication and takes its backedge with the stack preserved. Visible native
+   EFB content is verified; a VI-scanned-out game frame is not.
    The genuine relocated `wlp1.rel` prolog now executes all 28 constructors,
    followed by original scene/asset loading and 31 completed DVD reads.
    Its prolog now returns with the loader queue drained; SystemTask and all three

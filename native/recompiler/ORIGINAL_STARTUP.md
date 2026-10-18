@@ -228,8 +228,9 @@ render callbacks, render queue cleanup and frame draw-sync submission now return
 The first complete main-loop iteration now executes its original post-render
 lookup, retrace gate, framebuffer exchange, timing and controller update and takes
 the backedge. The second loop completes its task passes and reaches its original
-textured quad. The current hardware dependency is `PC=0x80181C80`,
-LR `0x80181C4C`: native GX requires a vertex/renderer backend.
+textured quad. Its native renderer now produces EFB pixels and a Windows EFB
+preview. The current production dependency is untranslated loader callback
+`PC=0x8019A6BC`, LR `0x801B72BC`.
 Initial PCM buffers are original zeros; Windows acceptance is not proof of audible
 game audio, completed DSP mixing, a game window or a rendered frame.
 
@@ -409,14 +410,14 @@ scheduling return. All eight scheduled render callbacks, render queue cleanup an
 frame draw-sync submission return. The original post-render lookup, retrace gate,
 framebuffer exchange, timing and controller publication now return and execution
 takes the original backedge. One complete main-loop iteration is verified.
-The second loop reaches the first original textured quad and stops explicitly at
-`PC=0x80181C80`, LR `0x80181C4C` on the missing native vertex/renderer backend;
+The second loop renders the original textured quad and fade. Production currently
+stops at untranslated loader callback `PC=0x8019A6BC`, LR `0x801B72BC`;
 DSP PC `0x4A` waits for the next list.
 The default one-million-block limit can expire earlier.
 Actual RAM frames are submitted at 32028 Hz. Steady-clock counts depend on
 host elapsed time. Host timing can also expose other untranslated startup paths.
 No mixed or audible
-game audio, renderer or scanout is claimed.
+game audio or VI pixel scanout is claimed. The native EFB preview is not scanout.
 The inquiry result remains `0x8001` and the entire real FST is intact.
 The no-PCM deterministic regression uses 1000 ticks per clock sample when AI is stopped,
 and 8 while its sample clock is running, resolving the SDK's sub-sample calibration
@@ -583,14 +584,29 @@ callback. Complete SDK vertex-descriptor and attribute-format jump tables are
 selected rather than replacing their indirect branches. The original quad has
 direct signed-16 XY, RGBA8 and float ST attributes, format 0 and four vertices.
 
-At `PC=0x80181C80`, LR `0x80181C4C`, the actual 32-byte write-gather burst exposes
-opcode `0x80` to native GX. It fails explicitly with
-`Native GX draw command requires a vertex/renderer backend.`
-The FIFO retains the header and partial first vertex; it is not consumed as a
-successful draw. Tests verify the sorted queue and callback prefix, independently
-interpolated RGBA, disc texture dimensions/format/image address, CP/BP bindings,
-scale/translation matrix and original position/color/texture-coordinate bytes.
-The second render pass and second main-loop iteration have not completed.
+Native GX now retains incomplete opcode `0x80` packets until all four vertices
+arrive through actual 32-byte gather bursts. The checked native software renderer
+supports the observed unlit, orthographic, single-stage UI profile: direct
+signed-16 XY/RGBA8/float ST with tiled RGB5A3, or direct signed-16 XYZ with
+material color for the fade. It applies matrix/projection/viewport, culling,
+top-left coverage, scissor, texture wrap/filtering, TEV modulation, alpha/Z24
+tests and source-alpha blending. Unsupported profiles fail before any pixels
+or draw counters are changed.
+
+The disc test stops at the first second-pass cleanup dispatch, before the final
+fade packet has drained from write gathering. It verifies all 16 render callbacks,
+the 431x147 sprite's 63357 pixel writes, original texture/matrix bindings and
+CPU/RAM/hardware parity against an unobserved run stopped by the same block budget.
+Synthetic pixel tests also verify transparency, tile boundaries, coverage/seams,
+scissor, depth, blending, partial FIFO packets and atomic draw rejection.
+
+On Windows, `--display window` presents the actual EFB using GDI. This is the
+default with `--rvz`; `--display off` keeps unattended runs headless. The preview
+uses the last copy's active height and visibly marks undefined EFB pixels.
+It remains open after execution stops; close it to exit. The original license
+screen has been visually verified in that window. The production path flushes
+both sprite and fade, then reaches untranslated loader callback `0x8019A6BC`.
+This preview does not claim VI framebuffer scanout or a complete playable boot.
 
 At this boundary the deterministic PCM fixture has 4210 completed DMA periods,
 673760 submitted zero frames, 4207 original handlers and 4204 original callbacks/
@@ -602,14 +618,14 @@ CPU/RAM/PCM/DSP/interrupt parity is retained and GX/FIFO/EFB/XFB plus VI
 register/timing parity is explicitly checked through this completed iteration.
 The original first loop is complete, not a rendered scene. No runtime PPC decoder or
 replacement linker is involved in the original startup path.
-An independent `BUILD_TESTING=OFF` Windows build reaches the same dependency;
+An independent `BUILD_TESTING=OFF` Windows build is used to verify the production path;
 production execution does not depend on the test generator or fixture bindings.
 General voice processing/
 ADPCM remains an audio dependency, not a reason to substitute a replacement mixer.
 The native loader, task startup, initial command output/completion and Windows PCM
 backend are present.
-Completion of original game initialization, geometry/texture rendering and XFB pixel scanout
-are still required for a real displayed frame; Screen return alone does not establish one.
+Further original scene progression and XFB/VI pixel scanout are still required
+for a complete displayed game frame; EFB preview alone does not establish one.
 Generated translation registration uses non-inlined batches
 of at most 64 regular bindings (plus the console binding in the final batch), avoiding
 MSVC's oversized temporary stack frames without increasing the executable stack.
@@ -722,7 +738,8 @@ Copy precedes optional clear; original color/depth update masks determine which
 source components become defined. Scaling, gamma changes, field/half copies,
 other pixel formats, filter overflow, textures and AA remain explicit failures.
 This limited conversion profile has not been certified as console-bit-exact for
-arbitrary filtering/color inputs and does not implement scanout or geometry.
+arbitrary filtering/color inputs. Scanout remains separate; geometry is now
+implemented by the bounded orthographic UI renderer described above.
 The entire request, EFB dimensions, mapped destination and FIFO non-overlap are
 validated before modifying guest RAM or pixels.
 

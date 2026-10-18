@@ -1,6 +1,7 @@
 #include "original_startup.h"
 #include "native_sram.h"
 #include "native_windows_audio.h"
+#include "native_windows_video.h"
 
 #include <charconv>
 #include <iostream>
@@ -22,17 +23,19 @@ size_t ParseLimit(const std::filesystem::path& text) {
 
 template <typename Character>
 int RunCli(int argc, Character** argv) {
-    if (argc < 3 || argc > 11 || (argc & 1) == 0 ||
+    if (argc < 3 || argc > 13 || (argc & 1) == 0 ||
         std::filesystem::path(argv[1]) != "--original-startup") {
         std::cerr << "Usage: hmawl_original_startup --original-startup <USA-main.dol>"
                      " [--max-blocks <count>] [--max-depth <count>] [--sram <64-byte-profile>]"
-                     " [--rvz <USA-disc.rvz>]\n";
+                     " [--rvz <USA-disc.rvz>] [--display <window|off>]\n";
         return 2;
     }
     try {
         size_t blocks = 1000000;
         size_t depth = 128;
         bool sawBlocks = false, sawDepth = false, sawSram = false;
+        bool sawDisplay = false;
+        bool showWindow = false;
         std::filesystem::path rvzPath;
         auto sramPath = std::filesystem::path(argv[2]).parent_path() / "native-console.sram";
         for (int i = 3; i < argc; i += 2) {
@@ -49,6 +52,11 @@ int RunCli(int argc, Character** argv) {
             } else if (option == "--rvz" && rvzPath.empty()) {
                 rvzPath = argv[i + 1];
                 if (rvzPath.empty()) throw std::runtime_error("Native RVZ disc path must not be empty.");
+            } else if (option == "--display" && !sawDisplay) {
+                const auto value = std::filesystem::path(argv[i + 1]).string();
+                if (value != "window" && value != "off") throw std::runtime_error("Display must be window or off.");
+                showWindow = value == "window";
+                sawDisplay = true;
             } else {
                 throw std::runtime_error("Unknown or repeated startup option: " + option);
             }
@@ -63,6 +71,10 @@ int RunCli(int argc, Character** argv) {
         BindNativeSram(state, LoadOrCreateNativeSram(sramPath));
 #ifdef _WIN32
         BindNativeWindowsPcm(state);
+        if (!sawDisplay) showWindow = bool(disc);
+        std::unique_ptr<NativeWindowsVideo> video;
+#else
+        if (showWindow) throw std::runtime_error("Native window presentation requires Windows.");
 #endif
         NativeDispatcher dispatcher;
         RegisterOriginalStartup(dispatcher, state);
@@ -70,7 +82,7 @@ int RunCli(int argc, Character** argv) {
                      "using compiled native blocks only.\n"
                      "Profile: loader IR/DR, EE disabled, coherent RAM, idle opt-in "
                      "PI/MI/DSP/AI/EXI/SI, native CP/PE and checked GX register-command FIFO "
-                     "(non-AA RGB8 EFB/XFB copy/clear; draw/texture DMA unimplemented), native NTSC VI timing/configuration/interrupts "
+                     "(orthographic RGB5A3 UI quads, non-AA RGB8 EFB/XFB copy/clear; texture DMA unimplemented), native NTSC VI timing/configuration/interrupts "
                      "(pixel scanout unimplemented), cold PI reset, 24 MiB RAM BAT profile, disconnected digital cable, "
                      "empty memory-card slots/SP1 and disconnected controllers, native console "
                      "(bounded strings/32-bit integers), persisted SRAM reads (writes/RTC/ROM unimplemented); "
@@ -85,9 +97,22 @@ int RunCli(int argc, Character** argv) {
                          "checked read/inquiry DMA, original DVD interrupts and DEC/alarm delivery.\n";
         }
         uint64_t pcmHandlers = 0, pcmCallbacks = 0;
+        uint64_t observedBlocks = 0;
+#ifdef _WIN32
+        uint64_t displayedDraws = 0;
+#endif
         const auto result = RunOriginalStartup(dispatcher, state, blocks, depth, [&](uint32_t pc) {
             if (pc == 0x801c1bc0u) ++pcmHandlers;
             if (pc == 0x801f2ab8u) ++pcmCallbacks;
+#ifdef _WIN32
+            if (showWindow && state.graphics && state.graphics->draws != displayedDraws) {
+                if (!video) video = std::make_unique<NativeWindowsVideo>();
+                displayedDraws = state.graphics->draws;
+                video->Present(state.graphics->efb.value());
+            }
+            if ((++observedBlocks % 4096) == 0 && video && !video->Pump())
+                throw std::runtime_error("Native preview closed by user.");
+#endif
         });
         std::cerr << DescribeOriginalStartupStop(result) << '\n';
         if (state.dspHardware) {
@@ -133,7 +158,8 @@ int RunCli(int argc, Character** argv) {
             std::cerr << "Native GX: " << gx.bursts << " actual 32-byte FIFO bursts, "
                       << gx.decodedCommands << " decoded register/NOP commands, "
                       << gx.commands.size() << " pending command bytes, "
-                      << gx.gathered.size() << " gathered bytes. No rendered frame.\n";
+                      << gx.gathered.size() << " gathered bytes, " << gx.draws << " quads, "
+                      << gx.rasterizedPixels << " rasterized pixel writes.\n";
             if (gx.efb) {
                 const auto& efb = *gx.efb;
                 std::cerr << "Native EFB: " << efb.copies << " XFB RAM copies, " << efb.clears
@@ -156,6 +182,12 @@ int RunCli(int argc, Character** argv) {
                       << " SRR1=0x" << state.srr1 << std::dec << ", "
                       << state.threadContextReturns << " restored thread context(s). No pixel scanout.\n";
         }
+#ifdef _WIN32
+        if (video && video->Pump()) {
+            std::cerr << "Native EFB preview remains open; close it to exit. This is not VI scanout or a playable boot.\n";
+            video->Wait();
+        }
+#endif
         return result.stop == OriginalStartupStop::Budget ? 4 :
                result.stop == OriginalStartupStop::UnexpectedReturn ? 5 : 3;
     } catch (const std::exception& error) {

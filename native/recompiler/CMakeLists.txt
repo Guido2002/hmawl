@@ -27,6 +27,7 @@ add_library(hmawl_recompiler_core
     native_dvd_queue.cpp
     native_sram.cpp
     native_gx.cpp
+    native_renderer.cpp
     native_efb.cpp
     native_vi.cpp
     native_aram.cpp
@@ -73,8 +74,8 @@ if(HMAWL_ORIGINAL_US_DOL)
     add_executable(hmawl_original_startup original_startup_main.cpp)
     target_link_libraries(hmawl_original_startup PRIVATE hmawl_original_startup_runtime)
     if(WIN32)
-        target_sources(hmawl_original_startup PRIVATE native_windows_audio.cpp)
-        target_link_libraries(hmawl_original_startup PRIVATE winmm)
+        target_sources(hmawl_original_startup PRIVATE native_windows_audio.cpp native_windows_video.cpp)
+        target_link_libraries(hmawl_original_startup PRIVATE winmm user32 gdi32)
     endif()
     if(BUILD_TESTING)
         add_executable(hmawl_original_startup_tests original_startup_tests.cpp)
